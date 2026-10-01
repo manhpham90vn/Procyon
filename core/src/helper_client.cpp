@@ -26,7 +26,11 @@ bool HelperClient::connect(const std::string &socket_path) {
     int no_sigpipe = 1;
     setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
 
-    if (::connect(fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0) {
+    // Only a root helper is worth talking to; anything else squatting on the path is ignored.
+    uid_t peer_uid = 1;
+    gid_t peer_gid = 0;
+    if (::connect(fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 ||
+        getpeereid(fd_, &peer_uid, &peer_gid) != 0 || peer_uid != 0) {
         disconnect();
         return false;
     }

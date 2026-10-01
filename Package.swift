@@ -18,9 +18,13 @@ let package = Package(
             sources: ["src"],
             publicHeadersPath: "include",
             cxxSettings: [.headerSearchPath("src")],
-            linkerSettings: [.linkedFramework("CoreFoundation"), .linkedFramework("IOKit")]
+            linkerSettings: [
+                .linkedFramework("CoreFoundation"), .linkedFramework("IOKit"),
+                // helper: client code-signature checks and audit tokens
+                .linkedFramework("Security"), .linkedLibrary("bsm"),
+            ]
         ),
-        // Privileged helper (runs as root, launched on demand by the app).
+        // Privileged helper (runs as root: a LaunchDaemon in signed builds, else launched by the app).
         .executableTarget(
             name: "ProcyonHelper",
             dependencies: ["ProcyonCore"],

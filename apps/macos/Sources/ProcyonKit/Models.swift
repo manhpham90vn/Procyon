@@ -42,6 +42,8 @@ public struct Volume: Sendable, Hashable, Identifiable {
 public enum FullAccess: Sendable, Equatable {
     case off
     case starting
+    /// The background helper is registered but waits for the user to allow it in System Settings.
+    case needsApproval
     case on
     case failed(String)
 

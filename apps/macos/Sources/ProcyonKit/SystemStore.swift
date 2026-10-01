@@ -20,9 +20,10 @@ actor MonitorWorker {
             helperConnected: monitor.helperConnected)
     }
 
-    /// The helper needs a moment to create its socket after the password prompt closes.
-    func attachHelper(socketPath: String) async -> Bool {
-        for _ in 0..<50 {
+    /// The helper needs a moment to create its socket after the password prompt closes, and launchd
+    /// a moment to start the daemon.
+    func attachHelper(socketPath: String, attempts: Int = 50) async -> Bool {
+        for _ in 0..<attempts {
             if monitor.attachHelper(socketPath: socketPath) { return true }
             try? await Task.sleep(for: .milliseconds(100))
         }
@@ -72,6 +73,10 @@ public final class SystemStore {
     public private(set) var hasSample = false
     /// Whether restricted (system-owned) processes are read through the privileged helper.
     public private(set) var fullAccess: FullAccess = .off
+    /// Signed builds keep the helper as an approved background item; others ask for a password each launch.
+    public let usesBackgroundHelper = HelperDaemon.isAvailable
+    /// Whether the background helper is registered, so it can be removed from Settings.
+    public private(set) var backgroundHelperRegistered = false
 
     public var viewMode: ViewMode {
         didSet { if viewMode != oldValue { defaults.set(viewMode.rawValue, forKey: Keys.viewMode); rebuild() } }
@@ -105,6 +110,7 @@ public final class SystemStore {
     private enum Keys {
         static let interval = "refreshInterval"
         static let viewMode = "processViewMode"
+        static let fullAccess = "fullAccessEnabled"
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -123,6 +129,7 @@ public final class SystemStore {
     public func start() {
         guard loop == nil else { return }
         restart()
+        resumeFullAccess()
     }
 
     public func stop() {
@@ -137,9 +144,14 @@ public final class SystemStore {
         sortDescending = descending
     }
 
-    /// Asks for an administrator password and starts the privileged helper.
+    /// Registers the background helper (signed builds) or asks for an administrator password and
+    /// starts the helper for this session (development builds).
     public func enableFullAccess() async {
         guard fullAccess != .starting, !fullAccess.isOn else { return }
+        if usesBackgroundHelper {
+            await enableBackgroundHelper()
+            return
+        }
         fullAccess = .starting
         let socketPath = HelperLauncher.makeSocketPath()
         do {
@@ -156,13 +168,71 @@ public final class SystemStore {
         await refreshNow()
     }
 
-    /// Disconnects; the helper exits on its own.
+    /// Disconnects; the helper exits on its own. A registered background helper stays approved.
     public func disableFullAccess() {
+        defaults.set(false, forKey: Keys.fullAccess)
         guard fullAccess.isOn else { fullAccess = .off; return }
         fullAccess = .off
         Task {
             await worker.detachHelper()
             await refreshNow()
+        }
+    }
+
+    /// Unregisters the background helper; turning full access on again asks for approval again.
+    public func removeBackgroundHelper() async {
+        disableFullAccess()
+        do {
+            try await HelperDaemon.unregister()
+        } catch {
+            fullAccess = .failed("Couldn't remove the helper. \(error.localizedDescription)")
+        }
+        backgroundHelperRegistered = HelperDaemon.state != .notRegistered
+    }
+
+    /// Opens System Settings where the user allows the background helper.
+    public func openHelperApproval() { HelperDaemon.openApproval() }
+
+    private func enableBackgroundHelper() async {
+        fullAccess = .starting
+        defaults.set(true, forKey: Keys.fullAccess)
+        let state: HelperDaemon.State
+        do {
+            state = try HelperDaemon.register()
+        } catch {
+            fullAccess = .failed("Couldn't register the helper. \(error.localizedDescription)")
+            return
+        }
+        backgroundHelperRegistered = true
+        switch state {
+        case .enabled: await attachBackgroundHelper()
+        case .requiresApproval:
+            fullAccess = .needsApproval
+            HelperDaemon.openApproval()
+        case .notRegistered: fullAccess = .failed("The helper isn't registered.")
+        }
+    }
+
+    private func attachBackgroundHelper() async {
+        fullAccess = .starting
+        guard await worker.attachHelper(socketPath: HelperDaemon.socketPath) else {
+            fullAccess = .failed("The helper didn't answer.")
+            return
+        }
+        fullAccess = .on
+        await refreshNow()
+    }
+
+    /// Reconnects at launch when the user left full access on and the helper is still approved.
+    private func resumeFullAccess() {
+        guard usesBackgroundHelper else { return }
+        let state = HelperDaemon.state
+        backgroundHelperRegistered = state != .notRegistered
+        guard defaults.bool(forKey: Keys.fullAccess) else { return }
+        switch state {
+        case .enabled: Task { await attachBackgroundHelper() }
+        case .requiresApproval: fullAccess = .needsApproval
+        case .notRegistered: break  // removed in System Settings
         }
     }
 
@@ -220,9 +290,17 @@ public final class SystemStore {
         topCPU = tick.topCPU
         topMemory = tick.topMemory
         hasSample = true
-        if fullAccess.isOn && !tick.helperConnected { fullAccess = .failed("The helper stopped responding.") }
+        if fullAccess.isOn && !tick.helperConnected { await reconnectHelper() }
+        // The user may allow the helper in System Settings at any moment.
+        if fullAccess == .needsApproval, ticks % 2 == 0, HelperDaemon.state == .enabled { await attachBackgroundHelper() }
         if ticks % 10 == 0 { volumes = await worker.volumes() }
         ticks += 1
+    }
+
+    /// launchd restarts the background helper on demand (after an app update, for instance).
+    private func reconnectHelper() async {
+        if usesBackgroundHelper, await worker.attachHelper(socketPath: HelperDaemon.socketPath, attempts: 10) { return }
+        fullAccess = .failed("The helper stopped responding.")
     }
 
     private func rebuild() {

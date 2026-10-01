@@ -337,13 +337,21 @@ struct FullAccessBanner: View {
                 symbol: "exclamationmark.triangle.fill", title: "Full access stopped", message: message,
                 actionTitle: "Try Again", tone: .warning
             ) { Task { await store.enableFullAccess() } }
+        case .needsApproval:
+            ActionBanner(
+                symbol: "lock.shield.fill", title: "Allow the Procyon helper",
+                message:
+                    "Turn on Procyon in System Settings → General → Login Items. Procyon connects as soon as you do, and won't ask again.",
+                actionTitle: "Open System Settings"
+            ) { store.openHelperApproval() }
         case .off, .starting:
             if restricted > 0 {
                 ActionBanner(
                     symbol: "lock.shield.fill",
                     title: "\(restricted) system processes are locked",
-                    message:
-                        "Their CPU, memory and disk usage need administrator access. A small helper runs only while Procyon is open.",
+                    message: store.usesBackgroundHelper
+                        ? "Their CPU, memory and disk usage need administrator access. Allow the Procyon helper once and it stays available."
+                        : "Their CPU, memory and disk usage need administrator access. A small helper runs only while Procyon is open.",
                     actionTitle: store.fullAccess == .starting ? "Waiting…" : "Unlock Full Access",
                     isBusy: store.fullAccess == .starting
                 ) { Task { await store.enableFullAccess() } }

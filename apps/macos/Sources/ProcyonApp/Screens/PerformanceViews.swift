@@ -216,7 +216,7 @@ struct NetworkView: View {
 
             if !store.capabilities.contains(.processNetwork) {
                 InfoBanner(
-                    "Per-app network usage isn't available on macOS without a privileged helper, so Procyon hides it instead of showing estimates."
+                    "Procyon doesn't measure network usage per app on macOS yet, so it hides it instead of showing estimates. Full access doesn't change this."
                 )
             }
         }
