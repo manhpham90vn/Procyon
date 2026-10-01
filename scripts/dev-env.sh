@@ -1,5 +1,7 @@
 # Sourced by the format/lint scripts: locates tools and lists the files they work on.
 # shellcheck shell=bash
+# Variables here are consumed by the scripts that source this file.
+# shellcheck disable=SC2034
 
 find_tool() {
     # Homebrew's keg-only LLVM provides clang-format/clang-tidy when they aren't on PATH.

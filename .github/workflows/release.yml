@@ -22,7 +22,7 @@ permissions:
   contents: write
 
 env:
-  XCODE_VERSION: "27"  # keep in sync with ci.yml
+  XCODE_VERSION: "27.0"  # keep in sync with ci.yml
 
 concurrency:
   group: release-${{ github.ref }}
@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     env:
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
