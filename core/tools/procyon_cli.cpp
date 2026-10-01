@@ -72,9 +72,10 @@ int main(int argc, char **argv) {
             const pc_row &row = rows[r];
             const char *name = row.process_index >= 0 ? snap->processes[row.process_index].name : row.group_name;
             if (row.depth > 1) continue;
-            std::printf("%*s%-40s pid %-6d cpu %6.1f%% mem %8.1f MB  (%d procs)\n", row.depth * 2, "", name,
-                        row.process_index >= 0 ? snap->processes[row.process_index].pid : row.group_pid,
-                        row.cpu_percent, row.memory_bytes / 1048576.0, row.process_count);
+            std::printf(
+                "%*s%-40s pid %-6d cpu %6.1f%% mem %8.1f MB  net rx %9.0f tx %9.0f B/s  (%d procs)\n", row.depth * 2,
+                "", name, row.process_index >= 0 ? snap->processes[row.process_index].pid : row.group_pid,
+                row.cpu_percent, row.memory_bytes / 1048576.0, row.net_rx_bps, row.net_tx_bps, row.process_count);
         }
     }
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();

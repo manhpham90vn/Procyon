@@ -4,12 +4,15 @@ import Observation
 /// Owns the core monitor; all calls into C happen on this actor, off the main thread.
 actor MonitorWorker {
     private let monitor = Monitor()
+    private let hasProcessNetwork = Monitor.capabilities.contains(.processNetwork)
 
     struct Tick: Sendable {
         var sample: SystemSample
         var rows: [ProcessRow]
         var topCPU: [ProcessRow]
         var topMemory: [ProcessRow]
+        var topDisk: [ProcessRow]
+        var topNetwork: [ProcessRow]
         var helperConnected: Bool
     }
 
@@ -17,7 +20,7 @@ actor MonitorWorker {
         let sample = monitor.refresh()
         return Tick(
             sample: sample, rows: monitor.buildView(query), topCPU: top(.cpu), topMemory: top(.memory),
-            helperConnected: monitor.helperConnected)
+            topDisk: topDisk(), topNetwork: topNetwork(), helperConnected: monitor.helperConnected)
     }
 
     /// The helper needs a moment to create its socket after the password prompt closes, and launchd
@@ -50,8 +53,25 @@ actor MonitorWorker {
     func endTree(pid: Int32) -> EndResult { monitor.endTree(pid: pid) }
 
     private func top(_ column: ProcessColumn) -> [ProcessRow] {
-        monitor.buildView(.init(mode: .grouped, column: column, descending: true, filter: "", limit: 6))
+        monitor.buildView(.init(mode: .grouped, column: column, descending: true, filter: "", limit: SystemStore.topCount))
             .filter { $0.depth == 0 }
+    }
+
+    /// Busiest apps by read plus write; the core sorts by one direction, so merge both.
+    private func topDisk() -> [ProcessRow] {
+        merged(top(.diskRead) + top(.diskWrite), by: \.diskTotal)
+    }
+
+    /// Busiest apps by download plus upload.
+    private func topNetwork() -> [ProcessRow] {
+        guard hasProcessNetwork else { return [] }
+        return merged(top(.networkReceive) + top(.networkSend), by: \.networkTotal)
+    }
+
+    private func merged(_ rows: [ProcessRow], by total: KeyPath<ProcessRow, Double>) -> [ProcessRow] {
+        var seen = Set<String>()
+        let active = rows.filter { $0[keyPath: total] > 0 && seen.insert($0.id).inserted }
+        return Array(active.sorted { $0[keyPath: total] > $1[keyPath: total] }.prefix(SystemStore.topCount))
     }
 }
 
@@ -60,6 +80,8 @@ actor MonitorWorker {
 @Observable
 public final class SystemStore {
     public static let refreshIntervals: [Double] = [0.5, 1, 2, 5]
+    /// Length of the "top apps" lists.
+    public nonisolated static let topCount = 10
 
     public let info: SystemInfo
     public let capabilities: Capabilities
@@ -69,8 +91,16 @@ public final class SystemStore {
     public private(set) var rows: [ProcessRow] = []
     public private(set) var topCPU: [ProcessRow] = []
     public private(set) var topMemory: [ProcessRow] = []
+    /// Apps reading or writing the disk right now.
+    public private(set) var topDisk: [ProcessRow] = []
+    /// Empty without `Capabilities.processNetwork` or while nothing uses the network.
+    public private(set) var topNetwork: [ProcessRow] = []
     public private(set) var volumes: [Volume] = []
     public private(set) var hasSample = false
+    /// A row the Processes screen should reveal and select once it shows (set by `showInProcesses`).
+    public var focusedRow: ProcessRow?
+    /// The app kept at the top of Processes, in every view, above the sorted rows.
+    public var pinnedAppID: String?
     /// Whether restricted (system-owned) processes are read through the privileged helper.
     public private(set) var fullAccess: FullAccess = .off
     /// Signed builds keep the helper as an approved background item; others ask for a password each launch.
@@ -79,7 +109,11 @@ public final class SystemStore {
     public private(set) var backgroundHelperRegistered = false
 
     public var viewMode: ViewMode {
-        didSet { if viewMode != oldValue { defaults.set(viewMode.rawValue, forKey: Keys.viewMode); rebuild() } }
+        didSet {
+            guard viewMode != oldValue else { return }
+            if persistsViewMode { defaults.set(viewMode.rawValue, forKey: Keys.viewMode) }
+            rebuild()
+        }
     }
     public var sortColumn: ProcessColumn {
         didSet { if sortColumn != oldValue { rebuild() } }
@@ -101,6 +135,8 @@ public final class SystemStore {
         didSet { if isPaused != oldValue { restart() } }
     }
 
+    /// Off while another screen switches the view temporarily, so the saved default stays.
+    private var persistsViewMode = true
     private let worker = MonitorWorker()
     private let defaults: UserDefaults
     private var loop: Task<Void, Never>?
@@ -142,6 +178,16 @@ public final class SystemStore {
         guard column != sortColumn || descending != sortDescending else { return }
         sortColumn = column
         sortDescending = descending
+    }
+
+    /// Asks the Processes screen to reveal and select the app `row` (a grouped row) with all its
+    /// processes: switches to the by-app view without changing the saved default, clears the search.
+    public func showInProcesses(_ row: ProcessRow) {
+        filter = ""
+        persistsViewMode = false
+        viewMode = .grouped
+        persistsViewMode = true
+        focusedRow = row
     }
 
     /// Registers the background helper (signed builds) or asks for an administrator password and
@@ -289,6 +335,8 @@ public final class SystemStore {
         if requested != query { rebuild() }
         topCPU = tick.topCPU
         topMemory = tick.topMemory
+        topDisk = tick.topDisk
+        topNetwork = tick.topNetwork
         hasSample = true
         if fullAccess.isOn && !tick.helperConnected { await reconnectHelper() }
         // The user may allow the helper in System Settings at any moment.

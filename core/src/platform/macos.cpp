@@ -90,7 +90,7 @@ bool cf_number_u64(CFDictionaryRef dict, CFStringRef key, uint64_t &out) {
 uint32_t capabilities() {
     uint32_t caps = PC_CAP_PROCESS_DISK_IO | PC_CAP_MEMORY_COMPRESSED | PC_CAP_MEMORY_PRESSURE | PC_CAP_SWAP;
     if (sysctl_value<int32_t>("hw.nperflevels") > 1) caps |= PC_CAP_HYBRID_CORES;
-    // Per-process network needs the private NetworkStatistics framework: not supported.
+    if (process_network_available()) caps |= PC_CAP_PROCESS_NETWORK;
     return caps;
 }
 

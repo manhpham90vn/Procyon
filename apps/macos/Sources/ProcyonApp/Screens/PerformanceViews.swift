@@ -44,6 +44,11 @@ struct CPUView: View {
                 ])
             }
 
+            TopAppsPanel(
+                title: "Top Apps", symbol: "flame.fill", tint: style.start, rows: store.topCPU,
+                isLoading: !store.hasSample, style: style, text: { Format.cpu($0.cpu) },
+                fraction: { ($0.cpu ?? 0) / 100 })
+
             Panel("Cores", symbol: "square.grid.3x3.fill") {
                 CoreGrid(
                     cores: s.coreUsage.indices.map { index in
@@ -126,6 +131,11 @@ struct MemoryView: View {
                 }
                 .frame(maxWidth: 340)
             }
+
+            TopAppsPanel(
+                title: "Top Apps", symbol: "memorychip.fill", tint: style.start, rows: store.topMemory,
+                isLoading: !store.hasSample, style: style, text: { Format.bytes($0.memory) },
+                fraction: { Double($0.memory ?? 0) / Double(max(s.memoryTotal, 1)) })
         }
     }
 }
@@ -167,6 +177,17 @@ struct DiskView: View {
                     StatItem("Read since boot", value: Format.bytes(s.diskReadTotal)),
                     StatItem("Written since boot", value: Format.bytes(s.diskWriteTotal)),
                 ])
+            }
+
+            let diskPeak = max(store.topDisk.map(\.diskTotal).max() ?? 0, 1)
+            TopAppsPanel(
+                title: "Top Apps", symbol: "internaldrive.fill", tint: style.start, rows: store.topDisk,
+                isLoading: !store.hasSample, style: style, emptyText: "No app is using the disk right now.",
+                fraction: { $0.diskTotal / diskPeak }
+            ) { row in
+                TopAppRates(
+                    primary: row.diskRead, secondary: row.diskWrite, primarySymbol: "arrow.down.doc",
+                    secondarySymbol: "arrow.up.doc", style: style)
             }
 
             VolumesPanel(volumes: store.volumes)
@@ -214,9 +235,20 @@ struct NetworkView: View {
                 ])
             }
 
-            if !store.capabilities.contains(.processNetwork) {
+            if store.capabilities.contains(.processNetwork) {
+                let networkPeak = max(store.topNetwork.map(\.networkTotal).max() ?? 0, 1)
+                TopAppsPanel(
+                    title: "Top Apps", symbol: "network", tint: style.start, rows: store.topNetwork,
+                    isLoading: !store.hasSample, style: style, emptyText: "No app is using the network right now.",
+                    fraction: { $0.networkTotal / networkPeak }
+                ) { row in
+                    TopAppRates(
+                        primary: row.networkReceive, secondary: row.networkSend, primarySymbol: "arrow.down",
+                        secondarySymbol: "arrow.up", style: style)
+                }
+            } else {
                 InfoBanner(
-                    "Procyon doesn't measure network usage per app on macOS yet, so it hides it instead of showing estimates. Full access doesn't change this."
+                    "Procyon couldn't read per-app network usage on this Mac, so it hides it instead of showing estimates."
                 )
             }
         }

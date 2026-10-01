@@ -12,10 +12,17 @@ struct ProcessesView: View {
     @State private var failure: String?
     @SceneStorage("processTableColumns") private var columns = TableColumnCustomization<ProcessRow>()
     @FocusState private var searchFocused: Bool
+    /// A focused table draws its selection in the accent color instead of a faint gray.
+    @FocusState private var tableFocused: Bool
+    /// Set by a view switch: select the pinned app once the rows of the new view arrive.
+    @State private var reselectPinned = false
 
     private var visibleRows: [ProcessRow] {
         // While searching, show every match.
-        store.filter.isEmpty ? store.rows.visible(isExpanded: isExpanded) : store.rows
+        let expand = { (rows: [ProcessRow]) in store.filter.isEmpty ? rows.visible(isExpanded: isExpanded) : rows }
+        guard let app = store.pinnedAppID else { return expand(store.rows) }
+        let (pinned, rest) = store.rows.pinning(appID: app)
+        return expand(pinned) + expand(rest)
     }
 
     private var selectedRow: ProcessRow? {
@@ -74,12 +81,27 @@ struct ProcessesView: View {
 
             FullAccessBanner()
 
-            table
+            ScrollViewReader { proxy in
+                table
+                    .focused($tableFocused)
+                    .onChange(of: store.focusedRow?.id, initial: true) { revealFocusedRow(proxy, final: false) }
+                    // Clearing the search rebuilds the rows; the wanted row may only appear then.
+                    .onChange(of: store.rows) {
+                        revealFocusedRow(proxy, final: true)
+                        keepPinnedSelection()
+                    }
+            }
         }
         .padding(.horizontal, Tokens.Space.xxl)
         .padding(.top, Tokens.Space.lg)
         .padding(.bottom, Tokens.Space.xl)
-        .onChange(of: store.viewMode) { toggled = [] }
+        .onChange(of: store.viewMode) {
+            toggled = []
+            // The selected app stays selected and moves to the top in the new view.
+            if let row = selectedRow { store.pinnedAppID = row.appID }
+            reselectPinned = store.pinnedAppID != nil
+        }
+        .onChange(of: selection) { unpinIfElsewhere() }
         .focusedSceneValue(\.processActions, actions)
         .confirmationDialog(
             pending?.title ?? "", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
@@ -97,11 +119,17 @@ struct ProcessesView: View {
         }
     }
 
+    private var hasNetwork: Bool { store.capabilities.contains(.processNetwork) }
+
     private var table: some View {
         let memoryTotal = Double(max(store.sample.memoryTotal, 1))
+        // Columns can't be conditional before macOS 14.4, so unsupported ones are hidden and locked.
+        let network: TableColumnCustomizationBehavior = hasNetwork ? [] : .visibility
         return Table(visibleRows, selection: $selection, sortOrder: sortOrder, columnCustomization: $columns) {
             TableColumn("Name", value: \.sortName) { row in
-                NameCell(row: row, expanded: isExpanded(row)) { toggle(row) }
+                NameCell(
+                    row: row, expanded: isExpanded(row), pinned: isPinnedRoot(row), unpin: { store.pinnedAppID = nil }
+                ) { toggle(row) }
             }
             .width(min: 180, ideal: 250)
             .customizationID("name")
@@ -155,6 +183,28 @@ struct ProcessesView: View {
             .alignment(.trailing)
             .customizationID("diskWrite")
 
+            TableColumn("Net ↓", value: \.sortNetworkReceive) { row in
+                HeatCell(
+                    text: Format.rate(row.networkReceive), intensity: (row.networkReceive ?? 0) / 10_000_000,
+                    metric: .network, restricted: row.networkReceive == nil)
+            }
+            .width(min: 64, ideal: 78)
+            .alignment(.trailing)
+            .customizationID("networkReceive")
+            .defaultVisibility(hasNetwork ? .automatic : .hidden)
+            .disabledCustomizationBehavior(network)
+
+            TableColumn("Net ↑", value: \.sortNetworkSend) { row in
+                HeatCell(
+                    text: Format.rate(row.networkSend), intensity: (row.networkSend ?? 0) / 10_000_000,
+                    metric: .network, restricted: row.networkSend == nil)
+            }
+            .width(min: 64, ideal: 78)
+            .alignment(.trailing)
+            .customizationID("networkSend")
+            .defaultVisibility(hasNetwork ? .automatic : .hidden)
+            .disabledCustomizationBehavior(network)
+
             TableColumn("Threads", value: \.sortThreads) { row in
                 Text(Format.count(row.threads))
                     .font(Tokens.Typography.body.monospacedDigit())
@@ -164,7 +214,6 @@ struct ProcessesView: View {
             .alignment(.trailing)
             .customizationID("threads")
             .defaultVisibility(.hidden)
-            // Per-process network columns are omitted: the macOS adapter lacks PC_CAP_PROCESS_NETWORK.
         }
         .tableStyle(.inset(alternatesRowBackgrounds: false))
         .scrollContentBackground(.hidden)
@@ -185,6 +234,13 @@ struct ProcessesView: View {
             }
         }
         .cardSurface(padding: 0)
+        .onAppear {
+            // A saved layout from a session that had per-app network must not show empty columns.
+            if !hasNetwork {
+                columns[visibility: "networkReceive"] = .hidden
+                columns[visibility: "networkSend"] = .hidden
+            }
+        }
         .onKeyPress(.leftArrow) { setSelected(expanded: false) }
         .onKeyPress(.rightArrow) { setSelected(expanded: true) }
     }
@@ -222,7 +278,8 @@ struct ProcessesView: View {
     private static let columnKeys: [(ProcessColumn, PartialKeyPath<ProcessRow>)] = [
         (.name, \ProcessRow.sortName), (.pid, \ProcessRow.sortPID), (.user, \ProcessRow.sortUser),
         (.cpu, \ProcessRow.sortCPU), (.memory, \ProcessRow.sortMemory), (.diskRead, \ProcessRow.sortDiskRead),
-        (.diskWrite, \ProcessRow.sortDiskWrite), (.threads, \ProcessRow.sortThreads),
+        (.diskWrite, \ProcessRow.sortDiskWrite), (.networkReceive, \ProcessRow.sortNetworkReceive),
+        (.networkSend, \ProcessRow.sortNetworkSend), (.threads, \ProcessRow.sortThreads),
     ]
 
     private var sortOrder: Binding<[KeyPathComparator<ProcessRow>]> {
@@ -264,6 +321,50 @@ struct ProcessesView: View {
         withAnimation(.snappy(duration: Tokens.Motion.fast)) {
             if toggled.contains(row.id) { toggled.remove(row.id) } else { toggled.insert(row.id) }
         }
+    }
+
+    /// Selects, expands and scrolls to the app another screen asked for, so all its processes show.
+    /// `final`: give up if it isn't there (the app has exited).
+    private func revealFocusedRow(_ proxy: ScrollViewProxy, final: Bool) {
+        guard let wanted = store.focusedRow else { return }
+        // The switch to the by-app view rebuilds the rows asynchronously: wait for grouped rows.
+        guard store.viewMode == .grouped, store.rows.contains(where: { $0.kind == .group }) else { return }
+        guard let target = store.rows.first(where: { $0.id == wanted.id }) else {
+            if final { store.focusedRow = nil }
+            return
+        }
+        store.focusedRow = nil
+        store.pinnedAppID = target.appID
+        if target.hasChildren, !isExpanded(target) { toggle(target) }
+        selection = target.id
+        tableFocused = true
+        // After the expanded rows are laid out.
+        Task { proxy.scrollTo(target.id, anchor: .center) }
+    }
+
+    // MARK: - Pinning
+
+    /// Rows that carry the pin: the pinned app's group, processes or subtree roots.
+    private func isPinnedRoot(_ row: ProcessRow) -> Bool {
+        row.depth == 0 && store.pinnedAppID == row.appID
+    }
+
+    /// Choosing a row outside the pinned app lets the pin go.
+    private func unpinIfElsewhere() {
+        guard !reselectPinned, let app = store.pinnedAppID, let selection else { return }
+        if !store.rows.pinning(appID: app).pinned.contains(where: { $0.id == selection }) { store.pinnedAppID = nil }
+    }
+
+    /// After a view switch the app's rows have new ids (group vs processes): select its first row again.
+    private func keepPinnedSelection() {
+        guard reselectPinned, let app = store.pinnedAppID else { return }
+        // Rows from before the switch can still arrive; wait for the new view's.
+        let isGrouped = store.rows.contains { $0.kind == .group }
+        guard isGrouped == (store.viewMode == .grouped) else { return }
+        reselectPinned = false
+        guard let first = store.rows.pinning(appID: app).pinned.first else { return }
+        if store.viewMode == .grouped, first.hasChildren, !isExpanded(first) { toggle(first) }
+        selection = first.id
     }
 
     private var allExpanded: Bool {
@@ -398,6 +499,8 @@ private struct PendingAction: Identifiable {
 private struct NameCell: View {
     let row: ProcessRow
     let expanded: Bool
+    let pinned: Bool
+    let unpin: () -> Void
     let toggle: () -> Void
 
     var body: some View {
@@ -440,6 +543,20 @@ private struct NameCell: View {
                     .font(.system(size: 9))
                     .foregroundStyle(Tokens.Palette.textTertiary)
                     .help("Owned by the system. Unlock full access to read its CPU, memory and disk usage.")
+            }
+            if pinned {
+                Spacer(minLength: 0)
+                Button(action: unpin) {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Tokens.Palette.accent)
+                        .rotationEffect(.degrees(45))
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Pinned to the top in every view. Click to unpin.")
+                .accessibilityLabel("Unpin")
             }
         }
     }

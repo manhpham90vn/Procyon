@@ -66,12 +66,14 @@ struct OverviewView: View {
             .buttonStyle(.plain)
 
             HStack(alignment: .top, spacing: Tokens.Space.lg) {
-                TopList(title: "Top CPU", symbol: "flame.fill", rows: store.topCPU, metric: .cpu) { row in
-                    (Format.cpu(row.cpu), min((row.cpu ?? 0) / 100, 1))
-                }
-                TopList(title: "Top Memory", symbol: "memorychip.fill", rows: store.topMemory, metric: .memory) { row in
-                    (Format.bytes(row.memory), Double(row.memory ?? 0) / Double(max(sample.memoryTotal, 1)))
-                }
+                TopAppsPanel(
+                    title: "Top CPU", symbol: "flame.fill", rows: Array(store.topCPU.prefix(6)),
+                    isLoading: !store.hasSample, style: Metric.cpu.style, text: { Format.cpu($0.cpu) },
+                    fraction: { ($0.cpu ?? 0) / 100 })
+                TopAppsPanel(
+                    title: "Top Memory", symbol: "memorychip.fill", rows: Array(store.topMemory.prefix(6)),
+                    isLoading: !store.hasSample, style: Metric.memory.style, text: { Format.bytes($0.memory) },
+                    fraction: { Double($0.memory ?? 0) / Double(max(sample.memoryTotal, 1)) })
             }
         }
     }
@@ -164,48 +166,6 @@ private struct HeroGauge: View {
             }
             .frame(width: 86, height: 86)
             Text(title).font(Tokens.Typography.label).foregroundStyle(Tokens.Palette.textSecondary)
-        }
-    }
-}
-
-private struct TopList: View {
-    let title: String
-    let symbol: String
-    let rows: [ProcessRow]
-    let metric: Metric
-    let value: (ProcessRow) -> (String, Double)
-
-    var body: some View {
-        Panel(title, symbol: symbol) {
-            VStack(spacing: Tokens.Space.md) {
-                if rows.isEmpty {
-                    ProgressView().frame(maxWidth: .infinity, minHeight: 120)
-                }
-                ForEach(rows) { row in
-                    let (text, fraction) = value(row)
-                    HStack(spacing: Tokens.Space.sm + 2) {
-                        ProcessIcon(row: row, size: 22)
-                        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
-                            HStack {
-                                Text(row.name)
-                                    .font(Tokens.Typography.headline)
-                                    .foregroundStyle(Tokens.Palette.textPrimary)
-                                    .lineLimit(1)
-                                if row.processCount > 1 {
-                                    Text("\(row.processCount)")
-                                        .font(Tokens.Typography.caption)
-                                        .foregroundStyle(Tokens.Palette.textTertiary)
-                                }
-                                Spacer()
-                                Text(text)
-                                    .font(Tokens.Typography.headline.monospacedDigit())
-                                    .foregroundStyle(Tokens.Palette.textPrimary)
-                            }
-                            UsageBar(value: fraction, style: metric.style, height: 4)
-                        }
-                    }
-                }
-            }
         }
     }
 }

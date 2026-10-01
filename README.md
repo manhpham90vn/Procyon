@@ -11,6 +11,7 @@ core/                       C++20 core with a stable C ABI (shared by every UI)
   src/monitor.cpp             rates and deltas, C ABI
   src/view.cpp                filter, sort, group-by-app, process tree (portable)
   src/platform/macos.cpp      macOS adapter (libproc, mach, sysctl, IOKit)
+  src/platform/macos_netstat.cpp  per-process network via NetworkStatistics (dlopen'd)
   src/helper_server.cpp       privileged helper (procyon-helper), src/helper_client.cpp its client
   helper/main.c               procyon-helper entry point
   tools/procyon_cli.cpp       headless prototype and overhead measurement
@@ -67,7 +68,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 | Spec item | Status |
 | --- | --- |
-| Process list: name, PID, user, CPU, RAM, disk I/O | Done. Network per process is hidden (`PC_CAP_PROCESS_NETWORK` is unsupported on macOS). |
+| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done. Per-process network comes from the private NetworkStatistics framework (what `nettop` uses), loaded at runtime; if it is missing, `PC_CAP_PROCESS_NETWORK` is off and the columns are hidden. |
 | Optional columns with saved configuration | Done (table column customization, saved per window). |
 | Flat / by app / tree views | Done in the core (`pc_monitor_build_view`). |
 | Search, filter, sort by every column | Done. `⌘F` focuses search; sorting runs in the core. |

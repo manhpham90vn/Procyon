@@ -11,6 +11,7 @@ add_library(procyon_core STATIC
   src/helper_client.cpp
   src/helper_server.cpp
   src/platform/macos.cpp
+  src/platform/macos_netstat.cpp
 )
 target_include_directories(procyon_core PUBLIC include PRIVATE src)
 target_compile_options(procyon_core PRIVATE -Wall -Wextra)
