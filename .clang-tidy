@@ -1,0 +1,21 @@
+---
+# Bug-finding checks only; style is clang-format's job.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-signed-bitwise,
+  cert-err33-c,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.*,
+  -clang-analyzer-optin.performance.Padding,
+  performance-*,
+  -performance-enum-size,
+  misc-redundant-expression,
+  misc-unused-using-decls,
+  readability-misleading-indentation
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'core/(src|include)/.*'
+...

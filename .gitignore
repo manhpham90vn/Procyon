@@ -1,0 +1,20 @@
+.build/
+build/
+dist/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+.DS_Store
+
+# Editors / tooling
+.vscode/
+.idea/
+.cache/
+*.swp
+compile_commands.json
+__pycache__/
+
+# Release artifacts
+*.dmg
+*.zip
+*.p12
