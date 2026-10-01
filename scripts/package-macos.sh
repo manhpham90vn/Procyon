@@ -16,10 +16,10 @@ rm -f "$DMG" "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
 staging="$(mktemp -d)"
-trap 'rm -rf "$staging"' EXIT
 cp -R "$APP" "$staging/"
 ln -s /Applications "$staging/Applications"
 hdiutil create -volname "Procyon ${VERSION}" -srcfolder "$staging" -ov -format UDZO "$DMG" >/dev/null
+rm -rf "$staging"
 
 if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ]; then
     codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
@@ -32,7 +32,7 @@ elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_
     notary_args=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
 fi
 if [ ${#notary_args[@]} -gt 0 ]; then
-    echo "Notarizing $DMG…"
+    echo "Notarizing ${DMG}..."
     xcrun notarytool submit "$DMG" "${notary_args[@]}" --wait
     xcrun stapler staple "$DMG"
 else
