@@ -49,6 +49,33 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Developer ID builds register the helper as a LaunchDaemon (SMAppService): launchd owns the socket
+# and starts the helper on demand. Ad-hoc builds can't, so the app falls back to a password prompt.
+if [ "$SIGN_IDENTITY" != "-" ]; then
+    mkdir -p "$APP/Contents/Library/LaunchDaemons"
+    cat > "$APP/Contents/Library/LaunchDaemons/dev.procyon.helper.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.procyon.helper</string>
+  <key>BundleProgram</key><string>Contents/Helpers/procyon-helper</string>
+  <key>ProgramArguments</key><array><string>procyon-helper</string><string>--daemon</string></array>
+  <key>AssociatedBundleIdentifiers</key><array><string>dev.procyon.app</string></array>
+  <key>Sockets</key>
+  <dict>
+    <key>Listener</key>
+    <dict>
+      <key>SockPathName</key><string>/var/run/dev.procyon.helper.sock</string>
+      <!-- 0666: any user may connect; the helper checks the client's signature and admin rights. -->
+      <key>SockPathMode</key><integer>438</integer>
+    </dict>
+  </dict>
+</dict>
+</plist>
+PLIST
+fi
+
 # Inside-out: helper first, then the bundle. Real identities get the hardened runtime and a
 # secure timestamp, both required for notarization.
 SIGN_FLAGS=(--force --sign "$SIGN_IDENTITY")

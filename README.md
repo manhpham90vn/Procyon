@@ -85,18 +85,31 @@ git tag v0.1.0 && git push origin v0.1.0
 ### Full access (privileged helper)
 
 The app runs as a normal user. About 160 root-owned processes stay locked (`—` with a lock icon) until the
-user clicks **Unlock Full Access** (Processes banner or Settings). Then:
+user clicks **Unlock Full Access** (Processes banner or Settings). The same `procyon-helper` binary and socket
+protocol serve two modes:
+
+**Developer ID builds (releases): background helper, approved once.**
+
+1. `HelperDaemon` registers `Contents/Library/LaunchDaemons/dev.procyon.helper.plist` with
+   `SMAppService.daemon`. macOS asks the user to allow it in System Settings → General → Login Items; the app
+   connects as soon as they do, and on every later launch without asking.
+2. launchd owns `/var/run/dev.procyon.helper.sock` and starts `procyon-helper --daemon` on the first
+   connection. The helper exits after a minute without clients.
+3. Each client must be `dev.procyon.app` signed by the helper's own team (checked via its audit token) and run
+   by an administrator. **Remove Helper** in Settings unregisters it.
+
+**Ad-hoc builds (development): password prompt per launch.** The plist is only embedded when
+`SIGN_IDENTITY` is a real identity, because `SMAppService` needs one.
 
 1. `HelperLauncher` shows the macOS password prompt (`osascript … with administrator privileges`) and starts
    `Contents/Helpers/procyon-helper` as root.
 2. The helper creates a 0600 Unix socket owned by the user and accepts only the launching app
-   (checks peer uid and `LOCAL_PEERPID`). It can only read counters and send signals, and refuses pids 0 and 1.
-3. The core (`pc_monitor_attach_helper`) asks it for restricted processes on each refresh. End Task falls back
-   to it when a signal is denied.
-4. The helper exits when the app quits, disconnects, or nobody connects within 30 seconds.
+   (checks peer uid and `LOCAL_PEERPID`).
+3. The helper exits when the app quits, disconnects, or nobody connects within 30 seconds.
 
-For a notarized release, register the same binary once with `SMAppService.daemon`, so users approve it in
-System Settings instead of typing a password every launch. The socket protocol stays the same.
+In both modes the core (`pc_monitor_attach_helper`) only talks to a root-owned peer, asks it for restricted
+processes on each refresh, and falls back to it when End Task is denied. The helper can only read counters and
+send signals, and refuses pids 0 and 1 and its client.
 
 Test without the UI: `sudo PROCYON_HELPER=$PWD/build/core/procyon-helper build/core/procyon-cli 2`.
 

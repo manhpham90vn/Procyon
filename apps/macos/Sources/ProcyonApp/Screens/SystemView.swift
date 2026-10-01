@@ -97,18 +97,26 @@ struct SettingsView: View {
                     switch store.fullAccess {
                     case .on: Label("Running", systemImage: "lock.open.fill").foregroundStyle(Tokens.Palette.success)
                     case .starting: ProgressView().controlSize(.small)
+                    case .needsApproval: Text("Waiting for approval").foregroundStyle(Tokens.Palette.warning)
                     case .failed(let message): Text(message).foregroundStyle(Tokens.Palette.warning)
                     case .off: Text("Off").foregroundStyle(.secondary)
                     }
                 }
                 if store.fullAccess.isOn {
                     Button("Turn Off Full Access") { store.disableFullAccess() }
+                } else if store.fullAccess == .needsApproval {
+                    Button("Open System Settings…") { store.openHelperApproval() }
                 } else {
                     Button("Unlock Full Access…") { Task { await store.enableFullAccess() } }
                         .disabled(store.fullAccess == .starting)
                 }
+                if store.usesBackgroundHelper && store.backgroundHelperRegistered {
+                    Button("Remove Helper", role: .destructive) { Task { await store.removeBackgroundHelper() } }
+                }
                 Text(
-                    "Reads CPU, memory and disk usage of system processes and lets you end them. The helper asks for your password, talks only to this app and quits with it."
+                    store.usesBackgroundHelper
+                        ? "Reads CPU, memory and disk usage of system processes and lets you end them. You allow the helper once in System Settings → General → Login Items; it starts only when Procyon connects and talks only to Procyon."
+                        : "Reads CPU, memory and disk usage of system processes and lets you end them. The helper asks for your password, talks only to this app and quits with it."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

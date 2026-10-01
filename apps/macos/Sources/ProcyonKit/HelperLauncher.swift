@@ -2,10 +2,8 @@ import Foundation
 
 /// Starts `procyon-helper` with administrator rights via the standard macOS password prompt.
 ///
+/// Development fallback for builds without a Developer ID signature, which can't use `HelperDaemon`.
 /// The helper lives only as long as this app: it exits when the app quits or disconnects.
-/// A notarized release should register it once with `SMAppService.daemon` instead, so the user
-/// approves it in System Settings rather than typing a password every launch; the socket
-/// protocol stays the same.
 enum HelperLauncher {
     enum Failure: Error, Equatable {
         case helperMissing

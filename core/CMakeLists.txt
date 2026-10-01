@@ -16,13 +16,13 @@ target_include_directories(procyon_core PUBLIC include PRIVATE src)
 target_compile_options(procyon_core PRIVATE -Wall -Wextra)
 
 if(APPLE)
-  target_link_libraries(procyon_core PUBLIC "-framework CoreFoundation" "-framework IOKit")
+  target_link_libraries(procyon_core PUBLIC "-framework CoreFoundation" "-framework IOKit" "-framework Security" bsm)
 endif()
 
 # Prototype/measurement tool: prints live samples and the core's own overhead.
 add_executable(procyon-cli tools/procyon_cli.cpp)
 target_link_libraries(procyon-cli PRIVATE procyon_core)
 
-# Privileged helper: launched with elevated rights by the UI, serves restricted counters.
+# Privileged helper: LaunchDaemon (--daemon) or launched with elevated rights by the UI.
 add_executable(procyon-helper helper/main.c)
 target_link_libraries(procyon-helper PRIVATE procyon_core)

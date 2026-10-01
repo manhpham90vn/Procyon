@@ -6,12 +6,21 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <Security/Security.h>
+#include <bsm/libbsm.h>
+#include <launch.h>
+#include <membership.h>
+#endif
 
 #include "helper_protocol.hpp"
 #include "platform.hpp"
@@ -22,6 +31,11 @@ using namespace procyon;
 namespace {
 
 constexpr int kAcceptTimeoutSeconds = 30;
+// Daemon mode: launchd keeps the socket and relaunches us on the next connection.
+constexpr int kDaemonIdleSeconds = 60;
+
+// Clients being served in daemon mode; static so detached threads never outlive it.
+std::atomic<int> active_clients{0};
 
 void log(const char *message) { (void)std::fprintf(stderr, "procyon-helper: %s\n", message); }
 
@@ -99,17 +113,18 @@ bool serve_sample(int fd) {
            send_all(fd, reply.data(), reply.size() * sizeof(helper::Counters));
 }
 
-bool serve_end(int fd, const helper::RequestHeader &header, pid_t parent) {
+bool serve_end(int fd, const helper::RequestHeader &header, pid_t client_pid) {
     int32_t result;
-    // Never kernel_task, launchd, ourselves or the app that launched us.
-    if (header.pid <= 1 || header.pid == getpid() || header.pid == parent)
+    // Never kernel_task, launchd, ourselves or the app we serve.
+    if (header.pid <= 1 || header.pid == getpid() || header.pid == client_pid)
         result = PC_ERR_PROTECTED;
     else
         result = platform::signal_process(header.pid, header.flags & 1);
     return send_all(fd, &result, sizeof(result));
 }
 
-void serve(int client, pid_t parent, int parent_watch) {
+// parent_watch < 0: no parent to watch (daemon mode); poll ignores the entry.
+void serve(int client, pid_t client_pid, int parent_watch) {
     pollfd fds[2] = {{client, POLLIN, 0}, {parent_watch, POLLIN, 0}};
     while (true) {
         if (poll(fds, 2, -1) < 0) {
@@ -130,15 +145,128 @@ void serve(int client, pid_t parent, int parent_watch) {
                 break;
             }
             case helper::Request::Sample: ok = serve_sample(client); break;
-            case helper::Request::End: ok = serve_end(client, header, parent); break;
+            case helper::Request::End: ok = serve_end(client, header, client_pid); break;
         }
         if (!ok) return;
     }
 }
 
+#if defined(__APPLE__)
+
+// "anchor apple generic and identifier \"dev.procyon.app\" and certificate leaf[subject.OU] = \"<our team>\"".
+// Empty when this binary isn't Developer ID signed: then the daemon refuses to run.
+std::string client_requirement() {
+    std::string requirement;
+    SecCodeRef self = nullptr;
+    CFDictionaryRef info = nullptr;
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &self) == errSecSuccess &&
+        SecCodeCopySigningInformation(reinterpret_cast<SecStaticCodeRef>(self), kSecCSSigningInformation, &info) ==
+            errSecSuccess) {
+        auto team = static_cast<CFStringRef>(CFDictionaryGetValue(info, kSecCodeInfoTeamIdentifier));
+        char buffer[64];
+        if (team && CFStringGetCString(team, buffer, sizeof(buffer), kCFStringEncodingUTF8))
+            requirement = std::string("anchor apple generic and identifier \"") + PC_HELPER_CLIENT_ID +
+                          "\" and certificate leaf[subject.OU] = \"" + buffer + "\"";
+    }
+    if (info) CFRelease(info);
+    if (self) CFRelease(self);
+    return requirement;
+}
+
+// The connecting process must be Procyon signed by our team (checked through its audit token, so a
+// recycled pid can't impersonate it) and run by an administrator, matching the legacy password prompt.
+bool daemon_peer_is_trusted(int fd, SecRequirementRef requirement, pid_t &peer_pid) {
+    audit_token_t token;
+    socklen_t length = sizeof(token);
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &length) != 0) return false;
+    peer_pid = audit_token_to_pid(token);
+
+    uuid_t user;
+    uuid_t admins;
+    int is_admin = 0;
+    if (mbr_uid_to_uuid(audit_token_to_euid(token), user) != 0 || mbr_gid_to_uuid(80, admins) != 0 ||
+        mbr_check_membership(user, admins, &is_admin) != 0 || !is_admin)
+        return false;
+
+    CFDataRef token_data = CFDataCreate(nullptr, reinterpret_cast<const UInt8 *>(&token), sizeof(token));
+    const void *keys[] = {kSecGuestAttributeAudit};
+    const void *values[] = {token_data};
+    CFDictionaryRef attributes =
+        CFDictionaryCreate(nullptr, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    SecCodeRef code = nullptr;
+    const bool trusted =
+        SecCodeCopyGuestWithAttributes(nullptr, attributes, kSecCSDefaultFlags, &code) == errSecSuccess &&
+        SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement) == errSecSuccess;
+    if (code) CFRelease(code);
+    CFRelease(attributes);
+    CFRelease(token_data);
+    return trusted;
+}
+
+// Launched on demand by launchd (SMAppService). Serves any number of trusted clients, one thread
+// each, and exits after kDaemonIdleSeconds without clients.
+int daemon_main() {
+    const std::string requirement_text = client_requirement();
+    SecRequirementRef requirement = nullptr;
+    CFStringRef text = CFStringCreateWithCString(nullptr, requirement_text.c_str(), kCFStringEncodingUTF8);
+    const bool have_requirement =
+        !requirement_text.empty() &&
+        SecRequirementCreateWithString(text, kSecCSDefaultFlags, &requirement) == errSecSuccess;
+    CFRelease(text);
+    if (!have_requirement) {
+        log("daemon mode needs a Developer ID signature");
+        return 1;
+    }
+
+    int *sockets = nullptr;
+    size_t socket_count = 0;
+    if (launch_activate_socket("Listener", &sockets, &socket_count) != 0 || socket_count == 0) {
+        log("no launchd socket (run through SMAppService)");
+        CFRelease(requirement);
+        return 1;
+    }
+    const int server = sockets[0];
+    for (size_t i = 1; i < socket_count; ++i) ::close(sockets[i]);
+    std::free(sockets);
+
+    int idle_seconds = 0;
+    while (idle_seconds < kDaemonIdleSeconds) {
+        pollfd listener = {server, POLLIN, 0};
+        if (poll(&listener, 1, 1000) < 0 && errno != EINTR) break;
+        if (!(listener.revents & POLLIN)) {
+            idle_seconds = active_clients.load() > 0 ? 0 : idle_seconds + 1;
+            continue;
+        }
+        idle_seconds = 0;
+        int client = ::accept(server, nullptr, nullptr);
+        if (client < 0) continue;
+        pid_t peer_pid = 0;
+        if (!daemon_peer_is_trusted(client, requirement, peer_pid)) {
+            log("rejected untrusted client");
+            ::close(client);
+            continue;
+        }
+        int no_sigpipe = 1;
+        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+        ++active_clients;
+        std::thread([client, peer_pid] {
+            serve(client, peer_pid, -1);
+            ::close(client);
+            --active_clients;
+        }).detach();
+    }
+    CFRelease(requirement);
+    return 0;
+}
+
+#endif
+
 }  // namespace
 
 int pc_helper_main(int argc, char **argv) {
+#if defined(__APPLE__)
+    if (argc == 2 && !std::strcmp(argv[1], "--daemon")) return daemon_main();
+#endif
     std::string socket_path;
     long parent_arg = -1;
     long uid_arg = -1;
