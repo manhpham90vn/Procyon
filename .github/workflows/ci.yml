@@ -14,13 +14,14 @@ permissions:
   contents: read
 
 env:
-  # Same Xcode as local development (27). The UI needs at least the macOS 26 SDK (Liquid Glass).
-  XCODE_VERSION: "27"
+  # Same Xcode as local development: 27.0 (27A266a) on the `xcode-27` runner (macOS 27, public preview).
+  # The UI needs at least the macOS 26 SDK (Liquid Glass).
+  XCODE_VERSION: "27.0"
 
 jobs:
   lint:
     name: Lint
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
 
   build:
     name: Build & test
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
