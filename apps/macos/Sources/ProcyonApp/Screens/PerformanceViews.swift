@@ -44,6 +44,11 @@ struct CPUView: View {
                 ])
             }
 
+            TopAppsPanel(
+                title: "Top Apps", symbol: "flame.fill", tint: style.start, rows: store.topCPU,
+                isLoading: !store.hasSample, style: style, text: { Format.cpu($0.cpu) },
+                fraction: { ($0.cpu ?? 0) / 100 })
+
             Panel("Cores", symbol: "square.grid.3x3.fill") {
                 CoreGrid(
                     cores: s.coreUsage.indices.map { index in
@@ -126,6 +131,11 @@ struct MemoryView: View {
                 }
                 .frame(maxWidth: 340)
             }
+
+            TopAppsPanel(
+                title: "Top Apps", symbol: "memorychip.fill", tint: style.start, rows: store.topMemory,
+                isLoading: !store.hasSample, style: style, text: { Format.bytes($0.memory) },
+                fraction: { Double($0.memory ?? 0) / Double(max(s.memoryTotal, 1)) })
         }
     }
 }
@@ -167,6 +177,17 @@ struct DiskView: View {
                     StatItem("Read since boot", value: Format.bytes(s.diskReadTotal)),
                     StatItem("Written since boot", value: Format.bytes(s.diskWriteTotal)),
                 ])
+            }
+
+            let diskPeak = max(store.topDisk.map(\.diskTotal).max() ?? 0, 1)
+            TopAppsPanel(
+                title: "Top Apps", symbol: "internaldrive.fill", tint: style.start, rows: store.topDisk,
+                isLoading: !store.hasSample, style: style, emptyText: "No app is using the disk right now.",
+                fraction: { $0.diskTotal / diskPeak }
+            ) { row in
+                TopAppRates(
+                    primary: row.diskRead, secondary: row.diskWrite, primarySymbol: "arrow.down.doc",
+                    secondarySymbol: "arrow.up.doc", style: style)
             }
 
             VolumesPanel(volumes: store.volumes)
@@ -215,68 +236,22 @@ struct NetworkView: View {
             }
 
             if store.capabilities.contains(.processNetwork) {
-                TopNetworkPanel(rows: store.topNetwork, hasSample: store.hasSample, style: style)
+                let networkPeak = max(store.topNetwork.map(\.networkTotal).max() ?? 0, 1)
+                TopAppsPanel(
+                    title: "Top Apps", symbol: "network", tint: style.start, rows: store.topNetwork,
+                    isLoading: !store.hasSample, style: style, emptyText: "No app is using the network right now.",
+                    fraction: { $0.networkTotal / networkPeak }
+                ) { row in
+                    TopAppRates(
+                        primary: row.networkReceive, secondary: row.networkSend, primarySymbol: "arrow.down",
+                        secondarySymbol: "arrow.up", style: style)
+                }
             } else {
                 InfoBanner(
                     "Procyon couldn't read per-app network usage on this Mac, so it hides it instead of showing estimates."
                 )
             }
         }
-    }
-}
-
-/// Apps ranked by current download plus upload.
-private struct TopNetworkPanel: View {
-    let rows: [ProcessRow]
-    let hasSample: Bool
-    let style: MetricStyle
-
-    var body: some View {
-        let peak = max(rows.map(\.networkTotal).max() ?? 0, 1)
-        Panel("Top Apps", symbol: "network", tint: style.start) {
-            VStack(spacing: Tokens.Space.md) {
-                if !hasSample {
-                    ProgressView().frame(maxWidth: .infinity, minHeight: 80)
-                } else if rows.isEmpty {
-                    Text("No app is using the network right now.")
-                        .font(Tokens.Typography.body)
-                        .foregroundStyle(Tokens.Palette.textTertiary)
-                        .frame(maxWidth: .infinity, minHeight: 80)
-                }
-                ForEach(rows) { row in
-                    HStack(spacing: Tokens.Space.sm + 2) {
-                        ProcessIcon(row: row, size: 22)
-                        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
-                            HStack(spacing: Tokens.Space.md) {
-                                Text(row.name)
-                                    .font(Tokens.Typography.headline)
-                                    .foregroundStyle(Tokens.Palette.textPrimary)
-                                    .lineLimit(1)
-                                if row.processCount > 1 {
-                                    Text("\(row.processCount)")
-                                        .font(Tokens.Typography.caption)
-                                        .foregroundStyle(Tokens.Palette.textTertiary)
-                                }
-                                Spacer()
-                                rate("arrow.down", row.networkReceive, style.start)
-                                rate("arrow.up", row.networkSend, style.end)
-                            }
-                            UsageBar(value: row.networkTotal / peak, style: style, height: 4)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func rate(_ symbol: String, _ value: Double?, _ tint: Color) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(tint)
-            Text(Format.rate(value))
-                .font(Tokens.Typography.headline.monospacedDigit())
-                .foregroundStyle(Tokens.Palette.textPrimary)
-        }
-        .frame(minWidth: 84, alignment: .trailing)
     }
 }
 

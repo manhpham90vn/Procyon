@@ -201,6 +201,8 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
     public var sortThreads: Int { threads ?? -1 }
     /// Download plus upload, for ranking by overall network activity.
     public var networkTotal: Double { (networkReceive ?? 0) + (networkSend ?? 0) }
+    /// Read plus write, for ranking by overall disk activity.
+    public var diskTotal: Double { (diskRead ?? 0) + (diskWrite ?? 0) }
 
     public init(
         id: String, kind: Kind, pid: Int32, parentID: String?, depth: Int, childCount: Int, processCount: Int,
@@ -233,7 +235,52 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
     }
 }
 
+extension ProcessRow {
+    /// The same row moved to another place in the hierarchy.
+    func moved(depth: Int, parentID: String?, childCount: Int? = nil) -> ProcessRow {
+        ProcessRow(
+            id: id, kind: kind, pid: pid, parentID: parentID, depth: depth, childCount: childCount ?? self.childCount,
+            processCount: processCount, name: name, user: user, path: path, appID: appID, appName: appName,
+            flags: flags, cpu: cpu, memory: memory, diskRead: diskRead, diskWrite: diskWrite,
+            networkReceive: networkReceive, networkSend: networkSend, threads: threads, startTime: startTime,
+            memberPIDs: memberPIDs)
+    }
+}
+
 public extension Array where Element == ProcessRow {
+    /// Splits pre-ordered rows into the app `appID` and everything else, both still in pre-order.
+    /// Pinned: every row of the app with its subtree (the group and its members, the app's processes in
+    /// the flat list, each of its subtrees in the tree), re-rooted at depth 0. Parents left behind
+    /// lose those children.
+    func pinning(appID: String) -> (pinned: [ProcessRow], rest: [ProcessRow]) {
+        var pinned: [ProcessRow] = []
+        var rest: [ProcessRow] = []
+        rest.reserveCapacity(count)
+        var movedChildren: [String: Int] = [:]
+        var subtreeDepth: Int?
+        for row in self {
+            if let depth = subtreeDepth, row.depth > depth {
+                pinned.append(row.moved(depth: row.depth - depth, parentID: row.parentID))
+                continue
+            }
+            subtreeDepth = nil
+            if row.appID == appID {
+                subtreeDepth = row.depth
+                pinned.append(row.moved(depth: 0, parentID: nil))
+                if let parentID = row.parentID { movedChildren[parentID, default: 0] += 1 }
+            } else {
+                rest.append(row)
+            }
+        }
+        if !movedChildren.isEmpty {
+            rest = rest.map { row in
+                guard let moved = movedChildren[row.id] else { return row }
+                return row.moved(depth: row.depth, parentID: row.parentID, childCount: row.childCount - moved)
+            }
+        }
+        return (pinned, rest)
+    }
+
     /// Rows whose ancestors are all expanded. Rows must be in pre-order (as the core returns them).
     func visible(isExpanded: (ProcessRow) -> Bool) -> [ProcessRow] {
         var result: [ProcessRow] = []
