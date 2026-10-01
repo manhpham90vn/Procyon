@@ -187,6 +187,7 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
     std::vector<platform::RawProcess> raw;
     platform::processes(raw);
     fill_from_helper(*monitor, raw);
+    platform::process_network(raw);
     const int32_t self = platform::self_pid();
     std::unordered_map<uint64_t, ProcessCounters> current;
     current.reserve(raw.size());
@@ -206,12 +207,12 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         p.memory_bytes = r.memory_bytes;
         p.cpu_percent = -1;
         p.disk_read_bps = p.disk_write_bps = -1;
-        p.net_rx_bps = p.net_tx_bps = -1;  // no adapter supports this yet
+        p.net_rx_bps = p.net_tx_bps = -1;
         if (r.threads > 0) threads += r.threads;
 
         const uint64_t key =
             (static_cast<uint64_t>(static_cast<uint32_t>(r.pid)) << 32) ^ static_cast<uint64_t>(r.start_time);
-        ProcessCounters counters{r.cpu_time_ns, r.disk_read, r.disk_write};
+        ProcessCounters counters{r.cpu_time_ns, r.disk_read, r.disk_write, r.net_rx, r.net_tx};
         auto previous = monitor->previous_processes.find(key);
         const bool has_previous = previous != monitor->previous_processes.end() && elapsed > 0;
 
@@ -221,6 +222,10 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         if (r.has_disk_io) {
             p.disk_read_bps = has_previous ? rate(r.disk_read, previous->second.disk_read, elapsed) : 0;
             p.disk_write_bps = has_previous ? rate(r.disk_write, previous->second.disk_write, elapsed) : 0;
+        }
+        if (r.has_net_io) {
+            p.net_rx_bps = has_previous ? rate(r.net_rx, previous->second.net_rx, elapsed) : 0;
+            p.net_tx_bps = has_previous ? rate(r.net_tx, previous->second.net_tx, elapsed) : 0;
         }
         current.emplace(key, counters);
 

@@ -14,6 +14,8 @@ struct ProcessCounters {
     uint64_t cpu_time_ns = 0;
     uint64_t disk_read = 0;
     uint64_t disk_write = 0;
+    uint64_t net_rx = 0;
+    uint64_t net_tx = 0;
 };
 
 }  // namespace procyon

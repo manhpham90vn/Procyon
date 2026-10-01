@@ -97,8 +97,12 @@ struct ProcessesView: View {
         }
     }
 
+    private var hasNetwork: Bool { store.capabilities.contains(.processNetwork) }
+
     private var table: some View {
         let memoryTotal = Double(max(store.sample.memoryTotal, 1))
+        // Columns can't be conditional before macOS 14.4, so unsupported ones are hidden and locked.
+        let network: TableColumnCustomizationBehavior = hasNetwork ? [] : .visibility
         return Table(visibleRows, selection: $selection, sortOrder: sortOrder, columnCustomization: $columns) {
             TableColumn("Name", value: \.sortName) { row in
                 NameCell(row: row, expanded: isExpanded(row)) { toggle(row) }
@@ -155,6 +159,28 @@ struct ProcessesView: View {
             .alignment(.trailing)
             .customizationID("diskWrite")
 
+            TableColumn("Net ↓", value: \.sortNetworkReceive) { row in
+                HeatCell(
+                    text: Format.rate(row.networkReceive), intensity: (row.networkReceive ?? 0) / 10_000_000,
+                    metric: .network, restricted: row.networkReceive == nil)
+            }
+            .width(min: 64, ideal: 78)
+            .alignment(.trailing)
+            .customizationID("networkReceive")
+            .defaultVisibility(hasNetwork ? .automatic : .hidden)
+            .disabledCustomizationBehavior(network)
+
+            TableColumn("Net ↑", value: \.sortNetworkSend) { row in
+                HeatCell(
+                    text: Format.rate(row.networkSend), intensity: (row.networkSend ?? 0) / 10_000_000,
+                    metric: .network, restricted: row.networkSend == nil)
+            }
+            .width(min: 64, ideal: 78)
+            .alignment(.trailing)
+            .customizationID("networkSend")
+            .defaultVisibility(hasNetwork ? .automatic : .hidden)
+            .disabledCustomizationBehavior(network)
+
             TableColumn("Threads", value: \.sortThreads) { row in
                 Text(Format.count(row.threads))
                     .font(Tokens.Typography.body.monospacedDigit())
@@ -164,7 +190,6 @@ struct ProcessesView: View {
             .alignment(.trailing)
             .customizationID("threads")
             .defaultVisibility(.hidden)
-            // Per-process network columns are omitted: the macOS adapter lacks PC_CAP_PROCESS_NETWORK.
         }
         .tableStyle(.inset(alternatesRowBackgrounds: false))
         .scrollContentBackground(.hidden)
@@ -185,6 +210,13 @@ struct ProcessesView: View {
             }
         }
         .cardSurface(padding: 0)
+        .onAppear {
+            // A saved layout from a session that had per-app network must not show empty columns.
+            if !hasNetwork {
+                columns[visibility: "networkReceive"] = .hidden
+                columns[visibility: "networkSend"] = .hidden
+            }
+        }
         .onKeyPress(.leftArrow) { setSelected(expanded: false) }
         .onKeyPress(.rightArrow) { setSelected(expanded: true) }
     }
@@ -222,7 +254,8 @@ struct ProcessesView: View {
     private static let columnKeys: [(ProcessColumn, PartialKeyPath<ProcessRow>)] = [
         (.name, \ProcessRow.sortName), (.pid, \ProcessRow.sortPID), (.user, \ProcessRow.sortUser),
         (.cpu, \ProcessRow.sortCPU), (.memory, \ProcessRow.sortMemory), (.diskRead, \ProcessRow.sortDiskRead),
-        (.diskWrite, \ProcessRow.sortDiskWrite), (.threads, \ProcessRow.sortThreads),
+        (.diskWrite, \ProcessRow.sortDiskWrite), (.networkReceive, \ProcessRow.sortNetworkReceive),
+        (.networkSend, \ProcessRow.sortNetworkSend), (.threads, \ProcessRow.sortThreads),
     ]
 
     private var sortOrder: Binding<[KeyPathComparator<ProcessRow>]> {

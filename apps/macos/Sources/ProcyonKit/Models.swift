@@ -199,6 +199,8 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
     public var sortNetworkReceive: Double { networkReceive ?? -1 }
     public var sortNetworkSend: Double { networkSend ?? -1 }
     public var sortThreads: Int { threads ?? -1 }
+    /// Download plus upload, for ranking by overall network activity.
+    public var networkTotal: Double { (networkReceive ?? 0) + (networkSend ?? 0) }
 
     public init(
         id: String, kind: Kind, pid: Int32, parentID: String?, depth: Int, childCount: Int, processCount: Int,

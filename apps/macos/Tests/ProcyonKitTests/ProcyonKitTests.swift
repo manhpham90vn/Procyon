@@ -57,4 +57,17 @@ import Testing
         let ids = Set(rows.map(\.id))
         for row in rows { if let parent = row.parentID { #expect(ids.contains(parent)) } }
     }
+
+    /// Per-process network is all-or-nothing: known for every process with the capability, never without it.
+    @Test func processNetworkFollowsCapability() {
+        let monitor = Monitor()
+        _ = monitor.refresh()
+        let rows = monitor.buildView(.init(mode: .flat, column: .networkReceive, descending: true, filter: ""))
+        let known = Monitor.capabilities.contains(.processNetwork)
+        #expect(!rows.isEmpty)
+        for row in rows {
+            #expect((row.networkReceive != nil) == known)
+            #expect((row.networkSend != nil) == known)
+        }
+    }
 }

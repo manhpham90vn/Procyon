@@ -214,12 +214,69 @@ struct NetworkView: View {
                 ])
             }
 
-            if !store.capabilities.contains(.processNetwork) {
+            if store.capabilities.contains(.processNetwork) {
+                TopNetworkPanel(rows: store.topNetwork, hasSample: store.hasSample, style: style)
+            } else {
                 InfoBanner(
-                    "Procyon doesn't measure network usage per app on macOS yet, so it hides it instead of showing estimates. Full access doesn't change this."
+                    "Procyon couldn't read per-app network usage on this Mac, so it hides it instead of showing estimates."
                 )
             }
         }
+    }
+}
+
+/// Apps ranked by current download plus upload.
+private struct TopNetworkPanel: View {
+    let rows: [ProcessRow]
+    let hasSample: Bool
+    let style: MetricStyle
+
+    var body: some View {
+        let peak = max(rows.map(\.networkTotal).max() ?? 0, 1)
+        Panel("Top Apps", symbol: "network", tint: style.start) {
+            VStack(spacing: Tokens.Space.md) {
+                if !hasSample {
+                    ProgressView().frame(maxWidth: .infinity, minHeight: 80)
+                } else if rows.isEmpty {
+                    Text("No app is using the network right now.")
+                        .font(Tokens.Typography.body)
+                        .foregroundStyle(Tokens.Palette.textTertiary)
+                        .frame(maxWidth: .infinity, minHeight: 80)
+                }
+                ForEach(rows) { row in
+                    HStack(spacing: Tokens.Space.sm + 2) {
+                        ProcessIcon(row: row, size: 22)
+                        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+                            HStack(spacing: Tokens.Space.md) {
+                                Text(row.name)
+                                    .font(Tokens.Typography.headline)
+                                    .foregroundStyle(Tokens.Palette.textPrimary)
+                                    .lineLimit(1)
+                                if row.processCount > 1 {
+                                    Text("\(row.processCount)")
+                                        .font(Tokens.Typography.caption)
+                                        .foregroundStyle(Tokens.Palette.textTertiary)
+                                }
+                                Spacer()
+                                rate("arrow.down", row.networkReceive, style.start)
+                                rate("arrow.up", row.networkSend, style.end)
+                            }
+                            UsageBar(value: row.networkTotal / peak, style: style, height: 4)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func rate(_ symbol: String, _ value: Double?, _ tint: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol).font(.system(size: 9, weight: .bold)).foregroundStyle(tint)
+            Text(Format.rate(value))
+                .font(Tokens.Typography.headline.monospacedDigit())
+                .foregroundStyle(Tokens.Palette.textPrimary)
+        }
+        .frame(minWidth: 84, alignment: .trailing)
     }
 }
 

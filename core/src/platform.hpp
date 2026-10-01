@@ -21,6 +21,9 @@ struct RawProcess {
     bool has_disk_io = false;
     uint64_t disk_read = 0;  // cumulative bytes
     uint64_t disk_write = 0;
+    bool has_net_io = false;
+    uint64_t net_rx = 0;  // cumulative bytes over the process's sockets
+    uint64_t net_tx = 0;
     int32_t threads = -1;
     std::string name;
     std::string path;
@@ -51,6 +54,10 @@ bool processes(std::vector<RawProcess> &out);
 // Fills cpu/memory/disk/thread counters for one process; false when privileges are missing.
 bool read_counters(int32_t pid, RawProcess &out);
 int64_t start_time(int32_t pid);  // -1 when the process doesn't exist
+// Per-process network: whether the source works on this machine, and fills
+// has_net_io/net_rx/net_tx. Totals may lag by one refresh; never blocks.
+bool process_network_available();
+void process_network(std::vector<RawProcess> &processes);
 bool cpu_ticks(std::vector<CpuTicks> &out);
 bool memory(Memory &out);
 bool io_counters(IoCounters &out);

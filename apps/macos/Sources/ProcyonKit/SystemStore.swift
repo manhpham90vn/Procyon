@@ -4,12 +4,14 @@ import Observation
 /// Owns the core monitor; all calls into C happen on this actor, off the main thread.
 actor MonitorWorker {
     private let monitor = Monitor()
+    private let hasProcessNetwork = Monitor.capabilities.contains(.processNetwork)
 
     struct Tick: Sendable {
         var sample: SystemSample
         var rows: [ProcessRow]
         var topCPU: [ProcessRow]
         var topMemory: [ProcessRow]
+        var topNetwork: [ProcessRow]
         var helperConnected: Bool
     }
 
@@ -17,7 +19,7 @@ actor MonitorWorker {
         let sample = monitor.refresh()
         return Tick(
             sample: sample, rows: monitor.buildView(query), topCPU: top(.cpu), topMemory: top(.memory),
-            helperConnected: monitor.helperConnected)
+            topNetwork: topNetwork(), helperConnected: monitor.helperConnected)
     }
 
     /// The helper needs a moment to create its socket after the password prompt closes, and launchd
@@ -53,6 +55,14 @@ actor MonitorWorker {
         monitor.buildView(.init(mode: .grouped, column: column, descending: true, filter: "", limit: 6))
             .filter { $0.depth == 0 }
     }
+
+    /// Busiest apps by download plus upload; the core sorts by one direction, so merge both.
+    private func topNetwork() -> [ProcessRow] {
+        guard hasProcessNetwork else { return [] }
+        var seen = Set<String>()
+        let rows = (top(.networkReceive) + top(.networkSend)).filter { $0.networkTotal > 0 && seen.insert($0.id).inserted }
+        return Array(rows.sorted { $0.networkTotal > $1.networkTotal }.prefix(6))
+    }
 }
 
 /// Observable app state shared by every screen.
@@ -69,6 +79,8 @@ public final class SystemStore {
     public private(set) var rows: [ProcessRow] = []
     public private(set) var topCPU: [ProcessRow] = []
     public private(set) var topMemory: [ProcessRow] = []
+    /// Empty without `Capabilities.processNetwork` or while nothing uses the network.
+    public private(set) var topNetwork: [ProcessRow] = []
     public private(set) var volumes: [Volume] = []
     public private(set) var hasSample = false
     /// Whether restricted (system-owned) processes are read through the privileged helper.
@@ -289,6 +301,7 @@ public final class SystemStore {
         if requested != query { rebuild() }
         topCPU = tick.topCPU
         topMemory = tick.topMemory
+        topNetwork = tick.topNetwork
         hasSample = true
         if fullAccess.isOn && !tick.helperConnected { await reconnectHelper() }
         // The user may allow the helper in System Settings at any moment.
