@@ -10,10 +10,8 @@ struct ProcessesView: View {
     @State private var toggled: Set<ProcessRow.ID> = []
     @State private var pending: PendingAction?
     @State private var failure: String?
-    @SceneStorage("processTableColumns") private var columns = TableColumnCustomization<ProcessRow>()
     @FocusState private var searchFocused: Bool
-    /// A focused table draws its selection in the accent color instead of a faint gray.
-    @FocusState private var tableFocused: Bool
+    @State private var tableController = ProcessTableController()
     /// Set by a view switch: select the pinned app once the rows of the new view arrive.
     @State private var reselectPinned = false
 
@@ -81,16 +79,13 @@ struct ProcessesView: View {
 
             FullAccessBanner()
 
-            ScrollViewReader { proxy in
-                table
-                    .focused($tableFocused)
-                    .onChange(of: store.focusedRow?.id, initial: true) { revealFocusedRow(proxy, final: false) }
-                    // Clearing the search rebuilds the rows; the wanted row may only appear then.
-                    .onChange(of: store.rows) {
-                        revealFocusedRow(proxy, final: true)
-                        keepPinnedSelection()
-                    }
-            }
+            table
+                .onChange(of: store.focusedRow?.id, initial: true) { revealFocusedRow(final: false) }
+                // Clearing the search rebuilds the rows; the wanted row may only appear then.
+                .onChange(of: store.rows) {
+                    revealFocusedRow(final: true)
+                    keepPinnedSelection()
+                }
         }
         .padding(.horizontal, Tokens.Space.xxl)
         .padding(.top, Tokens.Space.lg)
@@ -122,108 +117,13 @@ struct ProcessesView: View {
     private var hasNetwork: Bool { store.capabilities.contains(.processNetwork) }
 
     private var table: some View {
-        let memoryTotal = Double(max(store.sample.memoryTotal, 1))
-        // Columns can't be conditional before macOS 14.4, so unsupported ones are hidden and locked.
-        let network: TableColumnCustomizationBehavior = hasNetwork ? [] : .visibility
-        return Table(visibleRows, selection: $selection, sortOrder: sortOrder, columnCustomization: $columns) {
-            TableColumn("Name", value: \.sortName) { row in
-                NameCell(
-                    row: row, expanded: isExpanded(row), pinned: isPinnedRoot(row), unpin: { store.pinnedAppID = nil }
-                ) { toggle(row) }
-            }
-            .width(min: 180, ideal: 250)
-            .customizationID("name")
-            .disabledCustomizationBehavior(.visibility)
-
-            TableColumn("PID", value: \.sortPID) { row in
-                Text(String(row.pid))
-                    .font(Tokens.Typography.mono.monospacedDigit())
-                    .foregroundStyle(Tokens.Palette.textSecondary)
-            }
-            .width(min: 50, ideal: 64)
-            .customizationID("pid")
-
-            TableColumn("User", value: \.sortUser) { row in
-                Text(row.user).foregroundStyle(Tokens.Palette.textSecondary).lineLimit(1)
-            }
-            .width(min: 56, ideal: 72)
-            .customizationID("user")
-
-            TableColumn("CPU", value: \.sortCPU) { row in
-                HeatCell(text: Format.cpu(row.cpu), intensity: (row.cpu ?? 0) / 100, metric: .cpu, restricted: row.cpu == nil)
-            }
-            .width(min: 56, ideal: 70)
-            .alignment(.trailing)
-            .customizationID("cpu")
-
-            TableColumn("Memory", value: \.sortMemory) { row in
-                HeatCell(
-                    text: Format.bytes(row.memory), intensity: Double(row.memory ?? 0) / memoryTotal * 6,
-                    metric: .memory, restricted: row.memory == nil)
-            }
-            .width(min: 64, ideal: 82)
-            .alignment(.trailing)
-            .customizationID("memory")
-
-            TableColumn("Disk Read", value: \.sortDiskRead) { row in
-                HeatCell(
-                    text: Format.rate(row.diskRead), intensity: (row.diskRead ?? 0) / 20_000_000, metric: .disk,
-                    restricted: row.diskRead == nil)
-            }
-            .width(min: 64, ideal: 78)
-            .alignment(.trailing)
-            .customizationID("diskRead")
-
-            TableColumn("Disk Write", value: \.sortDiskWrite) { row in
-                HeatCell(
-                    text: Format.rate(row.diskWrite), intensity: (row.diskWrite ?? 0) / 20_000_000, metric: .disk,
-                    restricted: row.diskWrite == nil)
-            }
-            .width(min: 64, ideal: 78)
-            .alignment(.trailing)
-            .customizationID("diskWrite")
-
-            TableColumn("Net ↓", value: \.sortNetworkReceive) { row in
-                HeatCell(
-                    text: Format.rate(row.networkReceive), intensity: (row.networkReceive ?? 0) / 10_000_000,
-                    metric: .network, restricted: row.networkReceive == nil)
-            }
-            .width(min: 64, ideal: 78)
-            .alignment(.trailing)
-            .customizationID("networkReceive")
-            .defaultVisibility(hasNetwork ? .automatic : .hidden)
-            .disabledCustomizationBehavior(network)
-
-            TableColumn("Net ↑", value: \.sortNetworkSend) { row in
-                HeatCell(
-                    text: Format.rate(row.networkSend), intensity: (row.networkSend ?? 0) / 10_000_000,
-                    metric: .network, restricted: row.networkSend == nil)
-            }
-            .width(min: 64, ideal: 78)
-            .alignment(.trailing)
-            .customizationID("networkSend")
-            .defaultVisibility(hasNetwork ? .automatic : .hidden)
-            .disabledCustomizationBehavior(network)
-
-            TableColumn("Threads", value: \.sortThreads) { row in
-                Text(Format.count(row.threads))
-                    .font(Tokens.Typography.body.monospacedDigit())
-                    .foregroundStyle(Tokens.Palette.textSecondary)
-            }
-            .width(min: 50, ideal: 64)
-            .alignment(.trailing)
-            .customizationID("threads")
-            .defaultVisibility(.hidden)
-        }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
-        .scrollContentBackground(.hidden)
-        .contextMenu(forSelectionType: ProcessRow.ID.self) { ids in
-            if let id = ids.first, let row = store.rows.first(where: { $0.id == id }) {
-                contextMenu(for: row)
-            }
-        } primaryAction: { ids in
-            if let id = ids.first, let row = store.rows.first(where: { $0.id == id }), row.hasChildren { toggle(row) }
-        }
+        ProcessTable(
+            rows: visibleRows, selection: $selection, sortColumn: store.sortColumn, sortDescending: store.sortDescending,
+            hasNetwork: hasNetwork, memoryTotal: Double(max(store.sample.memoryTotal, 1)), controller: tableController,
+            isExpanded: isExpanded, isPinnedRoot: isPinnedRoot,
+            onSort: { store.sort(by: $0, descending: $1) },
+            onToggle: toggle, onUnpin: { store.pinnedAppID = nil }, menuItems: menuItems
+        )
         .overlay {
             if store.hasSample && visibleRows.isEmpty {
                 EmptyState(
@@ -234,81 +134,38 @@ struct ProcessesView: View {
             }
         }
         .cardSurface(padding: 0)
-        .onAppear {
-            // A saved layout from a session that had per-app network must not show empty columns.
-            if !hasNetwork {
-                columns[visibility: "networkReceive"] = .hidden
-                columns[visibility: "networkSend"] = .hidden
-            }
-        }
-        .onKeyPress(.leftArrow) { setSelected(expanded: false) }
-        .onKeyPress(.rightArrow) { setSelected(expanded: true) }
     }
 
-    @ViewBuilder
-    private func contextMenu(for row: ProcessRow) -> some View {
-        Button(row.kind == .group ? "End \(row.processCount) Processes" : "End Task") { request(.end, row) }
-            .disabled(row.isProtected)
-        Button("Force Quit") { request(.forceQuit, row) }
-            .disabled(row.isProtected)
+    private func menuItems(for row: ProcessRow) -> [NSMenuItem] {
+        var items: [NSMenuItem] = [
+            ActionMenuItem(row.kind == .group ? "End \(row.processCount) Processes" : "End Task", isEnabled: !row.isProtected) {
+                request(.end, row)
+            },
+            ActionMenuItem("Force Quit", isEnabled: !row.isProtected) { request(.forceQuit, row) },
+        ]
         if row.kind == .process && row.hasChildren {
-            Button("End Process Tree") { request(.endTree, row) }
-                .disabled(row.isProtected)
+            items.append(ActionMenuItem("End Process Tree", isEnabled: !row.isProtected) { request(.endTree, row) })
         }
-        Divider()
+        items.append(.separator())
         if !row.path.isEmpty {
-            Button("Show in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: row.bundlePath ?? row.path)])
-            }
+            items.append(
+                ActionMenuItem("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: row.bundlePath ?? row.path)])
+                })
         }
-        Button("Copy Name") { copy(row.name) }
-        Button("Copy PID") { copy(String(row.pid)) }
-        if !row.path.isEmpty { Button("Copy Path") { copy(row.path) } }
+        items.append(ActionMenuItem("Copy Name") { copy(row.name) })
+        items.append(ActionMenuItem("Copy PID") { copy(String(row.pid)) })
+        if !row.path.isEmpty { items.append(ActionMenuItem("Copy Path") { copy(row.path) }) }
+        return items
     }
 
-    // MARK: - Summary & sorting
+    // MARK: - Summary
 
     private var summary: String {
         guard store.hasSample else { return "Collecting…" }
         let s = store.sample
         return
             "\(Format.count(s.processCount)) processes · \(Format.count(s.threadCount)) threads · CPU \(Format.percent(s.cpuUsage)) · Memory \(Format.bytes(s.memoryUsed))"
-    }
-
-    private static let columnKeys: [(ProcessColumn, PartialKeyPath<ProcessRow>)] = [
-        (.name, \ProcessRow.sortName), (.pid, \ProcessRow.sortPID), (.user, \ProcessRow.sortUser),
-        (.cpu, \ProcessRow.sortCPU), (.memory, \ProcessRow.sortMemory), (.diskRead, \ProcessRow.sortDiskRead),
-        (.diskWrite, \ProcessRow.sortDiskWrite), (.networkReceive, \ProcessRow.sortNetworkReceive),
-        (.networkSend, \ProcessRow.sortNetworkSend), (.threads, \ProcessRow.sortThreads),
-    ]
-
-    private var sortOrder: Binding<[KeyPathComparator<ProcessRow>]> {
-        Binding {
-            [Self.comparator(for: store.sortColumn, descending: store.sortDescending)]
-        } set: { order in
-            guard let first = order.first,
-                let column = Self.columnKeys.first(where: { $0.1 == first.keyPath })?.0
-            else { return }
-            // A newly clicked column starts in its natural direction (e.g. highest CPU first).
-            let descending = column == store.sortColumn ? first.order == .reverse : column.prefersDescending
-            store.sort(by: column, descending: descending)
-        }
-    }
-
-    private static func comparator(for column: ProcessColumn, descending: Bool) -> KeyPathComparator<ProcessRow> {
-        let order: SortOrder = descending ? .reverse : .forward
-        switch column {
-        case .name: return KeyPathComparator(\.sortName, order: order)
-        case .pid: return KeyPathComparator(\.sortPID, order: order)
-        case .user: return KeyPathComparator(\.sortUser, order: order)
-        case .cpu: return KeyPathComparator(\.sortCPU, order: order)
-        case .memory: return KeyPathComparator(\.sortMemory, order: order)
-        case .diskRead: return KeyPathComparator(\.sortDiskRead, order: order)
-        case .diskWrite: return KeyPathComparator(\.sortDiskWrite, order: order)
-        case .networkReceive: return KeyPathComparator(\.sortNetworkReceive, order: order)
-        case .networkSend: return KeyPathComparator(\.sortNetworkSend, order: order)
-        case .threads: return KeyPathComparator(\.sortThreads, order: order)
-        }
     }
 
     // MARK: - Expansion
@@ -325,7 +182,7 @@ struct ProcessesView: View {
 
     /// Selects, expands and scrolls to the app another screen asked for, so all its processes show.
     /// `final`: give up if it isn't there (the app has exited).
-    private func revealFocusedRow(_ proxy: ScrollViewProxy, final: Bool) {
+    private func revealFocusedRow(final: Bool) {
         guard let wanted = store.focusedRow else { return }
         // The switch to the by-app view rebuilds the rows asynchronously: wait for grouped rows.
         guard store.viewMode == .grouped, store.rows.contains(where: { $0.kind == .group }) else { return }
@@ -337,9 +194,8 @@ struct ProcessesView: View {
         store.pinnedAppID = target.appID
         if target.hasChildren, !isExpanded(target) { toggle(target) }
         selection = target.id
-        tableFocused = true
-        // After the expanded rows are laid out.
-        Task { proxy.scrollTo(target.id, anchor: .center) }
+        // After the expanded rows reach the table.
+        Task { tableController.reveal(target.id) }
     }
 
     // MARK: - Pinning
@@ -376,12 +232,6 @@ struct ProcessesView: View {
         withAnimation(.snappy(duration: Tokens.Motion.fast)) {
             toggled = expanded == store.viewMode.expandsByDefault ? [] : Set(parents)
         }
-    }
-
-    private func setSelected(expanded: Bool) -> KeyPress.Result {
-        guard let row = selectedRow, row.hasChildren, isExpanded(row) != expanded else { return .ignored }
-        toggle(row)
-        return .handled
     }
 
     // MARK: - Actions
@@ -493,96 +343,6 @@ private struct PendingAction: Identifiable {
             }
         if row.isSystem { text += "\n\n“\(row.name)” is a system process. Ending it can make macOS unstable." }
         return text
-    }
-}
-
-private struct NameCell: View {
-    let row: ProcessRow
-    let expanded: Bool
-    let pinned: Bool
-    let unpin: () -> Void
-    let toggle: () -> Void
-
-    var body: some View {
-        HStack(spacing: Tokens.Space.xs + 2) {
-            Color.clear.frame(width: CGFloat(row.depth) * 16)
-            Group {
-                if row.hasChildren {
-                    Button(action: toggle) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Tokens.Palette.textTertiary)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                            .frame(width: 14, height: 14)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(expanded ? "Collapse" : "Expand")
-                } else {
-                    Color.clear
-                }
-            }
-            .frame(width: 14)
-
-            ProcessIcon(row: row, size: 18)
-            Text(row.name)
-                .font(row.kind == .group ? Tokens.Typography.headline : Tokens.Typography.body)
-                .foregroundStyle(row.isRestricted ? Tokens.Palette.textSecondary : Tokens.Palette.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if row.kind == .group {
-                Text("\(row.processCount)")
-                    .font(Tokens.Typography.caption.monospacedDigit())
-                    .foregroundStyle(Tokens.Palette.textSecondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Tokens.Palette.track, in: Capsule())
-            }
-            if row.isRestricted {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Tokens.Palette.textTertiary)
-                    .help("Owned by the system. Unlock full access to read its CPU, memory and disk usage.")
-            }
-            if pinned {
-                Spacer(minLength: 0)
-                Button(action: unpin) {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Tokens.Palette.accent)
-                        .rotationEffect(.degrees(45))
-                        .frame(width: 16, height: 16)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Pinned to the top in every view. Click to unpin.")
-                .accessibilityLabel("Unpin")
-            }
-        }
-    }
-}
-
-/// Task-Manager-style heat cell: background intensity follows usage.
-private struct HeatCell: View {
-    let text: String
-    let intensity: Double
-    let metric: Metric
-    let restricted: Bool
-
-    var body: some View {
-        let heat = min(max(intensity, 0), 1)
-        Text(text)
-            .font(Tokens.Typography.body.monospacedDigit())
-            .foregroundStyle(restricted ? Tokens.Palette.textTertiary : Tokens.Palette.textPrimary)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.horizontal, Tokens.Space.xs + 2)
-            .padding(.vertical, 1)
-            .background {
-                if heat > 0.01 {
-                    RoundedRectangle(cornerRadius: Tokens.Radius.xs, style: .continuous)
-                        .fill(metric.style.start.opacity(0.08 + 0.42 * heat))
-                }
-            }
     }
 }
 

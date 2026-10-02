@@ -188,17 +188,6 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
     /// Bundle path used for the icon when the row belongs to an app.
     public var bundlePath: String? { flags.contains(.appBundle) || kind == .group && appID.hasSuffix(".app") ? appID : nil }
 
-    // Non-optional keys so SwiftUI Table columns can declare sort comparators.
-    public var sortName: String { name }
-    public var sortPID: Int32 { pid }
-    public var sortUser: String { user }
-    public var sortCPU: Double { cpu ?? -1 }
-    public var sortMemory: Int64 { memory ?? -1 }
-    public var sortDiskRead: Double { diskRead ?? -1 }
-    public var sortDiskWrite: Double { diskWrite ?? -1 }
-    public var sortNetworkReceive: Double { networkReceive ?? -1 }
-    public var sortNetworkSend: Double { networkSend ?? -1 }
-    public var sortThreads: Int { threads ?? -1 }
     /// Download plus upload, for ranking by overall network activity.
     public var networkTotal: Double { (networkReceive ?? 0) + (networkSend ?? 0) }
     /// Read plus write, for ranking by overall disk activity.

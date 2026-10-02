@@ -48,6 +48,21 @@ enum IconCache {
         cache.setObject(image, forKey: path as NSString)
         return image
     }
+
+    /// The icon drawn at `size` points. AppKit views hand the whole multi-resolution icon to Core
+    /// Animation, which renders its largest representation (megabytes per icon); this one is drawn
+    /// only at the size and scale it is shown at.
+    static func icon(for path: String, size: CGFloat) -> NSImage {
+        let key = "\(path)#\(size)" as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        let source = icon(for: path)
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            source.draw(in: rect)
+            return true
+        }
+        cache.setObject(image, forKey: key)
+        return image
+    }
 }
 
 struct ProcessIcon: View {
