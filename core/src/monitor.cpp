@@ -257,29 +257,35 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
 
         const uint64_t key =
             (static_cast<uint64_t>(static_cast<uint32_t>(r.pid)) << 32) ^ static_cast<uint64_t>(r.start_time);
-        ProcessCounters counters{r.cpu_time_ns, r.disk_read,   r.disk_write, r.net_rx,
-                                 r.net_tx,      r.gpu_time_ns, r.energy_nj};
-        auto previous = monitor->previous_processes.find(key);
-        const bool has_previous = previous != monitor->previous_processes.end() && elapsed > 0;
+        ProcessCounters counters{r.cpu_time_ns, r.disk_read,   r.disk_write,  r.net_rx,     r.net_tx,  r.gpu_time_ns,
+                                 r.energy_nj,   !r.restricted, r.has_disk_io, r.has_net_io, r.has_gpu, r.has_energy};
+        auto found = monitor->previous_processes.find(key);
+        const ProcessCounters *previous =
+            found != monitor->previous_processes.end() && elapsed > 0 ? &found->second : nullptr;
 
-        if (!r.restricted) {
-            p.cpu_percent = has_previous ? rate(r.cpu_time_ns, previous->second.cpu_time_ns, elapsed) / 1e7 : 0;
+        if (counters.has_cpu) {
+            p.cpu_percent =
+                previous && previous->has_cpu ? rate(r.cpu_time_ns, previous->cpu_time_ns, elapsed) / 1e7 : 0;
         }
-        if (r.has_disk_io) {
-            p.disk_read_bps = has_previous ? rate(r.disk_read, previous->second.disk_read, elapsed) : 0;
-            p.disk_write_bps = has_previous ? rate(r.disk_write, previous->second.disk_write, elapsed) : 0;
+        if (counters.has_disk_io) {
+            const bool both = previous && previous->has_disk_io;
+            p.disk_read_bps = both ? rate(r.disk_read, previous->disk_read, elapsed) : 0;
+            p.disk_write_bps = both ? rate(r.disk_write, previous->disk_write, elapsed) : 0;
         }
-        if (r.has_net_io) {
-            p.net_rx_bps = has_previous ? rate(r.net_rx, previous->second.net_rx, elapsed) : 0;
-            p.net_tx_bps = has_previous ? rate(r.net_tx, previous->second.net_tx, elapsed) : 0;
+        if (counters.has_net_io) {
+            const bool both = previous && previous->has_net_io;
+            p.net_rx_bps = both ? rate(r.net_rx, previous->net_rx, elapsed) : 0;
+            p.net_tx_bps = both ? rate(r.net_tx, previous->net_tx, elapsed) : 0;
         }
-        if (r.has_gpu) {
+        if (counters.has_gpu) {
             // Nanoseconds of GPU time per second of wall time, as a percentage of one GPU.
-            p.gpu_percent = has_previous ? rate(r.gpu_time_ns, previous->second.gpu_time_ns, elapsed) / 1e7 : 0;
+            p.gpu_percent =
+                previous && previous->has_gpu ? rate(r.gpu_time_ns, previous->gpu_time_ns, elapsed) / 1e7 : 0;
         }
-        if (r.has_energy && (monitor->capabilities & PC_CAP_PROCESS_ENERGY)) {
+        if (counters.has_energy && (monitor->capabilities & PC_CAP_PROCESS_ENERGY)) {
             // Nanojoules per second = nanowatts.
-            p.power_watts = has_previous ? rate(r.energy_nj, previous->second.energy_nj, elapsed) / 1e9 : 0;
+            p.power_watts =
+                previous && previous->has_energy ? rate(r.energy_nj, previous->energy_nj, elapsed) / 1e9 : 0;
         }
         current.emplace(key, counters);
 

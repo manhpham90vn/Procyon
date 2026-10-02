@@ -18,6 +18,13 @@ struct ProcessCounters {
     uint64_t net_tx = 0;
     uint64_t gpu_time_ns = 0;
     uint64_t energy_nj = 0;
+    // Which counters were readable: a rate needs the same counter at both ends, or a counter that
+    // turns readable (helper connected) would count the process's whole lifetime as one interval.
+    bool has_cpu = false;
+    bool has_disk_io = false;
+    bool has_net_io = false;
+    bool has_gpu = false;
+    bool has_energy = false;
 };
 
 // Storage behind pc_process_details pointers.
