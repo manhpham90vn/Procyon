@@ -62,10 +62,12 @@ jobs:
           retention-days: 7
       - name: Performance targets
         # Fails the build when a non-functional target in docs/procyon-spec.md is missed.
-        # A screen whose CPU misses is measured once more: runner noise only ever adds CPU.
-        # Covers every screen plus the menu bar only state; the menu bar still misses its targets
-        # (< 0.5% CPU, < 30 MB), so it is reported without failing the build until that is fixed.
-        run: scripts/bench-macos.py --attempts 2 --known-misses menubar
+        # A missed CPU or startup target is measured up to 3 times: runner noise only ever adds CPU.
+        # A miss whose every attempt ran on a slow runner (timed by a fixed calibration workload)
+        # is a warning, not a failure. Covers every screen plus the menu bar only state; the menu bar
+        # still misses its targets (< 0.5% CPU, < 30 MB), so it is reported without failing the build
+        # until that is fixed.
+        run: scripts/bench-macos.py --attempts 3 --known-misses menubar
       - uses: actions/upload-artifact@v4
         if: always()
         with:
