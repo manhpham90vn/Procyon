@@ -3,6 +3,8 @@
 //   swiftc -O scripts/bench-probe.swift -o bench-probe
 //   bench-probe <Procyon.app> <page> <warmup seconds> <duration seconds>
 // The page `menubar` opens the window, closes it and samples Procyon running in the menu bar only.
+// Alongside, it times a fixed piece of work once a second (`calibration_ns`): on a shared CI runner
+// the same work takes more CPU time when the host is busy or slower, which inflates Procyon's CPU too.
 // Used by scripts/bench-macos.py.
 import AppKit
 import Darwin
@@ -15,6 +17,8 @@ struct Result: Encodable {
     var memoryAverageBytes: UInt64
     var memoryP90Bytes: UInt64
     var memoryPeakBytes: UInt64
+    /// Median CPU time of the fixed calibration work while measuring; lower is a faster machine.
+    var calibrationNs: UInt64
 }
 
 let arguments = CommandLine.arguments
@@ -40,6 +44,23 @@ func usage(_ pid: pid_t) -> (cpu: Double, footprint: UInt64)? {
     return (nanoseconds(info.ri_user_time + info.ri_system_time) / 1e9, info.ri_phys_footprint)
 }
 
+/// CPU time of a fixed piece of work (about a millisecond), the best of three: preemption and
+/// interrupts only ever add to it.
+func calibrate() -> UInt64 {
+    var best = UInt64.max
+    for _ in 0..<3 {
+        let start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        var x: UInt64 = 0x9E37_79B9_7F4A_7C15
+        for i in 0..<400_000 { x = (x ^ UInt64(i)) &* 0xBF58_476D_1CE4_E5B9 &+ (x >> 31) }
+        let elapsed = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - start
+        if x == 0 { print("") }  // keeps the loop from being optimized away
+        best = min(best, elapsed)
+    }
+    return best
+}
+
+func median(_ values: [UInt64]) -> UInt64 { values.isEmpty ? 0 : values.sorted()[values.count / 2] }
+
 /// Whether `pid` shows a normal window on screen. Owner and bounds need no screen-recording permission.
 func hasWindow(_ pid: pid_t) -> Bool {
     let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
@@ -62,6 +83,8 @@ configuration.arguments = [
 ]
 if menuBarOnly { configuration.arguments += ["-launchInMenuBar", "YES", "-menuBarEnabled", "YES"] }
 
+// Calibrate before launching: a zero duration (startup only) has no sampling loop.
+var calibrations = (0..<5).map { _ in calibrate() }
 let launched = now()
 nonisolated(unsafe) var opened: NSRunningApplication?
 nonisolated(unsafe) var openError: Error?
@@ -110,6 +133,7 @@ while now() - start < duration {
     guard let sample = usage(pid) else { break }
     footprints.append(sample.footprint)
     last = sample
+    calibrations.append(calibrate())
 }
 let elapsed = now() - start
 
@@ -125,7 +149,7 @@ let result = Result(
     cpuPercentOfMachine: cpu / Double(ProcessInfo.processInfo.activeProcessorCount),
     memoryAverageBytes: footprints.isEmpty ? 0 : footprints.reduce(0, +) / UInt64(footprints.count),
     memoryP90Bytes: footprints.isEmpty ? 0 : footprints.sorted()[(footprints.count - 1) * 9 / 10],
-    memoryPeakBytes: footprints.max() ?? 0)
+    memoryPeakBytes: footprints.max() ?? 0, calibrationNs: median(calibrations))
 let encoder = JSONEncoder()
 encoder.keyEncodingStrategy = .convertToSnakeCase
 print(String(decoding: try encoder.encode(result), as: UTF8.self))

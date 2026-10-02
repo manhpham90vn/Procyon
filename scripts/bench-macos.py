@@ -2,12 +2,18 @@
 """Measures Procyon against the non-functional targets in docs/procyon-spec.md.
 
     scripts/bench-macos.py                  build what is missing, measure, exit 1 on a missed target
-    scripts/bench-macos.py --report-only    always exit 0 (noisy shared CI runners)
+    scripts/bench-macos.py --report-only    always exit 0
+    scripts/bench-macos.py --attempts 3     measure a missed CPU or startup target again (CI)
     scripts/bench-macos.py --pages overview processes --duration 30
 
 Measures the release app bundle (dist/Procyon.app) and the C++ core CLI (build/core/procyon-cli):
 startup time, CPU and memory at a 1 s refresh on every screen and with only the menu bar widget
 running, DMG size, and how far the numbers are from the OS's own tools. Writes dist/bench.json and, on GitHub Actions, a summary table.
+
+Shared CI runners are noisy: when the host is busy, the same work costs more CPU time, so Procyon's
+CPU and startup go up with no change in the code. The probe times a fixed piece of work alongside each
+measurement; its slowdown against the fastest one of the run says how slow the runner was. A missed
+CPU or startup target whose every attempt ran on a slow runner is reported as NOISY and does not fail.
 """
 
 import argparse
@@ -35,7 +41,7 @@ PAGES = [
     "history", "inspect", "system", "settings", "menubar",
 ]
 
-# Targets from "Yêu cầu phi chức năng" in docs/procyon-spec.md. A value must stay below its limit.
+# Targets from "Non-functional requirements" in docs/procyon-spec.md. A value must stay below its limit.
 STARTUP_SECONDS = 1.0  # launch to first window, median
 CPU_LIMIT = 2.0  # % of a 4-core machine with the window open at a 1 s refresh
 # Memory is the 90th percentile of the per-second footprint: the peak alone swings by 20 MB between
@@ -45,6 +51,9 @@ MENU_BAR_CPU_LIMIT = 0.5  # % of a 4-core machine with only the menu bar widget 
 MENU_BAR_MEMORY_MB = 30  # footprint running in the background (menu bar only)
 INSTALLER_MB = 20  # compressed DMG
 ACCURACY_PERCENT = 5  # vs the OS's own tools; percentage points for CPU
+# An attempt ran on a slow runner when the calibration work took this much longer than the run's best.
+# A quiet machine stays within about 7%.
+NOISY_SLOWDOWN = 1.15
 
 
 def run(*args, **kwargs):
@@ -85,6 +94,16 @@ def describe(page):
 
 def probe(binary, page, warmup, duration):
     return json.loads(run(str(binary), str(APP), page, str(warmup), str(duration)))
+
+
+def best(tries):
+    """The attempt with the lowest CPU: runner noise only ever adds CPU."""
+    return min(tries, key=lambda r: r["cpu_percent_of_core"])
+
+
+def median_startup(launches):
+    measured = [launch["startup_seconds"] for launch in launches if launch["startup_seconds"] is not None]
+    return statistics.median(measured) if measured else None
 
 
 def vm_stat_used():
@@ -175,41 +194,69 @@ def main():
         print("==> sizes", flush=True)
         sizes = {"app_bytes": bundle_size(), "dmg_bytes": dmg_size(tmp)}
 
-        screens = []
+        # Every attempt of a screen; the reported one is its lowest CPU.
+        attempts = {}
         for page in args.pages:
             print(f"==> {page}: {args.warmup:g} s warm-up, {args.duration:g} s sampling", flush=True)
-            result = probe(prober, page, args.warmup, args.duration)
-            for _ in range(args.attempts - 1):
-                if result["cpu_percent_of_core"] / 4 < limits(page)[0]:
-                    break
+            attempts[page] = [probe(prober, page, args.warmup, args.duration)]
+            while len(attempts[page]) < args.attempts and best(attempts[page])["cpu_percent_of_core"] / 4 >= limits(page)[0]:
                 print(f"==> {page}: CPU missed, measuring again", flush=True)
-                again = probe(prober, page, args.warmup, args.duration)
-                result = min(result, again, key=lambda r: r["cpu_percent_of_core"])
-            screens.append(result)
-        startups = [s["startup_seconds"] for s in screens]
-        for i in range(args.launches):
-            print(f"==> launch {i + 1}/{args.launches}", flush=True)
-            startups.append(probe(prober, "overview", 0, 0)["startup_seconds"])
+                attempts[page].append(probe(prober, page, args.warmup, args.duration))
+        # Batches of launches; each screen's first window counts towards the first batch.
+        launches = [[{"startup_seconds": a[0]["startup_seconds"], "calibration_ns": a[0]["calibration_ns"]} for a in attempts.values()]]
+        while True:
+            for i in range(args.launches):
+                print(f"==> launch {i + 1}/{args.launches}", flush=True)
+                launches[-1].append(probe(prober, "overview", 0, 0))
+            if len(launches) >= args.attempts or (median_startup(launches[-1]) or STARTUP_SECONDS) < STARTUP_SECONDS:
+                break
+            print("==> startup missed, measuring again", flush=True)
+            launches.append([])
 
         print("==> accuracy against vm_stat, iostat, sysctl and ps", flush=True)
         acc = accuracy(10)
 
-    measured = [s for s in startups if s is not None]
-    startup = statistics.median(measured) if measured else None
-    # (target, value, limit, shown value, shown limit); value None = couldn't measure.
-    checks = [("Startup, median to first window", startup, STARTUP_SECONDS, f"{startup:.2f} s" if startup else "no window", f"< {STARTUP_SECONDS:g} s")]
+    # The fastest calibration of the run stands for the runner at its quietest.
+    calibrations = [a["calibration_ns"] for tries in attempts.values() for a in tries]
+    calibrations += [launch["calibration_ns"] for batch in launches for launch in batch]
+    baseline = min((c for c in calibrations if c), default=1)
+
+    def slowdown(calibration_ns):
+        return calibration_ns / baseline
+
+    for page, tries in attempts.items():
+        for a in tries:
+            a["runner_slowdown"] = slowdown(a["calibration_ns"])
+    screens = [best(tries) for tries in attempts.values()]
+    batches = [
+        {"median_seconds": median_startup(batch), "runner_slowdown": slowdown(statistics.median(launch["calibration_ns"] for launch in batch)),
+         "startup_seconds": [launch["startup_seconds"] for launch in batch]}
+        for batch in launches
+    ]
+    startup_batch = min(batches, key=lambda b: b["median_seconds"] if b["median_seconds"] is not None else float("inf"))
+    startup = startup_batch["median_seconds"]
+
+    def runner(slowdowns):
+        """How slow the runner was, and whether every attempt ran on a slow one."""
+        return f", runner {min(slowdowns):.2f}× slower" if min(slowdowns) >= 1.05 else "", min(slowdowns) > NOISY_SLOWDOWN
+
+    # (target, value, limit, shown value, shown limit, every attempt noisy); value None = couldn't measure.
+    note, noisy = runner([b["runner_slowdown"] for b in batches])
+    checks = [("Startup, median to first window", startup, STARTUP_SECONDS, f"{startup:.2f} s{note}" if startup else "no window", f"< {STARTUP_SECONDS:g} s", noisy)]
     known_misses = set()
     for s in screens:
         if s["page"] in args.known_misses:
             known_misses |= {f"CPU, {describe(s['page'])} at 1 s refresh", f"Memory, {describe(s['page'])}"}
         cpu_limit, memory_limit = limits(s["page"])
+        note, noisy = runner([a["runner_slowdown"] for a in attempts[s["page"]]])
         checks.append(
             (
                 f"CPU, {describe(s['page'])} at 1 s refresh",
                 s["cpu_percent_of_core"] / 4,
                 cpu_limit,
-                f"{s['cpu_percent_of_core'] / 4:.2f}% of a 4-core Mac ({s['cpu_percent_of_core']:.1f}% of one core)",
+                f"{s['cpu_percent_of_core'] / 4:.2f}% of a 4-core Mac ({s['cpu_percent_of_core']:.1f}% of one core{note})",
                 f"< {cpu_limit:g}% on 4 cores",
+                noisy,
             )
         )
         checks.append(
@@ -219,42 +266,57 @@ def main():
                 memory_limit,
                 f"{s['memory_p90_bytes'] / MB:.1f} MB p90 (peak {s['memory_peak_bytes'] / MB:.1f}, average {s['memory_average_bytes'] / MB:.1f})",
                 f"< {memory_limit} MB",
+                False,
             )
         )
-    checks.append(("Installer (DMG)", sizes["dmg_bytes"] / MB, INSTALLER_MB, f"{sizes['dmg_bytes'] / MB:.1f} MB (app {sizes['app_bytes'] / MB:.1f} MB)", f"< {INSTALLER_MB} MB"))
+    checks.append(("Installer (DMG)", sizes["dmg_bytes"] / MB, INSTALLER_MB, f"{sizes['dmg_bytes'] / MB:.1f} MB (app {sizes['app_bytes'] / MB:.1f} MB)", f"< {INSTALLER_MB} MB", False))
     cpu = acc["cpu"]
-    checks.append(("Accuracy: CPU vs iostat", cpu["diff_points"], ACCURACY_PERCENT, f"{cpu['procyon']:.1f}% vs {cpu['os']}% ({cpu['diff_points']:.1f} points)", f"< {ACCURACY_PERCENT} points"))
+    checks.append(("Accuracy: CPU vs iostat", cpu["diff_points"], ACCURACY_PERCENT, f"{cpu['procyon']:.1f}% vs {cpu['os']}% ({cpu['diff_points']:.1f} points)", f"< {ACCURACY_PERCENT} points", False))
     for key, label in (("memory_used", "memory used vs vm_stat"), ("swap_used", "swap used vs sysctl")):
         a = acc[key]
-        checks.append((f"Accuracy: {label}", a["diff_percent"], ACCURACY_PERCENT, f"{a['procyon'] / MB:,.0f} vs {a['os'] / MB:,.0f} MB ({a['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%"))
+        checks.append((f"Accuracy: {label}", a["diff_percent"], ACCURACY_PERCENT, f"{a['procyon'] / MB:,.0f} vs {a['os'] / MB:,.0f} MB ({a['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%", False))
     p = acc["process_count"]
-    checks.append(("Accuracy: process count vs ps", p["diff_percent"], ACCURACY_PERCENT, f"{p['procyon']} vs {p['os']} ({p['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%"))
+    checks.append(("Accuracy: process count vs ps", p["diff_percent"], ACCURACY_PERCENT, f"{p['procyon']} vs {p['os']} ({p['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%", False))
 
-    rows = [(name, shown, limit, value is not None and value < bound) for name, value, bound, shown, limit in checks]
+    def status(name, value, bound, noisy):
+        if value is not None and value < bound:
+            return "PASS"
+        return "KNOWN" if name in known_misses else "NOISY" if noisy else "FAIL"
+
+    rows = [(name, shown, limit, status(name, value, bound, noisy)) for name, value, bound, shown, limit, noisy in checks]
     width = max(len(r[0]) for r in rows)
     print()
-    for name, shown, limit, ok in rows:
-        print(f"{'PASS' if ok else 'FAIL'}  {name:<{width}}  {shown}  (target {limit})")
+    for name, shown, limit, result in rows:
+        print(f"{result:<5}  {name:<{width}}  {shown}  (target {limit})")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(
-            {"sizes": sizes, "screens": screens, "startup_seconds": startups, "accuracy": acc,
-             "checks": [{"name": n, "value": s, "target": l, "pass": ok} for n, s, l, ok in rows]},
+            {"sizes": sizes, "screens": screens, "attempts": attempts, "startup": batches, "calibration_baseline_ns": baseline,
+             "accuracy": acc, "checks": [{"name": n, "value": s, "target": l, "result": r} for n, s, l, r in rows]},
             indent=2,
         )
     )
     print(f"\nWrote {os.path.relpath(args.output, ROOT)}")
 
+    noisy = [r for r in rows if r[3] == "NOISY"]
+    if os.environ.get("GITHUB_ACTIONS"):
+        for name, shown, limit, _ in noisy:
+            print(f"::warning title=Performance target missed on a slow runner::{name}: {shown} (target {limit})")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        marks = {"PASS": "✅", "KNOWN": "⚠️ known", "NOISY": "⚠️ noisy", "FAIL": "❌"}
         with open(summary, "a") as out:
             out.write("### Performance targets\n\n| | Target | Measured | Spec |\n| --- | --- | --- | --- |\n")
-            for name, shown, limit, ok in rows:
-                mark = "✅" if ok else "⚠️ known" if name in known_misses else "❌"
-                out.write(f"| {mark} | {name} | {shown} | {limit} |\n")
-            out.write("\nShared CI runners are noisy: treat CPU and startup as trends, not exact numbers.\n")
+            for name, shown, limit, result in rows:
+                out.write(f"| {marks[result]} | {name} | {shown} | {limit} |\n")
+            out.write(
+                "\nShared CI runners are noisy: treat CPU and startup as trends, not exact numbers. "
+                f"⚠️ noisy: missed, but every attempt ran on a runner over {NOISY_SLOWDOWN:g}× slower than its best.\n"
+            )
 
-    failed = [r for r in rows if not r[3] and r[0] not in known_misses]
+    failed = [r for r in rows if r[3] == "FAIL"]
+    if noisy:
+        print(f"\n{len(noisy)} target(s) missed on a slow runner, not counted", file=sys.stderr)
     if failed and not args.report_only:
         sys.exit(f"\n{len(failed)} target(s) missed")
 

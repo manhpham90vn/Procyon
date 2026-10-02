@@ -1,8 +1,8 @@
 # Common entry points. `make help` lists them.
-.PHONY: help build test app core run bench format lint tokens icon clean ci
+.PHONY: help build test app core run bench screenshots format lint tokens icon clean ci
 
 help: ## List targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
 
 build: ## Debug build of the Swift package (app + helper)
 	swift build
@@ -23,6 +23,10 @@ run: app ## Build and open the app
 
 bench: ## Measure the app against the spec's performance targets
 	scripts/bench-macos.py
+
+screenshots: ## Retake the README screenshots (light and dark) in docs/screenshots
+	@test -d dist/Procyon.app || scripts/build-macos-app.sh release
+	swift scripts/screenshots.swift --pages overview processes cpu energy history inspect startup
 
 format: ## Format Swift and C/C++ sources in place
 	scripts/format.sh
