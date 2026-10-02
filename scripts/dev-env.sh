@@ -14,7 +14,7 @@ find_tool() {
 CLANG_FORMAT="$(find_tool clang-format)"
 CLANG_TIDY="$(find_tool clang-tidy)"
 
-SWIFT_PATHS=(Package.swift apps scripts/make-icon.swift)
+SWIFT_PATHS=(Package.swift apps scripts/make-icon.swift scripts/bench-probe.swift)
 CPP_FILES=()
 while IFS= read -r file; do CPP_FILES+=("$file"); done < <(
     find core -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' \) | sort

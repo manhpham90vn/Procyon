@@ -44,11 +44,6 @@ struct CPUView: View {
                 ])
             }
 
-            TopAppsPanel(
-                title: "Top Apps", symbol: "flame.fill", tint: style.start, rows: store.topCPU,
-                isLoading: !store.hasSample, style: style, text: { Format.cpu($0.cpu) },
-                fraction: { ($0.cpu ?? 0) / 100 })
-
             Panel("Cores", symbol: "square.grid.3x3.fill") {
                 CoreGrid(
                     cores: s.coreUsage.indices.map { index in
@@ -57,6 +52,11 @@ struct CPUView: View {
                             samples: index < store.history.cores.count ? store.history.cores[index].samples : [])
                     }, style: style)
             }
+
+            TopAppsPanel(
+                title: "Top Apps", symbol: "flame.fill", tint: style.start, rows: store.topCPU,
+                isLoading: !store.hasSample, style: style, text: { Format.cpu($0.cpu) },
+                fraction: { ($0.cpu ?? 0) / 100 })
         }
     }
 }
@@ -179,6 +179,8 @@ struct DiskView: View {
                 ])
             }
 
+            VolumesPanel(volumes: store.volumes)
+
             let diskPeak = max(store.topDisk.map(\.diskTotal).max() ?? 0, 1)
             TopAppsPanel(
                 title: "Top Apps", symbol: "internaldrive.fill", tint: style.start, rows: store.topDisk,
@@ -189,8 +191,6 @@ struct DiskView: View {
                     primary: row.diskRead, secondary: row.diskWrite, primarySymbol: "arrow.down.doc",
                     secondarySymbol: "arrow.up.doc", style: style)
             }
-
-            VolumesPanel(volumes: store.volumes)
         }
         .onAppear { store.refreshVolumes() }
     }

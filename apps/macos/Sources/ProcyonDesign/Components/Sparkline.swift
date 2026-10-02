@@ -24,7 +24,9 @@ public struct ChartSeries: Identifiable, Sendable {
     }
 }
 
-/// Lightweight time-series chart drawn with Canvas (no per-point views).
+/// Lightweight time-series chart drawn with shapes (no per-point views).
+/// Not a Canvas: a single Canvas makes SwiftUI render the whole window through Metal, which keeps
+/// ~50 MB of window-sized buffers around; shapes stay in Core Animation layers.
 /// The newest sample sits on the right edge; `window` seconds are visible.
 public struct Sparkline: View {
     var series: [ChartSeries]
@@ -61,66 +63,20 @@ public struct Sparkline: View {
     }
 
     public var body: some View {
-        Canvas { context, size in
-            let end = series.compactMap { $0.samples.last?.time }.max() ?? 0
-            let scale = maxValue ?? Sparkline.niceCeiling(series.flatMap { $0.samples.map(\.value) }.max() ?? 0)
-
+        let end = series.compactMap { $0.samples.last?.time }.max() ?? 0
+        let scale = maxValue ?? Sparkline.niceCeiling(series.flatMap { $0.samples.map(\.value) }.max() ?? 0)
+        ZStack {
             if gridLines > 0 {
-                for line in 0...gridLines {
-                    let y = (size.height - lineWidth) * CGFloat(line) / CGFloat(gridLines) + lineWidth / 2
-                    var grid = Path()
-                    grid.move(to: CGPoint(x: 0, y: y))
-                    grid.addLine(to: CGPoint(x: size.width, y: y))
-                    context.stroke(
-                        grid, with: .color(Tokens.Palette.chartGrid),
-                        style: StrokeStyle(lineWidth: 1, dash: line == gridLines ? [] : [3, 4]))
-                }
+                GridLines(count: gridLines, lineWidth: lineWidth, dashed: true)
+                    .stroke(Tokens.Palette.chartGrid, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                GridLines(count: gridLines, lineWidth: lineWidth, dashed: false)
+                    .stroke(Tokens.Palette.chartGrid, lineWidth: 1)
             }
 
-            for item in series {
-                let points = item.samples.map { sample in
-                    CGPoint(
-                        x: size.width - CGFloat((end - sample.time) / window) * size.width,
-                        y: size.height - CGFloat(min(max(sample.value / max(scale, .leastNonzeroMagnitude), 0), 1))
-                            * (size.height - lineWidth) - lineWidth / 2
-                    )
-                }
-                guard points.count > 1 else { continue }
-                let line = Sparkline.smoothPath(points)
-
-                if item.fills {
-                    var area = line
-                    area.addLine(to: CGPoint(x: points.last!.x, y: size.height))
-                    area.addLine(to: CGPoint(x: points.first!.x, y: size.height))
-                    area.closeSubpath()
-                    context.fill(
-                        area,
-                        with: .linearGradient(
-                            Gradient(colors: [
-                                item.color.opacity(Tokens.Chart.fillOpacityTop),
-                                item.color.opacity(Tokens.Chart.fillOpacityBottom),
-                            ]),
-                            startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
-                }
-
-                let stroke = StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
-                if glow {
-                    // Halo from wide translucent strokes; a blur filter would rasterize on the CPU.
-                    for (width, opacity) in [(Tokens.Chart.glowRadius * 1.6, 0.08), (Tokens.Chart.glowRadius * 0.8, 0.14)] {
-                        context.stroke(
-                            line, with: .color(item.color.opacity(opacity)),
-                            style: StrokeStyle(lineWidth: lineWidth + width, lineCap: .round, lineJoin: .round))
-                    }
-                }
-                context.stroke(line, with: .color(item.color), style: stroke)
-
-                if let last = points.last {
-                    let dot = Path(
-                        ellipseIn: CGRect(
-                            x: last.x - lineWidth * 1.4, y: last.y - lineWidth * 1.4, width: lineWidth * 2.8,
-                            height: lineWidth * 2.8))
-                    context.fill(dot, with: .color(item.color))
-                }
+            ForEach(series) { item in
+                SeriesPlot(
+                    item: item, plot: Plot(samples: item.samples, end: end, window: window, scale: scale, lineWidth: lineWidth),
+                    lineWidth: lineWidth, glow: glow)
             }
         }
         .accessibilityHidden(true)
@@ -134,7 +90,7 @@ public struct Sparkline: View {
         return 10 * exponent
     }
 
-    static func smoothPath(_ points: [CGPoint]) -> Path {
+    nonisolated static func smoothPath(_ points: [CGPoint]) -> Path {
         var path = Path()
         path.move(to: points[0])
         for index in 1..<points.count {
@@ -144,5 +100,93 @@ public struct Sparkline: View {
             if index == points.count - 1 { path.addLine(to: current) }
         }
         return path
+    }
+}
+
+/// Horizontal grid: the dashed inner lines, or the solid baseline.
+private struct GridLines: Shape {
+    var count: Int
+    var lineWidth: CGFloat
+    var dashed: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        for line in dashed ? Array(0..<count) : [count] {
+            let y = (rect.height - lineWidth) * CGFloat(line) / CGFloat(count) + lineWidth / 2
+            path.move(to: CGPoint(x: 0, y: y))
+            path.addLine(to: CGPoint(x: rect.width, y: y))
+        }
+        return path
+    }
+}
+
+private struct SeriesPlot: View {
+    let item: ChartSeries
+    let plot: Plot
+    let lineWidth: CGFloat
+    let glow: Bool
+
+    var body: some View {
+        if item.fills {
+            plot.part(.area).fill(
+                LinearGradient(
+                    colors: [
+                        item.color.opacity(Tokens.Chart.fillOpacityTop), item.color.opacity(Tokens.Chart.fillOpacityBottom),
+                    ], startPoint: .top, endPoint: .bottom))
+        }
+        if glow {
+            // Halo from wide translucent strokes; a blur filter would rasterize on the CPU.
+            halo(width: Tokens.Chart.glowRadius * 1.6, opacity: 0.08)
+            halo(width: Tokens.Chart.glowRadius * 0.8, opacity: 0.14)
+        }
+        plot.stroke(item.color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+        plot.part(.dot).fill(item.color)
+    }
+
+    private func halo(width: CGFloat, opacity: Double) -> some View {
+        plot.stroke(
+            item.color.opacity(opacity), style: StrokeStyle(lineWidth: lineWidth + width, lineCap: .round, lineJoin: .round))
+    }
+}
+
+/// One part of a series: its line (the default), the area under it, or the dot on the newest sample.
+private struct Plot: Shape {
+    enum Part { case area, line, dot }
+
+    var samples: [ChartSample]
+    var end: TimeInterval
+    var window: TimeInterval
+    var scale: Double
+    var lineWidth: CGFloat
+    var part: Part = .line
+
+    func part(_ part: Part) -> Plot {
+        var copy = self
+        copy.part = part
+        return copy
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let points = samples.map { sample in
+            CGPoint(
+                x: rect.width - CGFloat((end - sample.time) / window) * rect.width,
+                y: rect.height - CGFloat(min(max(sample.value / max(scale, .leastNonzeroMagnitude), 0), 1))
+                    * (rect.height - lineWidth) - lineWidth / 2
+            )
+        }
+        guard points.count > 1, let first = points.first, let last = points.last else { return Path() }
+        switch part {
+        case .line:
+            return Sparkline.smoothPath(points)
+        case .area:
+            var area = Sparkline.smoothPath(points)
+            area.addLine(to: CGPoint(x: last.x, y: rect.height))
+            area.addLine(to: CGPoint(x: first.x, y: rect.height))
+            area.closeSubpath()
+            return area
+        case .dot:
+            let radius = lineWidth * 1.4
+            return Path(ellipseIn: CGRect(x: last.x - radius, y: last.y - radius, width: radius * 2, height: radius * 2))
+        }
     }
 }

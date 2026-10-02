@@ -60,3 +60,14 @@ jobs:
           name: Procyon-app-${{ github.sha }}
           path: dist/Procyon.app
           retention-days: 7
+      - name: Performance targets
+        # Fails the build when a non-functional target in docs/procyon-spec.md is missed.
+        # A screen whose CPU misses is measured once more: runner noise only ever adds CPU.
+        run: scripts/bench-macos.py --attempts 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ github.sha }}
+          path: dist/bench.json
+          if-no-files-found: ignore
+          retention-days: 30

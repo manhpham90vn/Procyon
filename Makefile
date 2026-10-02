@@ -1,5 +1,5 @@
 # Common entry points. `make help` lists them.
-.PHONY: help build test app core run format lint tokens icon clean ci
+.PHONY: help build test app core run bench format lint tokens icon clean ci
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -19,6 +19,9 @@ core: ## Build the C++ core, CLI and helper with CMake
 
 run: app ## Build and open the app
 	open dist/Procyon.app
+
+bench: ## Measure the app against the spec's performance targets
+	scripts/bench-macos.py
 
 format: ## Format Swift and C/C++ sources in place
 	scripts/format.sh
