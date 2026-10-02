@@ -67,7 +67,9 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID
-  and notarizes; without them the build is ad-hoc signed.
+  and notarizes; without them the build is ad-hoc signed. With `HOMEBREW_TAP_TOKEN` (contents write access to
+  [manhpham90vn/homebrew-tap](https://github.com/manhpham90vn/homebrew-tap)), stable releases also update the `procyon`
+  cask there through `scripts/publish-homebrew.sh`, rendered from `packaging/homebrew/procyon.rb`.
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0

@@ -8,6 +8,8 @@ name: Release
 #   MACOS_CERTIFICATE_P12       base64 of a "Developer ID Application" certificate exported as .p12
 #   MACOS_CERTIFICATE_PASSWORD  password of that .p12
 #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   notarization (app-specific password)
+#   HOMEBREW_TAP_TOKEN          token with contents write access to manhpham90vn/homebrew-tap; stable
+#                               releases then update the procyon cask (`brew install manhpham90vn/tap/procyon`)
 
 on:
   push:
@@ -38,6 +40,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: maxim-lobanov/setup-xcode@v1
@@ -91,6 +94,10 @@ jobs:
             dist/Procyon-${{ steps.version.outputs.value }}.dmg
             dist/Procyon-${{ steps.version.outputs.value }}.zip
             dist/Procyon-${{ steps.version.outputs.value }}.sha256
+
+      - name: Update the Homebrew tap
+        if: steps.version.outputs.prerelease == 'false' && env.HOMEBREW_TAP_TOKEN != ''
+        run: scripts/publish-homebrew.sh "${{ steps.version.outputs.value }}"
 
       - name: Clean up keychain
         if: always() && env.MACOS_CERTIFICATE_P12 != ''

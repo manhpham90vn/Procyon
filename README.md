@@ -98,6 +98,16 @@ Procyon is light on resources: sampling uses about 0.5% of one core.
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install --cask manhpham90vn/tap/procyon
+```
+
+Update with `brew upgrade --cask procyon`.
+
+### Download
+
 1. Download the latest `Procyon-x.y.z.dmg` from the [Releases page](https://github.com/manhpham90vn/Procyon/releases/latest).
 2. Open the DMG and drag **Procyon** into **Applications**.
 3. Open Procyon from Applications or Spotlight.
@@ -164,8 +174,9 @@ moment. You can turn recording off or clear it in Settings. It uses a few MB in
 ## Uninstall
 
 1. If you unlocked full access, run **Remove Administrator Helper** from the ⌘K palette.
-2. Quit Procyon and move it from Applications to the Trash.
-3. Optionally, delete its history: `~/Library/Application Support/Procyon`.
+2. Quit Procyon and move it from Applications to the Trash, or run `brew uninstall --cask procyon`.
+3. Optionally, delete its history: `~/Library/Application Support/Procyon`
+   (`brew uninstall --cask --zap procyon` removes it along with the settings).
 
 ## Known limitations
 
