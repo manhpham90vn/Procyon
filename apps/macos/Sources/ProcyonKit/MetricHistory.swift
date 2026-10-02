@@ -46,6 +46,8 @@ public struct HistoryBank: Sendable, Hashable {
     public var gpuTemperature = MetricHistory()
     /// Internal SSD, Celsius.
     public var diskTemperature = MetricHistory()
+    /// Watts drawn by all apps together.
+    public var appPower = MetricHistory()
 
     public init() {}
 
@@ -72,5 +74,6 @@ public struct HistoryBank: Sendable, Hashable {
         if let temperature = sample.cpuTemperature { cpuTemperature.append(temperature, at: t) }
         if let temperature = sample.gpus.compactMap(\.temperature).max() { gpuTemperature.append(temperature, at: t) }
         if let temperature = sample.diskTemperature { diskTemperature.append(temperature, at: t) }
+        if let power = sample.appPower { appPower.append(power, at: t) }
     }
 }

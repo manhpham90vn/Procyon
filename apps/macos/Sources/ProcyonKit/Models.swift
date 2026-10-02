@@ -80,6 +80,9 @@ public struct Capabilities: OptionSet, Sendable, Hashable {
     public static let battery = Capabilities(rawValue: 1 << 13)
     public static let services = Capabilities(rawValue: 1 << 14)
     public static let startup = Capabilities(rawValue: 1 << 15)
+    public static let processEnergy = Capabilities(rawValue: 1 << 16)
+    public static let openFiles = Capabilities(rawValue: 1 << 17)
+    public static let connections = Capabilities(rawValue: 1 << 18)
 }
 
 /// One GPU. Unknown values are nil.
@@ -139,6 +142,10 @@ public struct SystemSample: Sendable, Hashable {
     public var diskTemperature: Double?
     public var gpus: [GPUInfo] = []
 
+    /// Watts the OS attributes to all processes together; nil without `Capabilities.processEnergy`
+    /// or while processes aren't sampled.
+    public var appPower: Double?
+
     public var processCount = 0
     public var threadCount = 0
     /// Processes whose metrics need administrator privileges (zero once full access is on).
@@ -178,7 +185,7 @@ public enum ViewMode: Int, CaseIterable, Sendable, Identifiable {
 }
 
 public enum ProcessColumn: Int, CaseIterable, Sendable {
-    case name = 0, pid, user, cpu, memory, diskRead, diskWrite, networkReceive, networkSend, threads, gpu
+    case name = 0, pid, user, cpu, memory, diskRead, diskWrite, networkReceive, networkSend, threads, gpu, power
 
     /// Natural first sort direction when a column header is clicked.
     public var prefersDescending: Bool {
@@ -246,6 +253,9 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
     public let nice: Int32
     /// A group is suspended when its main process is.
     public let state: ProcessState
+    /// Watts the OS attributes to the process (a group sums its members); nil without
+    /// `Capabilities.processEnergy`.
+    public let power: Double?
 
     public var hasChildren: Bool { childCount > 0 }
     public var isSystem: Bool { flags.contains(.system) }
@@ -265,7 +275,7 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
         name: String, user: String, path: String, appID: String, appName: String, flags: ProcessFlags,
         cpu: Double?, memory: Int64?, diskRead: Double?, diskWrite: Double?, networkReceive: Double?,
         networkSend: Double?, threads: Int?, startTime: Date?, memberPIDs: [Int32], gpu: Double? = nil, nice: Int32 = 0,
-        state: ProcessState = .unknown
+        state: ProcessState = .unknown, power: Double? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -292,6 +302,7 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
         self.gpu = gpu
         self.nice = nice
         self.state = state
+        self.power = power
     }
 }
 
@@ -303,7 +314,7 @@ extension ProcessRow {
             processCount: processCount, name: name, user: user, path: path, appID: appID, appName: appName,
             flags: flags, cpu: cpu, memory: memory, diskRead: diskRead, diskWrite: diskWrite,
             networkReceive: networkReceive, networkSend: networkSend, threads: threads, startTime: startTime,
-            memberPIDs: memberPIDs, gpu: gpu, nice: nice, state: state)
+            memberPIDs: memberPIDs, gpu: gpu, nice: nice, state: state, power: power)
     }
 }
 

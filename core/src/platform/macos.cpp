@@ -208,7 +208,13 @@ bool read_threads(int32_t pid, Details &out) {
 uint32_t capabilities() {
     // No CPU affinity: macOS only takes affinity hints, and none on Apple Silicon.
     uint32_t caps = PC_CAP_PROCESS_DISK_IO | PC_CAP_MEMORY_COMPRESSED | PC_CAP_MEMORY_PRESSURE | PC_CAP_SWAP |
-                    PC_CAP_PRIORITY | PC_CAP_SUSPEND | PC_CAP_SIGNALS | PC_CAP_SERVICES | PC_CAP_STARTUP;
+                    PC_CAP_PRIORITY | PC_CAP_SUSPEND | PC_CAP_SIGNALS | PC_CAP_SERVICES | PC_CAP_STARTUP |
+                    PC_CAP_OPEN_FILES | PC_CAP_CONNECTIONS;
+    // Energy counters stay zero on machines that neither measure nor model them.
+    rusage_info_v6 self_usage{};
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V6, reinterpret_cast<rusage_info_t *>(&self_usage)) == 0 &&
+        self_usage.ri_energy_nj > 0)
+        caps |= PC_CAP_PROCESS_ENERGY;
     if (sysctl_value<int32_t>("hw.nperflevels") > 1) caps |= PC_CAP_HYBRID_CORES;
     if (process_network_available()) caps |= PC_CAP_PROCESS_NETWORK;
     if (!gpus().empty()) caps |= PC_CAP_GPU;
@@ -296,12 +302,16 @@ bool read_counters(int32_t pid, RawProcess &p) {
         p.restricted = true;
     }
 
-    rusage_info_v2 usage{};
-    if (proc_pid_rusage(pid, RUSAGE_INFO_V2, reinterpret_cast<rusage_info_t *>(&usage)) == 0) {
+    // V6 adds the energy the OS bills to the process (CPU, GPU, ...), measured where the SoC has
+    // energy counters (Apple Silicon) and modelled elsewhere.
+    rusage_info_v6 usage{};
+    if (proc_pid_rusage(pid, RUSAGE_INFO_V6, reinterpret_cast<rusage_info_t *>(&usage)) == 0) {
         p.memory_bytes = static_cast<int64_t>(usage.ri_phys_footprint);
         p.has_disk_io = true;
         p.disk_read = usage.ri_diskio_bytesread;
         p.disk_write = usage.ri_diskio_byteswritten;
+        p.has_energy = true;
+        p.energy_nj = usage.ri_energy_nj;
         if (p.restricted) {
             p.cpu_time_ns = mach_to_ns(usage.ri_user_time + usage.ri_system_time);
             p.restricted = false;

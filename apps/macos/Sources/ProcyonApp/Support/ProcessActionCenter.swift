@@ -200,6 +200,14 @@ extension ProcessActionCenter.Pending {
             }
         if row.kind == .group { text += "\n\nThis applies to all \(row.processCount) processes of the app." }
         if row.isSystem { text += "\n\n“\(row.name)” is a system process. Changing it can make macOS unstable." }
+        // What the process is, when it is a well-known one, so the user knows what they are ending.
+        switch kind {
+        case .end, .forceQuit, .endTree:
+            if let explanation = ProcessCatalog.explain(name: row.name, appName: row.appName) {
+                text += "\n\n\(explanation.summary) \(explanation.advice.title)."
+            }
+        default: break
+        }
         return text
     }
 

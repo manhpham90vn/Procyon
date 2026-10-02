@@ -2,6 +2,7 @@
 // footprint (the "Memory" column of Activity Monitor). Prints one JSON object.
 //   swiftc -O scripts/bench-probe.swift -o bench-probe
 //   bench-probe <Procyon.app> <page> <warmup seconds> <duration seconds>
+// The page `menubar` opens the window, closes it and samples Procyon running in the menu bar only.
 // Used by scripts/bench-macos.py.
 import AppKit
 import Darwin
@@ -12,6 +13,7 @@ struct Result: Encodable {
     var cpuPercentOfCore: Double
     var cpuPercentOfMachine: Double
     var memoryAverageBytes: UInt64
+    var memoryP90Bytes: UInt64
     var memoryPeakBytes: UInt64
 }
 
@@ -21,6 +23,7 @@ guard arguments.count == 5, let warmup = Double(arguments[3]), let duration = Do
     exit(2)
 }
 let page = arguments[2]
+let menuBarOnly = page == "menubar"
 
 var timebase = mach_timebase_info_data_t()
 mach_timebase_info(&timebase)
@@ -54,8 +57,10 @@ configuration.activates = true
 configuration.addsToRecentItems = false
 // Argument-domain defaults: the spec's 1 s refresh, no admin helper, no restored window state.
 configuration.arguments = [
-    "-initialPage", page, "-refreshInterval", "1", "-fullAccessEnabled", "NO", "-ApplePersistenceIgnoreState", "YES",
+    "-initialPage", menuBarOnly ? "overview" : page, "-refreshInterval", "1", "-fullAccessEnabled", "NO",
+    "-ApplePersistenceIgnoreState", "YES",
 ]
+if menuBarOnly { configuration.arguments += ["-launchInMenuBar", "YES", "-menuBarEnabled", "YES"] }
 
 let launched = now()
 nonisolated(unsafe) var opened: NSRunningApplication?
@@ -81,6 +86,15 @@ while now() - launched < 20 {
     }
     usleep(5_000)
 }
+if menuBarOnly {
+    let shown = now()
+    while hasWindow(pid), now() - shown < 10 { usleep(50_000) }
+    if hasWindow(pid) {
+        FileHandle.standardError.write(Data("bench-probe: the window didn't close\n".utf8))
+        app.forceTerminate()
+        exit(1)
+    }
+}
 
 Thread.sleep(forTimeInterval: warmup)
 guard let first = usage(pid) else {
@@ -99,7 +113,8 @@ while now() - start < duration {
 }
 let elapsed = now() - start
 
-app.terminate()
+// In the menu bar only, a plain quit request is cancelled (Procyon stays in the menu bar).
+if menuBarOnly { app.forceTerminate() } else { app.terminate() }
 for _ in 0..<30 where !app.isTerminated { Thread.sleep(forTimeInterval: 0.1) }
 if !app.isTerminated { app.forceTerminate() }
 
@@ -109,6 +124,7 @@ let result = Result(
     page: page, startupSeconds: startup, cpuPercentOfCore: cpu,
     cpuPercentOfMachine: cpu / Double(ProcessInfo.processInfo.activeProcessorCount),
     memoryAverageBytes: footprints.isEmpty ? 0 : footprints.reduce(0, +) / UInt64(footprints.count),
+    memoryP90Bytes: footprints.isEmpty ? 0 : footprints.sorted()[(footprints.count - 1) * 9 / 10],
     memoryPeakBytes: footprints.max() ?? 0)
 let encoder = JSONEncoder()
 encoder.keyEncodingStrategy = .convertToSnakeCase

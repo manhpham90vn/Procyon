@@ -21,7 +21,7 @@ Never hard-code a color, spacing, radius or font size in a screen.
 4. **No blur on live content.** Shadows go on static background shapes. A glow is drawn as wider
    translucent strokes, not a blur filter.
 5. **Metric identity is fixed:** CPU = blue→cyan, Memory = violet→pink, Disk = amber→orange,
-   Network = emerald→lime, GPU = rose→orange, Battery = lime→green (`metric` tokens). A secondary
+   Network = emerald→lime, GPU = rose→orange, Battery = lime→green, Energy = yellow→lime (`metric` tokens). A secondary
    series (write, upload, system) uses the gradient's end color.
 
 ## Foundation

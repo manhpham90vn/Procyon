@@ -12,9 +12,11 @@ struct ProcessInfoSheet: View {
     @State private var loaded = false
     @State private var tab: Tab = .general
     @State private var filter = ""
+    @State private var files: HandleList<OpenFile>?
+    @State private var sockets: HandleList<NetworkConnection>?
 
     private enum Tab: String, CaseIterable, Identifiable {
-        case general = "General", environment = "Environment", threads = "Threads"
+        case general = "General", environment = "Environment", threads = "Threads", files = "Files", network = "Network"
         var id: String { rawValue }
     }
 
@@ -35,6 +37,8 @@ struct ProcessInfoSheet: View {
                     case .general: general(details)
                     case .environment: environment(details)
                     case .threads: threads(details)
+                    case .files: openFiles
+                    case .network: network
                     }
                 } else {
                     EmptyState(
@@ -54,8 +58,9 @@ struct ProcessInfoSheet: View {
             }
         }
         .padding(Tokens.Space.xl)
-        .frame(width: 680, height: 540)
+        .frame(width: 720, height: 540)
         .task { await load() }
+        .task(id: tab) { await loadHandles() }
     }
 
     private var header: some View {
@@ -81,6 +86,10 @@ struct ProcessInfoSheet: View {
 
     private func general(_ d: ProcessDetails) -> some View {
         ScrollView {
+            if let explanation = ProcessCatalog.explain(name: row.name, appName: row.appName) {
+                ExplanationCard(explanation: explanation)
+                    .padding(.bottom, Tokens.Space.md)
+            }
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: Tokens.Space.lg, verticalSpacing: Tokens.Space.sm) {
                 field("Path", d.path.isEmpty ? Format.unavailable : d.path, mono: true)
                 field("Working directory", d.workingDirectory.isEmpty ? Format.unavailable : d.workingDirectory, mono: true)
@@ -170,19 +179,85 @@ struct ProcessInfoSheet: View {
     }
 
     @ViewBuilder
+    private var openFiles: some View {
+        if let files {
+            if files.items.isEmpty {
+                handlesUnavailable(files.isComplete, what: "open files")
+            } else {
+                Table(files.items) {
+                    TableColumn("Kind") { Text($0.kind.title).foregroundStyle(Tokens.Palette.textSecondary) }.width(90)
+                    TableColumn("FD") { Text($0.descriptor >= 0 ? "\($0.descriptor)" : "—").monospacedDigit() }.width(40)
+                    TableColumn("Path") { file in
+                        Text(file.path).font(Tokens.Typography.mono).lineLimit(1).truncationMode(.middle).help(file.path)
+                            .contextMenu {
+                                Button("Show in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
+                                }
+                                Button("Copy Path") { ProcessActionCenter.copy(file.path) }
+                            }
+                    }
+                }
+            }
+        } else {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var network: some View {
+        if let sockets {
+            if sockets.items.isEmpty {
+                handlesUnavailable(sockets.isComplete, what: "network sockets")
+            } else {
+                Table(sockets.items) {
+                    TableColumn("Protocol") { Text("\($0.transport.rawValue) · IPv\($0.ipVersion)") }.width(90)
+                    TableColumn("Local") { Text($0.localEndpoint).font(Tokens.Typography.mono).textSelection(.enabled) }
+                    TableColumn("Remote") {
+                        Text($0.remoteEndpoint.isEmpty ? "—" : $0.remoteEndpoint).font(Tokens.Typography.mono)
+                            .textSelection(.enabled)
+                    }
+                    TableColumn("State") { Text($0.isListening ? "Listening" : $0.state.title) }.width(90)
+                }
+            }
+        } else {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func handlesUnavailable(_ complete: Bool, what: String) -> some View {
+        if complete {
+            EmptyState(symbol: "tray", title: "No \(what)", message: "“\(row.name)” has none right now.")
+        } else {
+            restrictedNote(true)
+        }
+    }
+
+    private func loadHandles() async {
+        switch tab {
+        case .files where files == nil: files = await store.openFiles(pid: row.pid)
+        case .network where sockets == nil: sockets = await store.connections(pid: row.pid)
+        default: break
+        }
+    }
+
+    @ViewBuilder
     private func restrictedNote(_ restricted: Bool) -> some View {
         if restricted {
             VStack(alignment: .leading, spacing: Tokens.Space.sm) {
                 InfoBanner(
                     store.fullAccess.isOn
                         ? "macOS doesn't share this for “\(row.name)”, even with full access."
-                        : "This process belongs to another user. Unlock Full Access to read its command line, environment and threads.",
+                        : "This process belongs to another user. Unlock Full Access to read its command line, environment, threads, files and sockets.",
                     symbol: "lock.shield", tone: .warning)
                 if !store.fullAccess.isOn {
                     Button("Unlock Full Access…") {
                         Task {
                             await store.enableFullAccess()
+                            files = nil
+                            sockets = nil
                             await load()
+                            await loadHandles()
                         }
                     }
                 }
@@ -213,5 +288,44 @@ struct ProcessInfoSheet: View {
         if let start = d.startTime { lines.append("Started: \(start.formatted(date: .abbreviated, time: .standard))") }
         if let threads = d.threads { lines.append("Threads: \(threads.count)") }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// "What is this?": a plain-language description of a well-known process and whether to end it.
+struct ExplanationCard: View {
+    let explanation: ProcessExplanation
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Tokens.Space.md) {
+            Image(systemName: "questionmark.bubble.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(Tokens.Palette.accent)
+            VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+                Text(explanation.summary)
+                    .font(Tokens.Typography.body)
+                    .foregroundStyle(Tokens.Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Badge(explanation.advice.title, tone: tone, symbol: symbol)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Tokens.Space.md)
+        .background(Tokens.Palette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: Tokens.Radius.md))
+    }
+
+    private var tone: Badge.Tone {
+        switch explanation.advice {
+        case .keep: .warning
+        case .restarts: .success
+        case .quit: .neutral
+        }
+    }
+
+    private var symbol: String {
+        switch explanation.advice {
+        case .keep: "exclamationmark.shield"
+        case .restarts: "arrow.clockwise"
+        case .quit: "checkmark.circle"
+        }
     }
 }

@@ -63,6 +63,8 @@ void fill_from_helper(pc_monitor &monitor, std::vector<platform::RawProcess> &ra
         r.has_disk_io = c.has_disk_io != 0;
         r.disk_read = c.disk_read;
         r.disk_write = c.disk_write;
+        r.has_energy = c.has_energy != 0;
+        r.energy_nj = c.energy_nj;
     }
 }
 
@@ -248,13 +250,15 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         p.state = r.state;
         p.cpu_percent = -1;
         p.gpu_percent = -1;
+        p.power_watts = -1;
         p.disk_read_bps = p.disk_write_bps = -1;
         p.net_rx_bps = p.net_tx_bps = -1;
         if (r.threads > 0) threads += r.threads;
 
         const uint64_t key =
             (static_cast<uint64_t>(static_cast<uint32_t>(r.pid)) << 32) ^ static_cast<uint64_t>(r.start_time);
-        ProcessCounters counters{r.cpu_time_ns, r.disk_read, r.disk_write, r.net_rx, r.net_tx, r.gpu_time_ns};
+        ProcessCounters counters{r.cpu_time_ns, r.disk_read,   r.disk_write, r.net_rx,
+                                 r.net_tx,      r.gpu_time_ns, r.energy_nj};
         auto previous = monitor->previous_processes.find(key);
         const bool has_previous = previous != monitor->previous_processes.end() && elapsed > 0;
 
@@ -272,6 +276,10 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         if (r.has_gpu) {
             // Nanoseconds of GPU time per second of wall time, as a percentage of one GPU.
             p.gpu_percent = has_previous ? rate(r.gpu_time_ns, previous->second.gpu_time_ns, elapsed) / 1e7 : 0;
+        }
+        if (r.has_energy && (monitor->capabilities & PC_CAP_PROCESS_ENERGY)) {
+            // Nanojoules per second = nanowatts.
+            p.power_watts = has_previous ? rate(r.energy_nj, previous->second.energy_nj, elapsed) / 1e9 : 0;
         }
         current.emplace(key, counters);
 
@@ -458,6 +466,48 @@ pc_result pc_process_details_get(pc_monitor *monitor, int32_t pid, const pc_proc
     d.threads = storage.threads.data();
     *out = &d;
     return PC_OK;
+}
+
+int32_t pc_monitor_open_files(pc_monitor *monitor, int32_t pid, const pc_open_file **out, bool *complete) {
+    if (out) *out = nullptr;
+    if (complete) *complete = false;
+    if (!monitor || !(monitor->capabilities & PC_CAP_OPEN_FILES)) return 0;
+    auto &data = monitor->open_file_data;
+    bool all = platform::open_files(pid, data);
+    if (!all && monitor->helper.connected()) {
+        std::vector<platform::OpenFile> elevated;
+        bool elevated_all = false;
+        if (monitor->helper.open_files(pid, elevated, elevated_all)) {
+            data = std::move(elevated);
+            all = elevated_all;
+        }
+        if (!monitor->helper.connected()) monitor->helper_state = PC_HELPER_LOST;
+    }
+    monitor->open_files.clear();
+    monitor->open_files.reserve(data.size());
+    for (const auto &f : data) monitor->open_files.push_back({f.pid, f.fd, f.kind, f.path.c_str()});
+    if (complete) *complete = all;
+    if (out) *out = monitor->open_files.data();
+    return static_cast<int32_t>(monitor->open_files.size());
+}
+
+int32_t pc_monitor_connections(pc_monitor *monitor, int32_t pid, const pc_connection **out, bool *complete) {
+    if (out) *out = nullptr;
+    if (complete) *complete = false;
+    if (!monitor || !(monitor->capabilities & PC_CAP_CONNECTIONS)) return 0;
+    bool all = platform::connections(pid, monitor->connections);
+    if (!all && monitor->helper.connected()) {
+        std::vector<pc_connection> elevated;
+        bool elevated_all = false;
+        if (monitor->helper.connections(pid, elevated, elevated_all)) {
+            monitor->connections = std::move(elevated);
+            all = elevated_all;
+        }
+        if (!monitor->helper.connected()) monitor->helper_state = PC_HELPER_LOST;
+    }
+    if (complete) *complete = all;
+    if (out) *out = monitor->connections.data();
+    return static_cast<int32_t>(monitor->connections.size());
 }
 
 bool pc_battery_get(pc_battery *out) { return out && platform::battery(*out); }

@@ -112,6 +112,7 @@ struct ProcessesView: View {
         ProcessTable(
             rows: visibleRows, selection: $selection, sortColumn: store.sortColumn, sortDescending: store.sortDescending,
             hasNetwork: hasNetwork, hasGPU: store.capabilities.contains(.processGPU),
+            hasPower: store.capabilities.contains(.processEnergy),
             memoryTotal: Double(max(store.sample.memoryTotal, 1)), controller: tableController,
             isExpanded: isExpanded, isPinnedRoot: isPinnedRoot,
             onSort: { store.sort(by: $0, descending: $1) },

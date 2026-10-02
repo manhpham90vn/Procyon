@@ -18,6 +18,8 @@ struct ProcyonApp: App {
 
     init() {
         let store = SystemStore()
+        AlertNotifier.shared.install()
+        store.onAlert = { AlertNotifier.shared.post($0) }
         _store = State(initialValue: store)
         _actions = State(initialValue: ProcessActionCenter(store: store))
     }
@@ -68,6 +70,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Launched as a bare executable (swift run): make it a regular foreground app.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+        // `-launchInMenuBar YES` closes the window once it is up, as the user would, leaving Procyon in
+        // the menu bar (scripts/bench-macos.py measures that state).
+        if UserDefaults.standard.bool(forKey: "launchInMenuBar") { Self.closeWindowOnceShown() }
+    }
+
+    @MainActor private static func closeWindowOnceShown(attempts: Int = 100) {
+        if let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }) {
+            // Give the window tracking a moment to find its NSWindow, or it misses the close.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { window.close() }
+            return
+        }
+        guard attempts > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { closeWindowOnceShown(attempts: attempts - 1) }
     }
 
     /// Set by explicit Quit commands that run while no window is open (the menu bar panel).
@@ -89,7 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum Page: String, CaseIterable, Identifiable, Hashable {
-    case overview, processes, cpu, memory, gpu, disk, network, startup, services, battery, system, settings
+    case overview, processes, cpu, memory, gpu, disk, network, energy, startup, services, history, inspect, battery,
+        system, settings
 
     var id: String { rawValue }
 
@@ -104,6 +120,9 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .gpu: "GPU"
         case .startup: "Startup"
         case .services: "Services"
+        case .energy: "Energy"
+        case .history: "History"
+        case .inspect: "Files & Ports"
         case .battery: "Battery"
         case .system: "System"
         case .settings: "Settings"
@@ -116,6 +135,9 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .processes: "list.bullet.rectangle.fill"
         case .startup: "power.circle.fill"
         case .services: "gearshape.2.fill"
+        case .inspect: "point.3.connected.trianglepath.dotted"
+        case .energy: "bolt.fill"
+        case .history: "clock.arrow.circlepath"
         case .battery: "battery.75percent"
         case .system: "info.circle.fill"
         case .settings: "gearshape.fill"
@@ -136,6 +158,8 @@ enum Page: String, CaseIterable, Identifiable, Hashable {
         case .battery: capabilities.contains(.battery)
         case .startup: capabilities.contains(.startup)
         case .services: capabilities.contains(.services)
+        case .inspect: capabilities.contains(.openFiles) || capabilities.contains(.connections)
+        case .energy: capabilities.contains(.processEnergy)
         default: true
         }
     }

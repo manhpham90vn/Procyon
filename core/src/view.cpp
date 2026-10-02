@@ -50,6 +50,7 @@ Node process_node(const std::vector<pc_process> &processes, size_t index) {
     node.row.net_tx_bps = p.net_tx_bps;
     node.row.threads = p.threads;
     node.row.gpu_percent = p.gpu_percent;
+    node.row.power_watts = p.power_watts;
     node.row.group_pid = -1;
     return node;
 }
@@ -71,6 +72,7 @@ double sort_number(const pc_row &row, int32_t column) {
         case PC_COLUMN_NET_TX: return row.net_tx_bps;
         case PC_COLUMN_THREADS: return row.threads;
         case PC_COLUMN_GPU: return row.gpu_percent;
+        case PC_COLUMN_POWER: return row.power_watts;
         default: return 0;
     }
 }
@@ -164,7 +166,7 @@ void build_grouped(const std::vector<pc_process> &processes, const std::string &
         group.row.group_name = group_name;
         group.row.group_pid = main->pid;
         group.row.cpu_percent = group.row.disk_read_bps = group.row.disk_write_bps = -1;
-        group.row.net_rx_bps = group.row.net_tx_bps = group.row.gpu_percent = -1;
+        group.row.net_rx_bps = group.row.net_tx_bps = group.row.gpu_percent = group.row.power_watts = -1;
         group.row.memory_bytes = -1;
         group.row.threads = -1;
         for (size_t i : all) {
@@ -177,6 +179,7 @@ void build_grouped(const std::vector<pc_process> &processes, const std::string &
             accumulate(group.row.net_tx_bps, p.net_tx_bps);
             accumulate(group.row.threads, p.threads);
             accumulate(group.row.gpu_percent, p.gpu_percent);
+            accumulate(group.row.power_watts, p.power_watts);
         }
         group.row.process_count = static_cast<int32_t>(all.size());
 

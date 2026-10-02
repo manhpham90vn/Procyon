@@ -12,16 +12,18 @@
 namespace procyon::helper {
 
 constexpr uint32_t kMagic = 0x50524359;  // "PRCY"
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 
 enum class Request : uint32_t {
-    Hello = 1,     // -> HelloReply
-    Sample = 2,    // payload: uint32 count + count * int32 pid -> uint32 count + count * Counters
-    Signal = 3,    // pid + flags(signal number) -> int32 pc_result
-    Priority = 4,  // pid + flags(nice as int32) -> int32 pc_result
-    Details = 5,   // pid -> uint32 size + size bytes (encode_details); size 0 when unreadable
-    Launchd = 6,   // flags(pc_service_action) + payload char[256] label, system domain only -> int32 pc_result
-    Startup = 7,   // -> uint32 ready + uint32 count + count * pc_startup_item (the helper's cached list)
+    Hello = 1,        // -> HelloReply
+    Sample = 2,       // payload: uint32 count + count * int32 pid -> uint32 count + count * Counters
+    Signal = 3,       // pid + flags(signal number) -> int32 pc_result
+    Priority = 4,     // pid + flags(nice as int32) -> int32 pc_result
+    Details = 5,      // pid -> uint32 size + size bytes (encode_details); size 0 when unreadable
+    Launchd = 6,      // flags(pc_service_action) + payload char[256] label, system domain only -> int32 pc_result
+    Startup = 7,      // -> uint32 ready + uint32 count + count * pc_startup_item (the helper's cached list)
+    OpenFiles = 8,    // pid (-1 every process) -> uint32 complete + uint32 size + size bytes (encode_files)
+    Connections = 9,  // pid (-1 every process) -> uint32 complete + uint32 count + count * pc_connection
 };
 
 struct RequestHeader {
@@ -46,7 +48,8 @@ struct Counters {
     uint64_t disk_read = 0;
     uint64_t disk_write = 0;
     uint32_t has_disk_io = 0;
-    uint32_t reserved = 0;
+    uint32_t has_energy = 0;
+    uint64_t energy_nj = 0;
 };
 
 // Hard limit on pids per Sample request, guards the server against bogus sizes.
@@ -55,6 +58,8 @@ constexpr uint32_t kMaxPids = 1 << 16;
 constexpr uint32_t kMaxDetailsBytes = 8 << 20;
 constexpr size_t kLabelSize = 256;
 constexpr uint32_t kMaxStartupItems = 4096;
+constexpr uint32_t kMaxFilesBytes = 32 << 20;
+constexpr uint32_t kMaxConnections = 1 << 16;
 
 // ---- Details encoding: length-prefixed strings and fixed-size numbers ----
 
@@ -145,6 +150,30 @@ inline bool decode_details(const std::vector<char> &bytes, platform::Details &d)
         if (!r.number(t.id) || !r.string(t.name) || !r.number(t.cpu_percent) || !r.number(t.user_time_ns) ||
             !r.number(t.system_time_ns) || !r.number(t.priority) || !r.number(t.state))
             return false;
+    }
+    return true;
+}
+
+inline std::vector<char> encode_files(const std::vector<platform::OpenFile> &files) {
+    Writer w;
+    w.number(static_cast<uint32_t>(files.size()));
+    for (const auto &f : files) {
+        w.number(f.pid);
+        w.number(f.fd);
+        w.number(f.kind);
+        w.string(f.path);
+    }
+    return w.bytes();
+}
+
+inline bool decode_files(const std::vector<char> &bytes, std::vector<platform::OpenFile> &files) {
+    Reader r(bytes.data(), bytes.size());
+    files.clear();
+    uint32_t count = 0;
+    if (!r.number(count)) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        auto &f = files.emplace_back();
+        if (!r.number(f.pid) || !r.number(f.fd) || !r.number(f.kind) || !r.string(f.path)) return false;
     }
     return true;
 }

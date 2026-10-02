@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define PC_API_VERSION 3
+#define PC_API_VERSION 4
 
 typedef struct pc_monitor pc_monitor;
 
@@ -37,10 +37,13 @@ typedef enum {
     PC_CAP_SUSPEND = 1u << 9,      /* pc_process_suspend / pc_process_resume */
     PC_CAP_SIGNALS = 1u << 10,     /* pc_process_signal with POSIX signal numbers */
     PC_CAP_CPU_AFFINITY = 1u << 11,
-    PC_CAP_TEMPERATURE = 1u << 12, /* pc_snapshot.cpu_temperature, disk_temperature where a sensor exists */
-    PC_CAP_BATTERY = 1u << 13,     /* pc_battery_get */
-    PC_CAP_SERVICES = 1u << 14,    /* pc_monitor_services, pc_service_control */
-    PC_CAP_STARTUP = 1u << 15,     /* pc_monitor_startup_items, pc_startup_set_enabled */
+    PC_CAP_TEMPERATURE = 1u << 12,    /* pc_snapshot.cpu_temperature, disk_temperature where a sensor exists */
+    PC_CAP_BATTERY = 1u << 13,        /* pc_battery_get */
+    PC_CAP_SERVICES = 1u << 14,       /* pc_monitor_services, pc_service_control */
+    PC_CAP_STARTUP = 1u << 15,        /* pc_monitor_startup_items, pc_startup_set_enabled */
+    PC_CAP_PROCESS_ENERGY = 1u << 16, /* pc_process.power_watts */
+    PC_CAP_OPEN_FILES = 1u << 17,     /* pc_monitor_open_files */
+    PC_CAP_CONNECTIONS = 1u << 18,    /* pc_monitor_connections */
 } pc_capability;
 
 uint32_t pc_capabilities(void);
@@ -117,6 +120,7 @@ typedef struct {
     int32_t threads;       /* -1 unknown */
     int64_t start_time;    /* unix seconds, 0 unknown */
     double gpu_percent;    /* percent of the GPU's time (all processes sum to <= 100); -1 unknown */
+    double power_watts;    /* energy the OS attributes to the process per second (CPU, GPU, ...); -1 unknown */
     int32_t nice;          /* -20 (highest priority) .. 20 */
     int32_t state;         /* pc_process_state */
     char name[256];
@@ -245,6 +249,7 @@ typedef enum {
     PC_COLUMN_NET_TX,
     PC_COLUMN_THREADS,
     PC_COLUMN_GPU,
+    PC_COLUMN_POWER,
 } pc_column;
 
 typedef struct {
@@ -270,6 +275,7 @@ typedef struct {
     double net_tx_bps;
     int32_t threads;
     double gpu_percent;
+    double power_watts;
     const char *group_id;   /* group rows only, else NULL */
     const char *group_name; /* group rows only, else NULL */
     int32_t group_pid;      /* group rows: representative pid (main executable) */
@@ -347,6 +353,59 @@ typedef struct {
 /* Reads path, command line, environment and threads of one process, through the helper when
    needed. The result stays valid until the next call. */
 pc_result pc_process_details_get(pc_monitor *monitor, int32_t pid, const pc_process_details **out);
+
+/* ---------- open files and network connections ---------- */
+
+typedef enum {
+    PC_FILE_REGULAR = 0,
+    PC_FILE_DIRECTORY = 1,
+    PC_FILE_CWD = 2,   /* the process's working directory (fd -1); keeps a volume busy like an open file */
+    PC_FILE_OTHER = 3, /* devices, FIFOs */
+} pc_file_kind;
+
+typedef struct {
+    int32_t pid;
+    int32_t fd;   /* -1 for the working directory */
+    int32_t kind; /* pc_file_kind */
+    const char *path;
+} pc_open_file;
+
+typedef enum {
+    PC_PROTOCOL_TCP = 0,
+    PC_PROTOCOL_UDP = 1,
+} pc_protocol;
+
+typedef enum {
+    PC_TCP_NONE = 0, /* UDP */
+    PC_TCP_LISTEN,
+    PC_TCP_SYN_SENT,
+    PC_TCP_SYN_RECEIVED,
+    PC_TCP_ESTABLISHED,
+    PC_TCP_CLOSE_WAIT,
+    PC_TCP_CLOSING, /* FIN_WAIT_1/2, CLOSING, LAST_ACK */
+    PC_TCP_TIME_WAIT,
+    PC_TCP_CLOSED,
+} pc_tcp_state;
+
+typedef struct {
+    int32_t pid;
+    int32_t protocol; /* pc_protocol */
+    int32_t family;   /* 4 or 6 */
+    int32_t state;    /* pc_tcp_state */
+    int32_t local_port;
+    int32_t remote_port;     /* 0 when not connected */
+    char local_address[64];  /* "*" for any address */
+    char remote_address[64]; /* empty when not connected */
+} pc_connection;
+
+/* Files (pid -1: of every process) open right now, plus working directories. Other users'
+   processes are read through the helper; without it they are skipped and `*complete` is false.
+   Spawns no tools but walks every descriptor: call on demand, not every tick. Valid until the
+   next call. */
+int32_t pc_monitor_open_files(pc_monitor *monitor, int32_t pid, const pc_open_file **out, bool *complete);
+/* TCP and UDP sockets (pid -1: of every process), one entry per distinct endpoint pair. Same rules
+   as pc_monitor_open_files. */
+int32_t pc_monitor_connections(pc_monitor *monitor, int32_t pid, const pc_connection **out, bool *complete);
 
 /* ---------- power ---------- */
 

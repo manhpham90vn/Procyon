@@ -13,7 +13,8 @@ final class Monitor {
         pc_monitor_destroy(handle)
     }
 
-    static var capabilities: Capabilities { Capabilities(rawValue: pc_capabilities()) }
+    /// Probes the hardware (GPUs, sensors, battery): read once.
+    static let capabilities = Capabilities(rawValue: pc_capabilities())
 
     static func systemInfo() -> SystemInfo {
         var raw = pc_system_info()
@@ -67,6 +68,10 @@ final class Monitor {
         sample.networkSendRate = snap.net_tx_bps
         sample.networkReceiveTotal = snap.net_rx_total
         sample.networkSendTotal = snap.net_tx_total
+        if Monitor.capabilities.contains(.processEnergy), snap.process_count > 0 {
+            sample.appPower = UnsafeBufferPointer(start: snap.processes, count: Int(snap.process_count))
+                .reduce(0) { $0 + max($1.power_watts, 0) }
+        }
         sample.processCount = Int(snap.process_count)
         sample.threadCount = Int(snap.thread_count)
         sample.restrictedCount = Int(snap.restricted_count)
@@ -193,7 +198,7 @@ final class Monitor {
                     threads: raw.threads >= 0 ? Int(raw.threads) : nil,
                     startTime: process.start_time > 0 ? Date(timeIntervalSince1970: TimeInterval(process.start_time)) : nil,
                     memberPIDs: [process.pid], gpu: Monitor.known(raw.gpu_percent), nice: process.nice,
-                    state: ProcessState(rawValue: process.state) ?? .unknown
+                    state: ProcessState(rawValue: process.state) ?? .unknown, power: Monitor.known(raw.power_watts)
                 )
             } else {
                 let groupID = raw.group_id.map { String(cString: $0) } ?? ""
@@ -215,7 +220,8 @@ final class Monitor {
                         $0.start_time > 0 ? Date(timeIntervalSince1970: TimeInterval($0.start_time)) : nil
                     },
                     memberPIDs: members[groupID] ?? [raw.group_pid], gpu: Monitor.known(raw.gpu_percent),
-                    nice: main?.nice ?? 0, state: main.flatMap { ProcessState(rawValue: $0.state) } ?? .unknown
+                    nice: main?.nice ?? 0, state: main.flatMap { ProcessState(rawValue: $0.state) } ?? .unknown,
+                    power: Monitor.known(raw.power_watts)
                 )
             }
             ids.append(row.id)
@@ -274,6 +280,36 @@ final class Monitor {
             }
         }
         return details
+    }
+
+    /// Open files of `pid`, or of every process when nil.
+    func openFiles(pid: Int32?) -> HandleList<OpenFile> {
+        var pointer: UnsafePointer<pc_open_file>?
+        var complete = false
+        let count = Int(pc_monitor_open_files(handle, pid ?? -1, &pointer, &complete))
+        guard let pointer else { return HandleList(items: [], isComplete: complete) }
+        let items = UnsafeBufferPointer(start: pointer, count: count).map { raw in
+            OpenFile(
+                pid: raw.pid, descriptor: raw.fd, kind: OpenFile.Kind(rawValue: raw.kind) ?? .other,
+                path: raw.path.map { String(cString: $0) } ?? "")
+        }
+        return HandleList(items: items, isComplete: complete)
+    }
+
+    /// TCP and UDP sockets of `pid`, or of every process when nil.
+    func connections(pid: Int32?) -> HandleList<NetworkConnection> {
+        var pointer: UnsafePointer<pc_connection>?
+        var complete = false
+        let count = Int(pc_monitor_connections(handle, pid ?? -1, &pointer, &complete))
+        guard let pointer else { return HandleList(items: [], isComplete: complete) }
+        let items = UnsafeBufferPointer(start: pointer, count: count).map { raw in
+            NetworkConnection(
+                pid: raw.pid, transport: raw.protocol == Int32(PC_PROTOCOL_UDP.rawValue) ? .udp : .tcp,
+                ipVersion: Int(raw.family), state: NetworkConnection.State(rawValue: raw.state) ?? .closed,
+                localAddress: Monitor.string(raw.local_address), localPort: Int(raw.local_port),
+                remoteAddress: Monitor.string(raw.remote_address), remotePort: Int(raw.remote_port))
+        }
+        return HandleList(items: items, isComplete: complete)
     }
 
     static func battery() -> Battery? {

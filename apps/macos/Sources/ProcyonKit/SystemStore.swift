@@ -7,6 +7,9 @@ actor MonitorWorker {
     private let capabilities = Monitor.capabilities
     private var hasProcessNetwork: Bool { capabilities.contains(.processNetwork) }
     private var samplesProcesses = true
+    /// Energy each app used while processes were sampled, by app id.
+    private var energy: [String: AppEnergy] = [:]
+    private var lastTimestamp: TimeInterval?
 
     struct Tick: Sendable {
         var sample: SystemSample
@@ -16,6 +19,8 @@ actor MonitorWorker {
         var topDisk: [ProcessRow] = []
         var topNetwork: [ProcessRow] = []
         var topGPU: [ProcessRow] = []
+        var topPower: [ProcessRow] = []
+        var topEnergy: [AppEnergy] = []
         var battery: Battery?
         var helperConnected: Bool
     }
@@ -36,6 +41,10 @@ actor MonitorWorker {
         tick.topDisk = topDisk()
         tick.topNetwork = topNetwork()
         tick.topGPU = capabilities.contains(.processGPU) ? top(.gpu).filter { ($0.gpu ?? 0) > 0 } : []
+        if capabilities.contains(.processEnergy) {
+            tick.topPower = top(.power).filter { ($0.power ?? 0) > 0.005 }
+            tick.topEnergy = accumulateEnergy(at: sample.timestamp)
+        }
         return tick
     }
 
@@ -88,6 +97,11 @@ actor MonitorWorker {
     func services() -> [Service] { monitor.services() }
     func control(_ service: Service, _ action: ServiceAction) -> ActionResult { monitor.control(service, action) }
     func startupItems() -> [StartupItem] { monitor.startupItems() }
+    func openFiles(pid: Int32?) -> HandleList<OpenFile> { monitor.openFiles(pid: pid) }
+    func processRow(pid: Int32) -> ProcessRow? {
+        monitor.buildView(.init(mode: .flat, column: .pid, descending: false, filter: "")).first { $0.pid == pid }
+    }
+    func connections(pid: Int32?) -> HandleList<NetworkConnection> { monitor.connections(pid: pid) }
     func pids(forApps paths: Set<String>) -> [String: Int32] { monitor.pids(forApps: paths) }
     func managedStartupItems() -> (items: [StartupItem], ready: Bool)? { monitor.managedStartupItems() }
     func setEnabled(_ item: StartupItem, _ enabled: Bool) -> ActionResult { monitor.setEnabled(item, enabled) }
@@ -95,6 +109,25 @@ actor MonitorWorker {
     private func top(_ column: ProcessColumn) -> [ProcessRow] {
         monitor.buildView(.init(mode: .grouped, column: column, descending: true, filter: "", limit: SystemStore.topCount))
             .filter { $0.depth == 0 }
+    }
+
+    /// Adds each app's power over the time since the last sample; returns the biggest consumers.
+    private func accumulateEnergy(at time: TimeInterval) -> [AppEnergy] {
+        defer { lastTimestamp = time }
+        // A gap (paused, window closed) isn't attributed to anyone.
+        guard let last = lastTimestamp, case let elapsed = time - last, elapsed > 0, elapsed < 10 else {
+            return topEnergy()
+        }
+        let apps = monitor.buildView(.init(mode: .grouped, column: .power, descending: true, filter: ""))
+        for row in apps where row.depth == 0 {
+            guard let watts = row.power, watts > 0 else { continue }
+            energy[row.appID, default: AppEnergy(row: row)].add(row, joules: watts * elapsed)
+        }
+        return topEnergy()
+    }
+
+    private func topEnergy() -> [AppEnergy] {
+        Array(energy.values.sorted { $0.joules > $1.joules }.prefix(SystemStore.topCount))
     }
 
     /// Busiest apps by read plus write; the core sorts by one direction, so merge both.
@@ -137,6 +170,34 @@ public final class SystemStore {
     public private(set) var topNetwork: [ProcessRow] = []
     /// Apps using the GPU; empty without `Capabilities.processGPU`.
     public private(set) var topGPU: [ProcessRow] = []
+    /// Apps drawing the most power now; empty without `Capabilities.processEnergy`.
+    public private(set) var topPower: [ProcessRow] = []
+    /// Apps that used the most energy since Procyon started (while it sampled processes).
+    public private(set) var topEnergy: [AppEnergy] = []
+    /// When `topEnergy` started counting.
+    public let energySince = Date()
+
+    /// Alert rules; changing them saves them and starts or stops watching apps in the background.
+    public var alertSettings: AlertSettings {
+        didSet {
+            guard alertSettings != oldValue else { return }
+            alertSettings.save(defaults)
+            needsProcesses("alerts", alertSettings.watchesApps)
+        }
+    }
+    /// Alerts raised this session, newest first.
+    public private(set) var recentAlerts: [AlertEvent] = []
+    /// The last 24 hours, minute by minute, on disk.
+    public let historyDatabase = HistoryDatabase()
+    /// Whether samples are written to `historyDatabase`.
+    public var recordsHistory: Bool {
+        didSet { if recordsHistory != oldValue { defaults.set(recordsHistory, forKey: Keys.history) } }
+    }
+    private var historyRecorder = HistoryRecorder()
+
+    /// Delivers each alert (the app shows a notification).
+    public var onAlert: ((AlertEvent) -> Void)?
+    private var alertEvaluator = AlertEvaluator()
     /// nil on machines without a battery.
     public private(set) var battery: Battery?
     public private(set) var volumes: [Volume] = []
@@ -204,6 +265,7 @@ public final class SystemStore {
         static let interval = "refreshInterval"
         static let viewMode = "processViewMode"
         static let fullAccess = "fullAccessEnabled"
+        static let history = "historyEnabled"
     }
 
     public init(defaults: UserDefaults = .standard) {
@@ -215,6 +277,9 @@ public final class SystemStore {
         viewMode = (defaults.object(forKey: Keys.viewMode) as? Int).flatMap(ViewMode.init(rawValue:)) ?? .grouped
         sortColumn = .cpu
         sortDescending = true
+        recordsHistory = defaults.object(forKey: Keys.history) as? Bool ?? true
+        alertSettings = AlertSettings.load(defaults)
+        if alertSettings.watchesApps { processConsumers.insert("alerts") }
     }
 
     public var uptime: TimeInterval { Date().timeIntervalSince(info.bootTime) }
@@ -388,6 +453,18 @@ public final class SystemStore {
 
     public func startupItems() async -> [StartupItem] { await worker.startupItems() }
 
+    /// Files open right now in `pid`, or in every process when nil. Walks every descriptor: load on
+    /// demand. Incomplete without full access (other users' processes are skipped).
+    public func openFiles(pid: Int32? = nil) async -> HandleList<OpenFile> { await worker.openFiles(pid: pid) }
+
+    /// The process `pid` as a row of the flat list (for actions and Get Info), from the latest sample.
+    public func processRow(pid: Int32) async -> ProcessRow? { await worker.processRow(pid: pid) }
+
+    /// Network sockets of `pid`, or of every process when nil.
+    public func connections(pid: Int32? = nil) async -> HandleList<NetworkConnection> {
+        await worker.connections(pid: pid)
+    }
+
     /// What System Settings lists under Login Items that launchd plists don't cover (apps opening
     /// at login, apps' background items). nil without full access: reading it as a normal user makes
     /// macOS ask for a password, so only the helper reads it. Waits (without blocking sampling) for
@@ -468,12 +545,36 @@ public final class SystemStore {
             topDisk = tick.topDisk
             topNetwork = tick.topNetwork
             topGPU = tick.topGPU
+            topPower = tick.topPower
+            topEnergy = tick.topEnergy
+        }
+        checkAlerts(tick)
+        if recordsHistory {
+            let busiest =
+                processes ? tick.topCPU + tick.topMemory + tick.topDisk + tick.topNetwork + tick.topGPU + tick.topPower : []
+            if let record = historyRecorder.add(tick.sample, busiest: busiest) {
+                Task { [historyDatabase] in await historyDatabase.write(record) }
+            }
         }
         if fullAccess.isOn && !tick.helperConnected { await reconnectHelper() }
         // The user may allow the helper in System Settings at any moment.
         if fullAccess == .needsApproval, ticks % 2 == 0, HelperDaemon.state == .enabled { await attachBackgroundHelper() }
         if processes, ticks % 10 == 0 { volumes = await worker.volumes() }
         ticks += 1
+    }
+
+    private func checkAlerts(_ tick: MonitorWorker.Tick) {
+        guard alertSettings.isAnyEnabled else { return }
+        // The busiest apps by CPU and by memory cover every app that can cross a per-app threshold
+        // unless more than `topCount` do at once.
+        var seen = Set<String>()
+        let apps = (tick.topCPU + tick.topMemory).filter { seen.insert($0.id).inserted }
+        let events = alertEvaluator.evaluate(tick.sample, apps: apps, settings: alertSettings, now: tick.sample.timestamp)
+        for event in events {
+            recentAlerts.insert(event, at: 0)
+            onAlert?(event)
+        }
+        if recentAlerts.count > 20 { recentAlerts.removeLast(recentAlerts.count - 20) }
     }
 
     /// launchd restarts the background helper on demand (after an app update, for instance).

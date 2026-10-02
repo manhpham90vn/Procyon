@@ -17,6 +17,7 @@ struct ProcessCounters {
     uint64_t net_rx = 0;
     uint64_t net_tx = 0;
     uint64_t gpu_time_ns = 0;
+    uint64_t energy_nj = 0;
 };
 
 // Storage behind pc_process_details pointers.
@@ -44,6 +45,9 @@ struct pc_monitor {
     std::vector<pc_startup_item> startup_items;
     std::vector<pc_startup_item> managed_startup_items;
     std::vector<pc_power_assertion> power_assertions;
+    std::vector<procyon::platform::OpenFile> open_file_data;
+    std::vector<pc_open_file> open_files;
+    std::vector<pc_connection> connections;
     procyon::DetailsStorage details;
     procyon::View view;
 

@@ -1,7 +1,7 @@
 # Procyon
 
 A lightweight, cross-platform task manager. The product spec is in [`docs/procyon-spec.md`](docs/procyon-spec.md).
-This repo holds the **P0 MVP and the P1 features for macOS**.
+This repo holds the **P0 MVP, the P1 features and most of P2 for macOS**.
 
 ## Layout
 
@@ -15,6 +15,7 @@ core/                       C++20 core with a stable C ABI (shared by every UI)
   src/platform/macos_gpu.cpp      GPU usage and per-process GPU time (IOAccelerator)
   src/platform/macos_power.cpp    battery, sleep assertions, temperature sensors (IOHID, dlsym'd)
   src/platform/macos_launchd.cpp  services and startup items (launchd jobs via /bin/launchctl)
+  src/platform/macos_handles.cpp  open files and TCP/UDP sockets per process (libproc, like lsof)
   src/helper_server.cpp       privileged helper (procyon-helper), src/helper_client.cpp its client
   helper/main.c               procyon-helper entry point
   tools/procyon_cli.cpp       headless prototype and overhead measurement
@@ -25,8 +26,11 @@ design/
 apps/macos/Sources/
   ProcyonKit                Swift bridge to the core + observable store (no UI)
   ProcyonDesign             generated tokens + reusable SwiftUI components
-  ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Startup,
-                            Services, Battery, System; ⌘K palette; menu bar widget
+  ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Energy,
+                            Startup, Services, History, Files & Ports, Battery, System; ⌘K palette;
+                            menu bar widget
+data/
+  process-catalog.json      plain-language explanations of common processes
 scripts/
   gen-tokens.py             tokens.json → Tokens.generated.swift
   build-macos-app.sh        builds dist/Procyon.app
@@ -95,6 +99,18 @@ git tag v0.1.0 && git push origin v0.1.0
 | Tray / menu bar widget, selectable modules | Done: closing the window moves Procyon to the menu bar (out of the Dock); opening the window hides the menu bar item again. Modules: CPU, memory, network, GPU, temperature, battery (Settings → Menu bar). With the window closed, sampling skips per-process data. |
 | Battery: level, health, apps preventing sleep | Done: charge, time remaining, power draw, maximum capacity, cycles, temperature, and sleep assertions attributed to the app they were taken for. |
 
+## P2 status (macOS)
+
+| Spec item | Status |
+| --- | --- |
+| History: every resource per app, look back at peaks | Done for 24 hours (the free tier in the spec): one row a minute for the machine (CPU average and peak, memory, disk, network, GPU, temperature, app power) and one per busy app (the union of each tick's top-10 lists), in SQLite under `~/Library/Application Support/Procyon`, older minutes deleted as new ones arrive (a few MB). **History** charts any metric over 1, 6 or 24 hours; clicking the chart or a peak lists the busiest apps of that minute. Per-app rows are only written while processes are sampled (window open, or an app alert on). Recording can be switched off or cleared. |
+| Energy tab like Activity Monitor | Done: the **Power** column in Processes and the **Energy** screen (apps now, energy per app since launch, total app power chart) from `ri_energy_nj` (`proc_pid_rusage` v6, no root): measured on Apple Silicon, modelled on Intel. Activity Monitor's 8-hour average comes from History once there is per-app energy for that long. |
+| Deep analysis: files held, ports, connections | Done: **Files & Ports** lists listening ports (and whether they're reachable from the network), connections and open files, with **Who Is Using…** for a file, folder or disk; Get Info has Files and Network tabs. Other users' processes go through the helper. Closing another process's connection isn't possible on macOS (no public API), so it isn't offered. |
+| Sensors: temperatures, fans | CPU, SSD and battery temperatures since P1. Fan speeds: not yet (SMC). |
+| Alerts with custom thresholds | Done (Settings → Alerts): machine CPU, memory, memory pressure, CPU temperature, one app's CPU or memory, each over a threshold for a chosen time, as notifications; 15 minutes of quiet per alert. Per-app alerts keep process sampling on in the menu bar. |
+| Explanations: "what is this process, can I end it" | Done for about 110 common macOS process names (63 explanations) (`data/process-catalog.json` → `scripts/gen-catalog.py` → Swift; `make lint` checks it is up to date). Shown in Get Info and in the End Task / Force Quit confirmation. |
+| Plugins | Not started. |
+
 ### Measured overhead (M3, about 590 processes, 1 s updates, release build)
 
 - Core sampling: about 0.5% of one core before P1, 0.6% with GPU and temperature sampling (`procyon-cli`).
@@ -134,4 +150,4 @@ validated labels in the system domain; it refuses pids 0 and 1 and its client.
 Test without the UI: `sudo PROCYON_HELPER=$PWD/build/core/procyon-helper build/core/procyon-cli 2`.
 
 ### Known limits
-- English UI only so far; Vietnamese is planned for v1.
+- English only: the UI and every text in it, by design.

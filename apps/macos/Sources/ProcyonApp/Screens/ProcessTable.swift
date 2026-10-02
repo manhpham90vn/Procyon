@@ -16,6 +16,7 @@ struct ProcessTable: NSViewRepresentable {
     var sortDescending: Bool
     var hasNetwork: Bool
     var hasGPU: Bool
+    var hasPower: Bool
     var memoryTotal: Double
     var controller: ProcessTableController
     var isExpanded: (ProcessRow) -> Bool
@@ -125,6 +126,7 @@ struct ProcessTable: NSViewRepresentable {
                 table.tableColumn(withIdentifier: .init(id))?.isHidden = true
             }
             if !parent.hasGPU { table.tableColumn(withIdentifier: .init(ColumnSpec.gpuID))?.isHidden = true }
+            if !parent.hasPower { table.tableColumn(withIdentifier: .init(ColumnSpec.powerID))?.isHidden = true }
 
             let wanted = [NSSortDescriptor(key: ColumnSpec.id(for: parent.sortColumn), ascending: !parent.sortDescending)]
             if table.sortDescriptors.first != wanted.first { table.sortDescriptors = wanted }
@@ -240,6 +242,9 @@ struct ProcessTable: NSViewRepresentable {
                     restricted: row.networkSend == nil)
             case (.gpu, let cell as HeatCell):
                 cell.configure(Format.cpu(row.gpu), intensity: (row.gpu ?? 0) / 100, metric: .gpu, restricted: row.gpu == nil)
+            case (.power, let cell as HeatCell):
+                cell.configure(
+                    Format.power(row.power), intensity: (row.power ?? 0) / 5, metric: .energy, restricted: row.power == nil)
             default:
                 break
             }
@@ -270,6 +275,7 @@ struct ProcessTable: NSViewRepresentable {
                     item.isEnabled =
                         (parent.hasNetwork || !ColumnSpec.networkIDs.contains(spec.id))
                         && (parent.hasGPU || spec.id != ColumnSpec.gpuID)
+                        && (parent.hasPower || spec.id != ColumnSpec.powerID)
                     menu.addItem(item)
                 }
             } else if rows.indices.contains(table.clickedRow) {
@@ -368,6 +374,7 @@ private struct ColumnSpec {
         ColumnSpec(column: .cpu, id: "cpu", title: "CPU", minWidth: 56, width: 70),
         ColumnSpec(column: .memory, id: "memory", title: "Memory", minWidth: 64, width: 82),
         ColumnSpec(column: .gpu, id: "gpu", title: "GPU", minWidth: 50, width: 64),
+        ColumnSpec(column: .power, id: "power", title: "Power", minWidth: 56, width: 70),
         ColumnSpec(column: .diskRead, id: "diskRead", title: "Disk Read", minWidth: 64, width: 78),
         ColumnSpec(column: .diskWrite, id: "diskWrite", title: "Disk Write", minWidth: 64, width: 78),
         ColumnSpec(column: .networkReceive, id: "networkReceive", title: "Net ↓", minWidth: 64, width: 78),
@@ -377,6 +384,7 @@ private struct ColumnSpec {
     static let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
     static let networkIDs: Set<String> = ["networkReceive", "networkSend"]
     static let gpuID = "gpu"
+    static let powerID = "power"
 
     static func id(for column: ProcessColumn) -> String { all.first { $0.column == column }?.id ?? "cpu" }
 }
@@ -399,7 +407,7 @@ private enum CellStyle {
     static let sunken = NSColor(Tokens.Palette.surfaceSunken)
     static let border = NSColor(Tokens.Palette.border)
     static let heat: [Metric: NSColor] = Dictionary(
-        uniqueKeysWithValues: [Metric.cpu, .memory, .disk, .network, .gpu].map { ($0, NSColor($0.style.start)) })
+        uniqueKeysWithValues: [Metric.cpu, .memory, .disk, .network, .gpu, .energy].map { ($0, NSColor($0.style.start)) })
 
     static func lineHeight(_ font: NSFont) -> CGFloat { ceil(font.ascender - font.descender + font.leading) }
 

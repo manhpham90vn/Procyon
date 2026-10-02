@@ -227,3 +227,136 @@ import Testing
         #expect(info.coreKinds.filter { $0 == .efficiency }.count == info.efficiencyCores)
     }
 }
+
+@Suite struct AlertEvaluatorTests {
+    private func settings(_ kind: AlertRule.Kind, threshold: Double? = nil, duration: TimeInterval = 30) -> AlertSettings {
+        AlertSettings(rules: [AlertRule(kind: kind, isEnabled: true, threshold: threshold, duration: duration)])
+    }
+
+    private func sample(cpu: Double) -> SystemSample {
+        var sample = SystemSample()
+        sample.cpuUsage = cpu
+        return sample
+    }
+
+    private func app(_ id: String, cpu: Double) -> ProcessRow {
+        ProcessRow(
+            id: "g:\(id)", kind: .group, pid: 1, parentID: nil, depth: 0, childCount: 0, processCount: 1, name: id,
+            user: "", path: "", appID: id, appName: id, flags: [], cpu: cpu, memory: 0, diskRead: nil, diskWrite: nil,
+            networkReceive: nil, networkSend: nil, threads: nil, startTime: nil, memberPIDs: [1])
+    }
+
+    @Test func firesOnlyAfterTheConditionHoldsForItsDuration() {
+        var evaluator = AlertEvaluator()
+        let rules = settings(.cpu, threshold: 90, duration: 30)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 0).isEmpty)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 20).isEmpty)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 30).count == 1)
+    }
+
+    @Test func dropBelowThresholdRestartsTheClock() {
+        var evaluator = AlertEvaluator()
+        let rules = settings(.cpu, threshold: 90, duration: 30)
+        _ = evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 0)
+        _ = evaluator.evaluate(sample(cpu: 0.10), apps: [], settings: rules, now: 20)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 40).isEmpty)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 70).count == 1)
+    }
+
+    @Test func staysQuietDuringTheCooldown() {
+        var evaluator = AlertEvaluator()
+        evaluator.cooldown = 600
+        let rules = settings(.cpu, threshold: 90, duration: 0)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 0).count == 1)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 300).isEmpty)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 600).count == 1)
+    }
+
+    @Test func perAppRulesTrackEachAppSeparately() {
+        var evaluator = AlertEvaluator()
+        let rules = settings(.appCPU, threshold: 100, duration: 10)
+        _ = evaluator.evaluate(SystemSample(), apps: [app("a", cpu: 150)], settings: rules, now: 0)
+        let events = evaluator.evaluate(
+            SystemSample(), apps: [app("a", cpu: 150), app("b", cpu: 150)], settings: rules, now: 10)
+        #expect(events.map(\.appID) == ["a"])
+    }
+
+    @Test func disabledRulesNeverFire() {
+        var evaluator = AlertEvaluator()
+        let rules = AlertSettings(rules: [AlertRule(kind: .cpu, isEnabled: false, threshold: 10, duration: 0)])
+        #expect(evaluator.evaluate(sample(cpu: 1), apps: [], settings: rules, now: 0).isEmpty)
+    }
+}
+
+@Suite struct HistoryTests {
+    private func sample(at time: TimeInterval, cpu: Double) -> SystemSample {
+        var sample = SystemSample()
+        sample.timestamp = time
+        sample.cpuUsage = cpu
+        sample.memoryTotal = 100
+        sample.memoryUsed = 50
+        return sample
+    }
+
+    private func app(_ id: String, cpu: Double) -> ProcessRow {
+        ProcessRow(
+            id: "g:\(id)", kind: .group, pid: 1, parentID: nil, depth: 0, childCount: 0, processCount: 1, name: id,
+            user: "", path: "", appID: id, appName: id, flags: [], cpu: cpu, memory: 1000, diskRead: nil, diskWrite: nil,
+            networkReceive: nil, networkSend: nil, threads: nil, startTime: nil, memberPIDs: [1])
+    }
+
+    @Test func recorderAveragesAMinuteAndCountsMissingAppsAsZero() {
+        var recorder = HistoryRecorder()
+        #expect(recorder.add(sample(at: 600, cpu: 0.2), busiest: [app("a", cpu: 40)]) == nil)
+        #expect(recorder.add(sample(at: 630, cpu: 0.4), busiest: [app("b", cpu: 20)]) == nil)
+        let record = recorder.add(sample(at: 660, cpu: 0.9), busiest: [])
+        #expect(record?.machine.minute == 600)
+        #expect(abs((record?.machine.cpu ?? 0) - 0.3) < 1e-9)
+        #expect(record?.machine.cpuPeak == 0.4)
+        #expect(record?.machine.memory == 0.5)
+        let apps = Dictionary(uniqueKeysWithValues: (record?.apps ?? []).map { ($0.appID, $0.cpu) })
+        #expect(apps == ["a": 20, "b": 10])
+    }
+
+    @Test func databaseKeepsMinutesAndRanksApps() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("procyon-history-\(UUID()).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = HistoryDatabase(url: url)
+        for minute in 0..<3 {
+            var machine = MachineMinute(minute: 6000 + minute * 60)
+            machine.cpu = Double(minute) / 10
+            var a = AppUsage(appID: "a", name: "A")
+            a.cpu = 10
+            var b = AppUsage(appID: "b", name: "B")
+            b.cpu = minute == 2 ? 90 : 0
+            await database.write(MinuteRecord(machine: machine, apps: [a, b]))
+        }
+        let minutes = await database.machine(since: 6060)
+        #expect(minutes.map(\.minute) == [6060, 6120])
+        #expect(minutes.last?.cpu == 0.2)
+        let top = await database.apps(from: 6000, to: 6180, orderBy: .cpu)
+        #expect(top.map(\.appID) == ["b", "a"])
+        #expect(top.first?.cpu == 30)
+        await database.clear()
+        #expect(await database.machine(since: 0).isEmpty)
+    }
+
+    @Test func databaseDropsMinutesOlderThanTheRetention() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("procyon-history-\(UUID()).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = HistoryDatabase(url: url)
+        await database.write(MinuteRecord(machine: MachineMinute(minute: 0), apps: []))
+        await database.write(MinuteRecord(machine: MachineMinute(minute: Int(HistoryDatabase.retention) + 60), apps: []))
+        #expect(await database.machine(since: 0).map(\.minute) == [Int(HistoryDatabase.retention) + 60])
+    }
+}
+
+@Suite struct ProcessCatalogTests {
+    @Test func knownProcessesAreExplained() {
+        #expect(ProcessCatalog.explain(name: "kernel_task")?.advice == .keep)
+        #expect(ProcessCatalog.explain(name: "mdworker_shared")?.advice == .restarts)
+        #expect(ProcessCatalog.explain(name: "unknown-thing") == nil)
+        // A helper falls back to its app's entry.
+        #expect(ProcessCatalog.explain(name: "helper", appName: "Docker Desktop") != nil)
+    }
+}

@@ -87,6 +87,13 @@ public enum Format {
         return String(format: "%.1f W", value)
     }
 
+    /// Power drawn by an app: small values keep two decimals ("0.04 W").
+    public static func power(_ watts: Double?) -> String {
+        guard let watts, watts.isFinite, watts >= 0 else { return unavailable }
+        if watts < 0.005 { return "0 W" }
+        return String(format: watts < 1 ? "%.2f W" : watts < 10 ? "%.1f W" : "%.0f W", watts)
+    }
+
     public static func interval(_ seconds: Double) -> String {
         seconds < 1 ? String(format: "%.1fs", seconds) : String(format: "%.0fs", seconds)
     }

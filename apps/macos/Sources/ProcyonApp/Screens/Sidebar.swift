@@ -8,8 +8,30 @@ struct Sidebar: View {
 
     var body: some View {
         // A plain stack instead of List: NSOutlineView re-measures every row on each live update,
-        // which cost ~30% CPU. Also no ScrollView + safeAreaInset: in a hidden-title-bar window that
-        // combination offset the buttons' hit areas from where they are drawn.
+        // which cost ~30% CPU. The pages scroll in an AppKit scroll view (SwiftUI's ScrollView
+        // offsets the rows' hit areas from where they are drawn in this hidden-title-bar window);
+        // the controls at the bottom stay put.
+        VStack(alignment: .leading, spacing: 0) {
+            AppKitScrollView {
+                pages
+                    .environment(store)
+            }
+
+            Divider()
+                .padding(.horizontal, Tokens.Space.md)
+            VStack(alignment: .leading, spacing: Tokens.Space.sm) {
+                LiveControls()
+                SidebarItem(page: .settings, selection: $page) {
+                    PageRow(page: .settings, detail: "Updates, menu bar, appearance")
+                }
+            }
+            .padding(.horizontal, Tokens.Space.sm + 2)
+            .padding(.top, Tokens.Space.sm)
+            .padding(.bottom, Tokens.Space.md)
+        }
+    }
+
+    private var pages: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 Brand()
@@ -70,6 +92,17 @@ struct Sidebar: View {
                         ])
                 }
 
+                if Page.energy.isAvailable(store.capabilities) {
+                    SidebarItem(page: .energy, selection: $page) {
+                        MetricRow(
+                            metric: .energy, value: "Apps · \(Format.power(store.sample.appPower))",
+                            series: [
+                                ChartSeries(
+                                    id: "power", samples: store.history.appPower.samples, color: Metric.energy.style.start)
+                            ])
+                    }
+                }
+
                 if Page.startup.isAvailable(store.capabilities) || Page.services.isAvailable(store.capabilities) {
                     SectionLabel("Manage")
                     if Page.startup.isAvailable(store.capabilities) {
@@ -81,6 +114,16 @@ struct Sidebar: View {
                         SidebarItem(page: .services, selection: $page) {
                             PageRow(page: .services, detail: "Background services")
                         }
+                    }
+                }
+
+                SectionLabel("Analyze")
+                SidebarItem(page: .history, selection: $page) {
+                    PageRow(page: .history, detail: store.recordsHistory ? "The last 24 hours" : "Off")
+                }
+                if Page.inspect.isAvailable(store.capabilities) {
+                    SidebarItem(page: .inspect, selection: $page) {
+                        PageRow(page: .inspect, detail: "Who uses a port or a file")
                     }
                 }
 
@@ -98,15 +141,6 @@ struct Sidebar: View {
             }
             .padding(.horizontal, Tokens.Space.sm + 2)
             .padding(.top, Tokens.Space.xs)
-
-            Spacer(minLength: Tokens.Space.md)
-            VStack(alignment: .leading, spacing: Tokens.Space.sm) {
-                LiveControls()
-                SidebarItem(page: .settings, selection: $page) {
-                    PageRow(page: .settings, detail: "Updates, menu bar, appearance")
-                }
-            }
-            .padding(.horizontal, Tokens.Space.sm + 2)
             .padding(.bottom, Tokens.Space.md)
         }
     }

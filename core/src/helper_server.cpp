@@ -110,6 +110,8 @@ bool serve_sample(int fd) {
         c.disk_read = raw.disk_read;
         c.disk_write = raw.disk_write;
         c.has_disk_io = raw.has_disk_io ? 1 : 0;
+        c.has_energy = raw.has_energy ? 1 : 0;
+        c.energy_nj = raw.energy_nj;
         reply.push_back(c);
     }
     const auto reply_count = static_cast<uint32_t>(reply.size());
@@ -144,6 +146,26 @@ bool serve_details(int fd, const helper::RequestHeader &header) {
     if (bytes.size() > helper::kMaxDetailsBytes) bytes.clear();
     const auto size = static_cast<uint32_t>(bytes.size());
     return send_all(fd, &size, sizeof(size)) && send_all(fd, bytes.data(), bytes.size());
+}
+
+// Read-only, like Sample: paths and endpoints, never contents.
+bool serve_open_files(int fd, const helper::RequestHeader &header) {
+    std::vector<platform::OpenFile> files;
+    const uint32_t complete = platform::open_files(header.pid < 0 ? -1 : header.pid, files) ? 1 : 0;
+    auto bytes = helper::encode_files(files);
+    if (bytes.size() > helper::kMaxFilesBytes) bytes = helper::encode_files({});
+    const auto size = static_cast<uint32_t>(bytes.size());
+    return send_all(fd, &complete, sizeof(complete)) && send_all(fd, &size, sizeof(size)) &&
+           send_all(fd, bytes.data(), bytes.size());
+}
+
+bool serve_connections(int fd, const helper::RequestHeader &header) {
+    std::vector<pc_connection> list;
+    const uint32_t complete = platform::connections(header.pid < 0 ? -1 : header.pid, list) ? 1 : 0;
+    if (list.size() > helper::kMaxConnections) list.resize(helper::kMaxConnections);
+    const auto count = static_cast<uint32_t>(list.size());
+    return send_all(fd, &complete, sizeof(complete)) && send_all(fd, &count, sizeof(count)) &&
+           send_all(fd, list.data(), list.size() * sizeof(pc_connection));
 }
 
 // The OS-managed startup list takes seconds to read (sfltool): keep the last one and refresh it on
@@ -232,6 +254,8 @@ void serve(int client, pid_t client_pid, uid_t client_uid, int parent_watch) {
             case helper::Request::Details: ok = serve_details(client, header); break;
             case helper::Request::Launchd: ok = serve_launchd(client, header); break;
             case helper::Request::Startup: ok = serve_startup(client, client_uid); break;
+            case helper::Request::OpenFiles: ok = serve_open_files(client, header); break;
+            case helper::Request::Connections: ok = serve_connections(client, header); break;
         }
         if (!ok) return;
     }

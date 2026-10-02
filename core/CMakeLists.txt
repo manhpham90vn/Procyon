@@ -15,6 +15,7 @@ add_library(procyon_core STATIC
   src/platform/macos_gpu.cpp
   src/platform/macos_power.cpp
   src/platform/macos_launchd.cpp
+  src/platform/macos_handles.cpp
 )
 target_include_directories(procyon_core PUBLIC include PRIVATE src)
 target_compile_options(procyon_core PRIVATE -Wall -Wextra)

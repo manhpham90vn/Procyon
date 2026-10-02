@@ -26,6 +26,9 @@ public:
     pc_result launchd(const std::string &label, int32_t action);
     // The helper's cached list of OS-managed startup items; `ready` false while it is still reading.
     bool startup_items(std::vector<pc_startup_item> &out, bool &ready);
+    // Open files and sockets of `pid` (-1 every process) as root sees them.
+    bool open_files(int32_t pid, std::vector<platform::OpenFile> &out, bool &complete);
+    bool connections(int32_t pid, std::vector<pc_connection> &out, bool &complete);
 
 private:
     bool send_all(const void *data, size_t size);

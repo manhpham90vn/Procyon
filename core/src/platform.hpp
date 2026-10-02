@@ -29,6 +29,8 @@ struct RawProcess {
     int32_t state = PC_STATE_UNKNOWN;
     bool has_gpu = false;
     uint64_t gpu_time_ns = 0;  // cumulative GPU time over the process's GPU clients
+    bool has_energy = false;
+    uint64_t energy_nj = 0;  // cumulative energy the OS billed to the process, nanojoules
     std::string name;
     std::string path;
 };
@@ -73,6 +75,13 @@ struct Details {
 
     // Everything the OS lets this process see was read.
     bool complete() const { return arguments_known && threads_known; }
+};
+
+struct OpenFile {
+    int32_t pid = 0;
+    int32_t fd = -1;
+    int32_t kind = PC_FILE_REGULAR;
+    std::string path;
 };
 
 struct PowerAssertion {
@@ -121,6 +130,11 @@ void process_gpu(std::vector<RawProcess> &processes);
 double cpu_temperature();
 // Hottest CPU die and internal SSD (NAND) sensors in Celsius, -1 each when unknown; one sensor read.
 void temperatures(double &cpu, double &disk);
+
+// Open files and sockets of `pid` (-1: every process). False when some process couldn't be read
+// (another user's, without privileges); what could be read is still returned.
+bool open_files(int32_t pid, std::vector<OpenFile> &out);
+bool connections(int32_t pid, std::vector<pc_connection> &out);
 
 bool battery(pc_battery &out);
 std::vector<PowerAssertion> power_assertions();

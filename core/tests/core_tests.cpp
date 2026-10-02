@@ -1,5 +1,8 @@
 // Core checks that need no UI and change nothing on the machine: the helper wire format, input
 // validation, and the refusals that keep protected processes and system services safe.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -54,6 +57,59 @@ void details_round_trip() {
         std::vector<char> truncated(bytes.begin(), bytes.begin() + static_cast<long>(cut));
         check(!helper::decode_details(truncated, out), "truncated details rejected");
     }
+}
+
+void files_round_trip() {
+    std::vector<platform::OpenFile> in = {
+        {12, 3, PC_FILE_REGULAR, "/tmp/a b.txt"}, {12, -1, PC_FILE_CWD, "/"}, {99, 7, PC_FILE_DIRECTORY, ""}};
+    const auto bytes = helper::encode_files(in);
+    std::vector<platform::OpenFile> out;
+    check(helper::decode_files(bytes, out) && out.size() == 3, "files decode");
+    check(out[0].pid == 12 && out[0].fd == 3 && out[0].path == "/tmp/a b.txt" && out[1].kind == PC_FILE_CWD &&
+              out[2].kind == PC_FILE_DIRECTORY,
+          "files fields");
+    for (size_t cut = 0; cut < bytes.size(); cut += 5) {
+        std::vector<char> truncated(bytes.begin(), bytes.begin() + static_cast<long>(cut));
+        check(!helper::decode_files(truncated, out), "truncated files rejected");
+    }
+}
+
+// This process's own descriptors are always readable: a file it opened and a socket it listens on.
+void own_handles() {
+    const std::string path = "/tmp/procyon-core-test-" + std::to_string(getpid());
+    FILE *file = std::fopen(path.c_str(), "w");
+    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof(address);
+    const bool listening = listener >= 0 && ::bind(listener, reinterpret_cast<sockaddr *>(&address), length) == 0 &&
+                           ::listen(listener, 1) == 0 &&
+                           ::getsockname(listener, reinterpret_cast<sockaddr *>(&address), &length) == 0;
+
+    pc_monitor *monitor = pc_monitor_create();
+    const pc_open_file *files = nullptr;
+    bool complete = false;
+    const int32_t file_count = pc_monitor_open_files(monitor, getpid(), &files, &complete);
+    bool found = false;
+    for (int32_t i = 0; i < file_count; ++i)
+        found |=
+            files[i].kind == PC_FILE_REGULAR && std::string(files[i].path).find(path.substr(5)) != std::string::npos;
+    check(complete && found, "own open file listed");
+
+    const pc_connection *connections = nullptr;
+    const int32_t connection_count = pc_monitor_connections(monitor, getpid(), &connections, &complete);
+    bool listed = false;
+    for (int32_t i = 0; i < connection_count; ++i)
+        listed |= connections[i].protocol == PC_PROTOCOL_TCP && connections[i].state == PC_TCP_LISTEN &&
+                  connections[i].local_port == ntohs(address.sin_port) &&
+                  std::string(connections[i].local_address) == "127.0.0.1";
+    check(listening && complete && listed, "own listening socket listed");
+    pc_monitor_destroy(monitor);
+
+    if (listener >= 0) ::close(listener);
+    if (file) (void)std::fclose(file);
+    (void)std::remove(path.c_str());
 }
 
 void validation() {
@@ -143,6 +199,8 @@ void refusals() {
 int main() {
     try {
         details_round_trip();
+        files_round_trip();
+        own_handles();
         validation();
         managed_startup_parsing();
         refusals();

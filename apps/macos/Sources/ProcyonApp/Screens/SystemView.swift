@@ -119,6 +119,7 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            AlertsSection()
             Section("Appearance") {
                 Picker("Theme", selection: $appearance) {
                     ForEach(Appearance.allCases) { Text($0.title).tag($0) }
@@ -156,5 +157,94 @@ private struct MenuBarModuleToggle: View {
 
     var body: some View {
         Toggle(module.title, isOn: $isOn)
+    }
+}
+
+/// Notifications when the machine or an app stays over a threshold.
+private struct AlertsSection: View {
+    @Environment(SystemStore.self) private var store
+    @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system
+    @State private var permissionDenied = false
+
+    var body: some View {
+        Section("Alerts") {
+            ForEach(store.alertSettings.rules.filter { isAvailable($0.kind) }) { rule in
+                row(rule)
+            }
+            if permissionDenied {
+                Label(
+                    "Notifications are off for Procyon. Turn them on in System Settings → Notifications.",
+                    systemImage: "bell.slash"
+                )
+                .foregroundStyle(Tokens.Palette.warning)
+            }
+            Text(
+                "An alert fires when the condition lasts for the chosen time, then stays quiet for 15 minutes. Watching apps keeps Procyon reading every process while it sits in the menu bar, which costs a little more CPU."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if let last = store.recentAlerts.first {
+                LabeledContent("Last alert") {
+                    Text("\(last.title) · \(last.date.formatted(date: .omitted, time: .shortened))")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func isAvailable(_ kind: AlertRule.Kind) -> Bool {
+        switch kind {
+        case .temperature: store.capabilities.contains(.temperature)
+        case .memoryPressure: store.capabilities.contains(.memoryPressure)
+        default: true
+        }
+    }
+
+    private func binding(_ kind: AlertRule.Kind) -> Binding<AlertRule> {
+        Binding {
+            store.alertSettings.rules.first { $0.kind == kind } ?? AlertRule(kind: kind)
+        } set: { rule in
+            guard let index = store.alertSettings.rules.firstIndex(where: { $0.kind == kind }) else { return }
+            let enabling = rule.isEnabled && !store.alertSettings.rules[index].isEnabled
+            store.alertSettings.rules[index] = rule
+            if enabling { Task { permissionDenied = !(await AlertNotifier.shared.requestPermission()) } }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ rule: AlertRule) -> some View {
+        let rule = binding(rule.kind)
+        let kind = rule.wrappedValue.kind
+        Toggle(kind.title, isOn: rule.isEnabled)
+        if rule.wrappedValue.isEnabled {
+            Group {
+                if kind != .memoryPressure {
+                    LabeledContent("Over") {
+                        Stepper(value: rule.threshold, in: kind.thresholdRange, step: kind.step) {
+                            Text(threshold(rule.wrappedValue)).monospacedDigit()
+                        }
+                    }
+                }
+                Picker("For at least", selection: rule.duration) {
+                    ForEach(AlertSettings.durations, id: \.self) { Text(Self.duration($0)).tag($0) }
+                }
+            }
+            .padding(.leading, Tokens.Space.lg)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func threshold(_ rule: AlertRule) -> String {
+        switch rule.kind {
+        case .cpu, .memory: "\(Int(rule.threshold))%"
+        case .appCPU: "\(Int(rule.threshold))% CPU"
+        case .appMemory: "\(Int(rule.threshold)) GB"
+        case .temperature: Format.temperature(rule.threshold, unit: temperatureUnit)
+        case .memoryPressure: ""
+        }
+    }
+
+    static func duration(_ seconds: TimeInterval) -> String {
+        seconds >= 60 ? "\(Int(seconds / 60)) min" : "\(Int(seconds)) s"
     }
 }

@@ -30,8 +30,9 @@ format: ## Format Swift and C/C++ sources in place
 lint: ## All read-only checks (tokens, swift-format, clang-format, clang-tidy, shellcheck)
 	scripts/lint.sh
 
-tokens: ## Regenerate design tokens
+tokens: ## Regenerate design tokens and the process catalog
 	python3 scripts/gen-tokens.py
+	python3 scripts/gen-catalog.py
 
 icon: ## Re-render the app icon
 	swift scripts/make-icon.swift apps/macos/Resources/AppIcon.icns

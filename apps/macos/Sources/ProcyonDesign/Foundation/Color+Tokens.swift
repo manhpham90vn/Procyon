@@ -64,7 +64,7 @@ public struct ShadowStyle: Sendable {
 }
 
 public enum Metric: String, CaseIterable, Sendable, Identifiable {
-    case cpu, memory, disk, network, gpu, battery
+    case cpu, memory, disk, network, gpu, battery, energy
 
     public var id: String { rawValue }
 
@@ -76,6 +76,7 @@ public enum Metric: String, CaseIterable, Sendable, Identifiable {
         case .network: Tokens.MetricPalette.network
         case .gpu: Tokens.MetricPalette.gpu
         case .battery: Tokens.MetricPalette.battery
+        case .energy: Tokens.MetricPalette.energy
         }
     }
 
@@ -87,6 +88,7 @@ public enum Metric: String, CaseIterable, Sendable, Identifiable {
         case .network: "Network"
         case .gpu: "GPU"
         case .battery: "Battery"
+        case .energy: "Energy"
         }
     }
 }

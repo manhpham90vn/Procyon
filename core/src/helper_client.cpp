@@ -126,6 +126,52 @@ bool HelperClient::startup_items(std::vector<pc_startup_item> &out, bool &ready)
     return true;
 }
 
+bool HelperClient::open_files(int32_t pid, std::vector<platform::OpenFile> &out, bool &complete) {
+    out.clear();
+    if (!connected()) return false;
+    helper::RequestHeader header;
+    header.type = static_cast<uint32_t>(helper::Request::OpenFiles);
+    header.pid = pid;
+    uint32_t complete_flag = 0, size = 0;
+    if (!send_all(&header, sizeof(header)) || !receive_all(&complete_flag, sizeof(complete_flag)) ||
+        !receive_all(&size, sizeof(size)) || size > helper::kMaxFilesBytes) {
+        disconnect();
+        return false;
+    }
+    std::vector<char> bytes(size);
+    if (!receive_all(bytes.data(), size)) {
+        disconnect();
+        return false;
+    }
+    complete = complete_flag != 0;
+    return helper::decode_files(bytes, out);
+}
+
+bool HelperClient::connections(int32_t pid, std::vector<pc_connection> &out, bool &complete) {
+    out.clear();
+    if (!connected()) return false;
+    helper::RequestHeader header;
+    header.type = static_cast<uint32_t>(helper::Request::Connections);
+    header.pid = pid;
+    uint32_t complete_flag = 0, count = 0;
+    if (!send_all(&header, sizeof(header)) || !receive_all(&complete_flag, sizeof(complete_flag)) ||
+        !receive_all(&count, sizeof(count)) || count > helper::kMaxConnections) {
+        disconnect();
+        return false;
+    }
+    out.resize(count);
+    if (!receive_all(out.data(), count * sizeof(pc_connection))) {
+        disconnect();
+        return false;
+    }
+    for (auto &c : out) {  // never trust a peer's strings to be terminated
+        c.local_address[sizeof(c.local_address) - 1] = '\0';
+        c.remote_address[sizeof(c.remote_address) - 1] = '\0';
+    }
+    complete = complete_flag != 0;
+    return true;
+}
+
 bool HelperClient::details(int32_t pid, platform::Details &out) {
     if (!connected()) return false;
     helper::RequestHeader header;

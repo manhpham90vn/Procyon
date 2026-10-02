@@ -8,8 +8,9 @@ source scripts/dev-env.sh
 
 step() { printf '\n==> %s\n' "$1"; }
 
-step "Design tokens are up to date"
+step "Generated files are up to date (tokens, process catalog)"
 python3 scripts/gen-tokens.py --check
+python3 scripts/gen-catalog.py --check
 
 step "swift-format"
 swift format lint --strict --recursive --parallel "${SWIFT_PATHS[@]}"
@@ -35,6 +36,6 @@ if command -v shellcheck >/dev/null; then
 fi
 
 step "python"
-python3 -m py_compile scripts/gen-tokens.py scripts/bench-macos.py
+python3 -m py_compile scripts/gen-tokens.py scripts/gen-catalog.py scripts/bench-macos.py
 
 printf '\nAll checks passed.\n'
