@@ -1,191 +1,191 @@
-# Procyon: Spec trình quản lý tác vụ đa nền tảng
+# Procyon: Cross-platform task manager spec
 
 Oct 1, 2026 · @Manh Pham Van
 
-## Tổng quan sản phẩm
+## Product overview
 
-Một trình quản lý tác vụ GUI chạy trên Windows, macOS và Linux, sâu như Task Manager của Windows nhưng nhẹ hơn.
+A GUI task manager for Windows, macOS and Linux, as deep as the Windows Task Manager but lighter.
 
-**Vấn đề:** chưa có app nào vừa đa nền tảng, vừa có giao diện đồ họa hiện đại, vừa đủ sâu. Người dùng nhiều hệ điều hành phải học 3 công cụ khác nhau; công cụ đa nền tảng duy nhất phổ biến (btop) chạy trong terminal.
+**Problem:** no app is cross-platform, has a modern graphical interface, and goes deep enough. People who use several operating systems have to learn 3 different tools; the only popular cross-platform tool (btop) runs in a terminal.
 
-**Đối tượng người dùng:**
+**Target users:**
 
-| Nhóm | Nhu cầu chính | Ưu tiên |
+| Group | Main needs | Priority |
 | --- | --- | --- |
-| Người dùng phổ thông | Tìm app làm máy chậm, tắt app treo, xem app tốn pin | Cao (MVP) |
-| Developer / power user | Dùng nhiều OS, cần xem GPU, port, file bị khóa, tiến trình con | Cao |
-| Game thủ, người làm đồ họa | Nhiệt độ, GPU, theo dõi khi đang chơi/render | Trung bình |
-| IT / quản lý vài máy | Xem nhiều máy cùng lúc, cảnh báo | Sau v1 |
+| Everyday users | Find the app slowing the machine down, close hung apps, see which apps drain the battery | High (MVP) |
+| Developers / power users | Use several OSes; need GPU, ports, locked files, child processes | High |
+| Gamers, graphics professionals | Temperatures, GPU, monitoring while gaming/rendering | Medium |
+| IT / managing a few machines | See several machines at once, alerts | After v1 |
 
-**Nguyên tắc thiết kế:**
+**Design principles:**
 
-1. Nhẹ là tính năng số một: app theo dõi tài nguyên không được tự ngốn tài nguyên.
-2. Một trải nghiệm thống nhất trên mọi OS; chỗ nào OS không hỗ trợ thì ẩn hoặc ghi rõ, không hiển thị số sai.
-3. Dễ hiểu cho người thường, sâu dần cho người cần (progressive disclosure).
-4. Module bật/tắt được: mỗi module có chi phí CPU riêng.
-5. Không thu thập dữ liệu người dùng; mọi thứ chạy cục bộ.
+1. Lightness is feature number one: a resource monitor must not eat resources itself.
+2. One consistent experience on every OS; where an OS doesn't support something, hide it or say so clearly, never show wrong numbers.
+3. Easy to understand for everyday users, deeper for those who need it (progressive disclosure).
+4. Modules can be switched on and off: each module has its own CPU cost.
+5. No user data collection; everything runs locally.
 
-## Phân tích đối thủ
+## Competitor analysis
 
-Không app nào trong 6 app tiêu biểu vừa là GUI vừa chạy trên cả ba hệ điều hành; mỗi app mạnh ở một mảng riêng.
+None of the 6 representative apps is both a GUI and available on all three operating systems; each one is strong in its own area.
 
-| App | Nền tảng | Điểm mạnh nhất | Điểm nên học |
+| App | Platforms | Biggest strength | What to learn from it |
 | --- | --- | --- | --- |
-| [Windows Task Manager](https://www.bleepingcomputer.com/news/microsoft/closer-look-at-windows-11s-new-task-manager/) | Windows | Chuẩn mực quen thuộc, đủ tab | Efficiency mode, Startup impact, bảng lệnh Ctrl+K, chỉnh tốc độ cập nhật |
-| [System Informer](https://www.neowin.net/software/system-informer-3225011/) | Windows | Phân tích sâu, mã nguồn mở | Tìm tiến trình giữ file, đóng kết nối mạng, quản lý service, stack trace, portable |
-| [Activity Monitor](https://www.howtogeek.com/227240/how-to-monitor-your-macs-health-with-activity-monitor) | macOS | Tab năng lượng | Energy Impact hiện tại + trung bình 8 giờ, app ngăn máy ngủ, biểu đồ trên icon Dock |
-| [Stats](https://github.com/exelban/stats) | macOS | Luôn hiển thị trên menu bar | 9 module, widget tùy chỉnh, cảm biến/quạt, dashboard web từ xa, tắt module để tiết kiệm |
-| [Mission Center](https://linuxiac.com/mission-center-system-monitoring-app/) | Linux | Giao diện đẹp, Rust + GTK4 | CPU theo luồng, GPU encode/decode, biểu đồ vẽ bằng OpenGL để giảm tải |
-| [btop](https://tracker.pardus.org.tr/yirmibir/btop) | Linux, macOS, BSD (Windows qua btop4win) | Nhẹ, gần đa nền tảng | Lọc, cây tiến trình, gửi signal, preset, menu cấu hình đầy đủ |
+| [Windows Task Manager](https://www.bleepingcomputer.com/news/microsoft/closer-look-at-windows-11s-new-task-manager/) | Windows | The familiar standard, every tab | Efficiency mode, Startup impact, Ctrl+K command palette, adjustable update speed |
+| [System Informer](https://www.neowin.net/software/system-informer-3225011/) | Windows | Deep analysis, open source | Find the process holding a file, close network connections, service management, stack traces, portable |
+| [Activity Monitor](https://www.howtogeek.com/227240/how-to-monitor-your-macs-health-with-activity-monitor) | macOS | Energy tab | Current Energy Impact + 8-hour average, apps preventing sleep, chart on the Dock icon |
+| [Stats](https://github.com/exelban/stats) | macOS | Always visible in the menu bar | 9 modules, customizable widgets, sensors/fans, remote web dashboard, turn modules off to save resources |
+| [Mission Center](https://linuxiac.com/mission-center-system-monitoring-app/) | Linux | Beautiful interface, Rust + GTK4 | Per-thread CPU, GPU encode/decode, OpenGL-drawn charts to reduce load |
+| [btop](https://tracker.pardus.org.tr/yirmibir/btop) | Linux, macOS, BSD (Windows via btop4win) | Light, nearly cross-platform | Filtering, process tree, sending signals, presets, full configuration menu |
 
-**Khoảng trống thị trường:** một GUI đa nền tảng có độ sâu ngang System Informer, tab năng lượng kiểu Activity Monitor, widget kiểu Stats và lịch sử dài hạn mà chưa app nào có cho mọi tài nguyên.
+**Market gap:** a cross-platform GUI as deep as System Informer, with an Activity Monitor-style energy tab, Stats-style widgets, and long-term history for every resource, which no app has yet.
 
-## Tính năng desktop
+## Desktop features
 
-Tính năng chia 3 tầng: P0 là MVP bắt buộc, P1 để ngang hàng các app tốt, P2 là phần tạo khác biệt.
+Features come in 3 tiers: P0 is the required MVP, P1 reaches parity with good apps, P2 is what sets us apart.
 
 ### P0: MVP
 
-| Module | Tính năng | Ghi chú |
+| Module | Feature | Notes |
 | --- | --- | --- |
-| Tiến trình | Danh sách tiến trình: tên, PID, user, CPU %, RAM, disk I/O, mạng | Cột tùy chọn, lưu cấu hình cột |
-| Tiến trình | Gom theo app (vd. mọi tiến trình Chrome dưới 1 dòng) và dạng cây cha-con | Chuyển đổi giữa dạng phẳng, nhóm, cây |
-| Tiến trình | Tìm kiếm, lọc, sắp xếp theo mọi cột | Phím tắt focus ô tìm kiếm |
-| Tiến trình | End task (đóng nhẹ) và End process tree (cưỡng bức) | Hỏi xác nhận với tiến trình hệ thống |
-| Hiệu năng | Biểu đồ thời gian thực: CPU (tổng và từng nhân), RAM/swap, disk, mạng | Giữ 60 giây gần nhất |
-| Hệ thống | Thông tin máy: CPU, RAM, ổ đĩa, OS, uptime |  |
-| Giao diện | Light/dark theo hệ thống, chỉnh tốc độ cập nhật (0,5–5 giây, tạm dừng) |  |
+| Processes | Process list: name, PID, user, CPU %, RAM, disk I/O, network | Optional columns, saved column configuration |
+| Processes | Group by app (e.g. every Chrome process under 1 row) and parent-child tree | Switch between flat, grouped and tree |
+| Processes | Search, filter, sort by every column | Keyboard shortcut to focus the search field |
+| Processes | End task (graceful) and End process tree (forced) | Ask for confirmation on system processes |
+| Performance | Real-time charts: CPU (total and per core), RAM/swap, disk, network | Keep the last 60 seconds |
+| System | Machine info: CPU, RAM, disks, OS, uptime |  |
+| Interface | Light/dark following the system, adjustable update speed (0.5–5 seconds, pause) |  |
 
-### P1: Ngang hàng đối thủ
+### P1: Parity with competitors
 
-| Module | Tính năng | Ghi chú |
+| Module | Feature | Notes |
 | --- | --- | --- |
-| GPU | Mức dùng tổng, VRAM, nhiệt độ, encode/decode; GPU theo tiến trình nơi OS cho phép | NVIDIA, AMD, Intel, Apple Silicon |
-| Tiến trình | Đặt priority/nice, CPU affinity, suspend/resume, gửi signal (Unix) | Một số cần quyền admin |
-| Tiến trình | Chi tiết tiến trình: đường dẫn, dòng lệnh, biến môi trường, thời gian chạy, luồng | Mở vị trí file, copy thông tin |
-| Khởi động | Danh sách app chạy cùng hệ thống, mức ảnh hưởng, bật/tắt | Mỗi OS một cơ chế |
-| Service | Xem và start/stop/restart service (Windows Services, systemd, launchd) |  |
-| Lệnh nhanh | Bảng lệnh kiểu Ctrl+K: end task, đổi priority, mở vị trí file |  |
-| Tray / menu bar | Widget nhỏ hiển thị CPU, RAM, mạng, nhiệt độ | Module chọn được |
-| Pin | Mức pin, tình trạng pin, app ngăn máy ngủ | Laptop |
+| GPU | Total usage, VRAM, temperature, encode/decode; per-process GPU where the OS allows | NVIDIA, AMD, Intel, Apple Silicon |
+| Processes | Set priority/nice, CPU affinity, suspend/resume, send signals (Unix) | Some need admin rights |
+| Processes | Process details: path, command line, environment variables, running time, threads | Open file location, copy info |
+| Startup | Apps that start with the system, their impact, enable/disable | A different mechanism per OS |
+| Services | View and start/stop/restart services (Windows Services, systemd, launchd) |  |
+| Quick commands | Ctrl+K-style command palette: end task, change priority, open file location |  |
+| Tray / menu bar | Small widget showing CPU, RAM, network, temperature | Selectable modules |
+| Battery | Battery level, battery health, apps preventing sleep | Laptops |
 
-### P2: Khác biệt
+### P2: Differentiators
 
-| Module | Tính năng | Ghi chú |
+| Module | Feature | Notes |
 | --- | --- | --- |
-| Lịch sử | Lưu lịch sử mọi tài nguyên theo app (24 giờ đến 30 ngày), xem lại đỉnh tải | Lưu cục bộ, nén, giới hạn dung lượng |
-| Năng lượng | Tab năng lượng kiểu Activity Monitor cho cả Windows và Linux | Ước lượng nơi OS không có số chính xác |
-| Phân tích sâu | Tiến trình nào đang giữ file/thư mục; app nào đang mở port, kết nối tới đâu, đóng kết nối | Học từ System Informer |
-| Cảm biến | Nhiệt độ CPU/GPU/ổ đĩa, tốc độ quạt | Phụ thuộc phần cứng |
-| Cảnh báo | Thông báo khi app ngốn RAM/CPU bất thường hoặc máy quá nóng | Ngưỡng tùy chỉnh |
-| Giải thích | Mô tả dễ hiểu "tiến trình này là gì, có nên tắt không" | Cơ sở dữ liệu tiến trình phổ biến |
-| Mở rộng | Hệ thống plugin/module bật tắt riêng | Giữ lõi nhỏ |
+| History | Keep history of every resource per app (24 hours to 30 days), look back at peaks | Stored locally, compressed, size-capped |
+| Energy | Activity Monitor-style energy tab for Windows and Linux too | Estimated where the OS has no exact numbers |
+| Deep analysis | Which process is holding a file/folder; which app has a port open, where it connects, close connections | Learned from System Informer |
+| Sensors | CPU/GPU/disk temperatures, fan speeds | Hardware-dependent |
+| Alerts | Notify when an app uses unusual RAM/CPU or the machine runs too hot | Custom thresholds |
+| Explanations | Plain-language "what is this process, should I end it" | Database of common processes |
+| Extensions | Plugin/module system, each switchable on its own | Keep the core small |
 
-## Yêu cầu phi chức năng
+## Non-functional requirements
 
-App phải nhẹ hơn Task Manager gốc khi chạy nền; các con số dưới đây là mục tiêu đề xuất, cần đo lại trên máy thật.
+The app must be lighter than the built-in Task Manager when running in the background; the numbers below are proposed targets to be re-measured on real machines.
 
-| Nhóm | Yêu cầu | Mục tiêu đề xuất |
+| Area | Requirement | Proposed target |
 | --- | --- | --- |
-| Hiệu năng | CPU khi mở cửa sổ, cập nhật 1 giây | < 1–2% trên máy 4 nhân |
-| Hiệu năng | CPU khi chỉ chạy widget tray | < 0,5% |
-| Hiệu năng | RAM | < 80 MB khi mở, < 30 MB khi chạy nền |
-| Hiệu năng | Thời gian khởi động | < 1 giây |
-| Hiệu năng | Kích thước bộ cài | < 20 MB |
-| Độ chính xác | Số liệu lệch so với công cụ gốc của OS | < 5% |
-| Quyền | Chạy bằng quyền thường; chỉ xin quyền admin/root khi thao tác cần (qua helper riêng) |  |
-| Bảo mật | Thao tác nguy hiểm (tắt tiến trình hệ thống) phải xác nhận |  |
-| Quyền riêng tư | Không gửi dữ liệu ra ngoài; telemetry nếu có thì opt-in |  |
-| Khả năng truy cập | Điều hướng hoàn toàn bằng bàn phím, hỗ trợ trình đọc màn hình |  |
-| Quốc tế hóa | Tiếng Việt và tiếng Anh từ v1; đơn vị theo locale |  |
-| Phân phối | Windows: MSI/winget; macOS: DMG/Homebrew, đã notarize; Linux: Flatpak, AppImage, .deb |  |
+| Performance | CPU with the window open, 1-second updates | < 1–2% on a 4-core machine |
+| Performance | CPU with only the tray widget running | < 0.5% |
+| Performance | RAM | < 80 MB open, < 30 MB in the background |
+| Performance | Startup time | < 1 second |
+| Performance | Installer size | < 20 MB |
+| Accuracy | Deviation from the OS's own tools | < 5% |
+| Permissions | Run as a normal user; only ask for admin/root when an action needs it (through a separate helper) |  |
+| Security | Dangerous actions (ending system processes) require confirmation |  |
+| Privacy | No data sent out; telemetry, if any, is opt-in |  |
+| Accessibility | Fully keyboard-navigable, screen reader support |  |
+| Internationalization | English only (decided Oct 2, 2026); units follow the locale |  |
+| Distribution | Windows: MSI/winget; macOS: DMG/Homebrew, notarized; Linux: Flatpak, AppImage, .deb |  |
 
-## Hỗ trợ theo nền tảng
+## Platform support
 
-Phần cơ bản làm được trên cả ba OS; GPU theo tiến trình và mạng theo tiến trình là hai chỗ khó nhất, đặc biệt trên macOS.
+The basics work on all three OSes; per-process GPU and per-process network are the two hardest parts, especially on macOS.
 
-| Dữ liệu / thao tác | Windows | Linux | macOS |
+| Data / action | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Tiến trình, CPU, RAM | NtQuerySystemInformation, PDH | /proc | libproc, host\_statistics |
-| Disk I/O theo tiến trình | Có | /proc/\[pid\]/io (cần quyền với tiến trình khác) | Có (rusage) |
-| Mạng theo tiến trình | GetExtendedTcpTable + ETW | /proc/net + eBPF (cần quyền) | Hạn chế, chủ yếu qua nettop/NetworkStatistics |
-| GPU tổng | DXGI, PDH | NVML, sysfs (AMD/Intel) | IOKit |
-| GPU theo tiến trình | PDH GPU Engine counters | NVML, fdinfo (DRM) | Rất hạn chế |
-| Nhiệt độ, quạt | WMI, thường cần driver hãng | hwmon/lm-sensors | SMC, IOHID (Apple Silicon) |
-| Năng lượng theo app | Ước lượng | Ước lượng (RAPL nếu có) | Có sẵn (powermetrics cần root) |
+| Processes, CPU, RAM | NtQuerySystemInformation, PDH | /proc | libproc, host\_statistics |
+| Per-process disk I/O | Yes | /proc/\[pid\]/io (needs permission for other processes) | Yes (rusage) |
+| Per-process network | GetExtendedTcpTable + ETW | /proc/net + eBPF (needs permission) | Limited, mostly via nettop/NetworkStatistics |
+| Total GPU | DXGI, PDH | NVML, sysfs (AMD/Intel) | IOKit |
+| Per-process GPU | PDH GPU Engine counters | NVML, fdinfo (DRM) | Very limited |
+| Temperatures, fans | WMI, often needs a vendor driver | hwmon/lm-sensors | SMC, IOHID (Apple Silicon) |
+| Per-app energy | Estimated | Estimated (RAPL if available) | Built in (powermetrics needs root) |
 | Startup apps | Registry Run, Startup folder, Task Scheduler | XDG autostart, systemd user | Login Items, LaunchAgents |
-| Service | Service Control Manager | systemd (D-Bus) | launchd |
-| Tắt tiến trình | TerminateProcess | kill/signal | kill/signal |
-| Tiến trình giữ file | Restart Manager API, handle enumeration | /proc/\[pid\]/fd | lsof/libproc |
+| Services | Service Control Manager | systemd (D-Bus) | launchd |
+| Ending processes | TerminateProcess | kill/signal | kill/signal |
+| Processes holding a file | Restart Manager API, handle enumeration | /proc/\[pid\]/fd | lsof/libproc |
 
-Các giá trị "Ước lượng" và "Rất hạn chế" cần prototype kiểm chứng trước khi hứa với người dùng.
+The "Estimated" and "Very limited" entries need a prototype to confirm them before promising them to users.
 
-## Kiến trúc
+## Architecture
 
-Lõi C++ dùng chung lo việc giao tiếp với OS; mỗi nền tảng có giao diện native riêng để đạt hiệu năng và cảm giác tự nhiên cao nhất.
+A shared C++ core talks to the OS; each platform has its own native interface for the best performance and the most natural feel.
 
-| Lớp | Công nghệ | Vai trò |
+| Layer | Technology | Role |
 | --- | --- | --- |
-| Core | C++ | Thu thập số liệu, thao tác tiến trình/service, lịch sử, cảnh báo; không phụ thuộc UI |
-| Adapter OS | C++ theo từng OS | Gọi API ở bảng "Hỗ trợ theo nền tảng", trả về cấu trúc dữ liệu chung |
-| UI Windows | Win32 | Cửa sổ chính, tray widget |
-| UI macOS | SwiftUI | Cửa sổ chính, menu bar widget; gọi core qua Swift–C++ interop |
-| UI Linux | GTK | Cửa sổ chính, widget/indicator |
-| Helper đặc quyền | C++ | Tiến trình riêng chạy quyền admin/root cho thao tác cần quyền |
+| Core | C++ | Collect metrics, act on processes/services, history, alerts; no UI dependency |
+| OS adapter | C++ per OS | Call the APIs in the "Platform support" table, return shared data structures |
+| Windows UI | Win32 | Main window, tray widget |
+| macOS UI | SwiftUI | Main window, menu bar widget; calls the core through Swift–C++ interop |
+| Linux UI | GTK | Main window, widget/indicator |
+| Privileged helper | C++ | Separate process running as admin/root for actions that need it |
 
-**Nguyên tắc:**
+**Principles:**
 
-1. Core đưa ra một API ổn định (C++ hoặc C ABI) mà cả ba UI cùng dùng; logic nghiệp vụ không nằm ở UI.
-2. Core gom và tính toán số liệu một lần mỗi chu kỳ; UI chỉ hiển thị phần đang nhìn thấy.
-3. Mỗi tính năng làm 3 lần ở tầng UI, nên UI giữ mỏng và phần dùng chung đẩy hết xuống core.
+1. The core exposes a stable API (C++ or C ABI) that all three UIs use; business logic does not live in the UI.
+2. The core collects and computes metrics once per cycle; the UI only renders what is visible.
+3. Every feature is built 3 times at the UI layer, so the UI stays thin and everything shared goes down into the core.
 
-## Mô hình kinh doanh
+## Business model
 
-Freemium: bản miễn phí đủ thay Task Manager gốc; một số tính năng nâng cao phải trả phí (bản Pro).
+Freemium: the free version is enough to replace the built-in Task Manager; some advanced features are paid (Pro).
 
-| Gói | Bao gồm | Lý do |
+| Plan | Includes | Rationale |
 | --- | --- | --- |
-| Miễn phí | Toàn bộ P0 và P1 | Đủ dùng hằng ngày, là thứ kéo người dùng về và tạo uy tín |
-| Pro (đề xuất) | Lịch sử dài hạn (quá 24 giờ), phân tích sâu (file bị giữ, port, đóng kết nối), cảnh báo tùy chỉnh, tab năng lượng | Phần khác biệt so với đối thủ, chủ yếu hữu ích cho power user |
-| Luôn miễn phí | Tắt tiến trình, xem tài nguyên, giải thích tiến trình | Tính năng cốt lõi không khóa sau tường phí |
+| Free | All of P0 and P1 | Enough for daily use; it is what brings users in and builds trust |
+| Pro (proposed) | Long-term history (over 24 hours), deep analysis (held files, ports, closing connections), custom alerts, energy tab | What differentiates us from competitors, mostly useful to power users |
+| Always free | Ending processes, viewing resources, process explanations | Core features are never put behind a paywall |
 
-**Nguyên tắc:**
+**Principles:**
 
-1. License kiểm tra offline (khóa ký số), không gọi về server mỗi lần mở app, đúng nguyên tắc chạy cục bộ.
-2. Bản miễn phí không quảng cáo, không nhắc nâng cấp liên tục; tính năng Pro chỉ hiện nhãn nhỏ.
-3. Tính năng Pro nằm trong cùng bản cài, mở khóa bằng license; không phát hành bản cài riêng.
-4. Không bán qua Mac App Store hay Microsoft Store; tự bán qua cổng thanh toán (vd. Paddle, Lemon Squeezy) và phân phối qua kênh ở mục "Phân phối".
+1. Licenses are checked offline (signed keys), with no call home on each launch, in line with running locally.
+2. The free version has no ads and no constant upgrade nagging; Pro features only show a small label.
+3. Pro features ship in the same installer and are unlocked with a license; no separate installer.
+4. Not sold through the Mac App Store or Microsoft Store; sold directly through a payment provider (e.g. Paddle, Lemon Squeezy) and distributed through the channels in "Distribution".
 
-## Lộ trình và câu hỏi còn mở
+## Roadmap and open questions
 
-Bắt đầu bằng prototype kiểm chứng adapter, vì GPU và mạng theo tiến trình có thể không làm được trên mọi OS.
+Start with a prototype that validates the adapters, because per-process GPU and network may not be possible on every OS.
 
-| Giai đoạn | Nội dung | Cổng để sang giai đoạn sau |
+| Phase | Scope | Gate to the next phase |
 | --- | --- | --- |
-| 1. Prototype | Kiểm chứng adapter trên 3 hệ điều hành, đo overhead CPU/RAM | Đạt mục tiêu hiệu năng |
-| 2. MVP | Tính năng P0 trên 2 OS chính, beta kín | Beta ổn định, có phản hồi người dùng |
-| 3. v1 | Tính năng P1, đủ Windows, macOS, Linux, phát hành công khai | v1 chạy ổn trên cả 3 OS |
-| 4. v2 | Tính năng P2: lịch sử, năng lượng, cảnh báo | |
+| 1. Prototype | Validate the adapters on 3 operating systems, measure CPU/RAM overhead | Meets the performance targets |
+| 2. MVP | P0 features on the 2 main OSes, closed beta | Stable beta, user feedback |
+| 3. v1 | P1 features, full Windows, macOS, Linux, public release | v1 runs well on all 3 OSes |
+| 4. v2 | P2 features: history, energy, alerts | |
 
-Chưa đặt mốc thời gian; mỗi giai đoạn chỉ bắt đầu khi qua cổng kiểm tra phía trước.
+No dates set yet; each phase only starts once it passes the gate before it.
 
-**Câu hỏi còn mở:**
+**Open questions:**
 
-- [ ] Hai OS nào làm trước cho MVP?
-- [ ] GTK: dùng C API (GTK4) trực tiếp hay gtkmm?
-- [ ] Phiên bản OS tối thiểu (SwiftUI và Swift Charts cần macOS 13 trở lên)?
-- [ ] Giá Pro: mua một lần (kèm cập nhật 1 năm) hay thuê bao?
-- [ ] Cổng thanh toán: Paddle hay Lemon Squeezy (cả hai lo thuế VAT/sales tax)?
-- [ ] Chốt danh sách tính năng Pro sau khi có phản hồi beta
+- [ ] Which two OSes go first for the MVP?
+- [ ] GTK: use the C API (GTK4) directly, or gtkmm?
+- [ ] Minimum OS version (SwiftUI and Swift Charts need macOS 13 or later)?
+- [ ] Pro pricing: one-time purchase (with 1 year of updates) or subscription?
+- [ ] Payment provider: Paddle or Lemon Squeezy (both handle VAT/sales tax)?
+- [ ] Finalize the Pro feature list after beta feedback
 
-## Nguồn
+## Sources
 
-- [Windows 11 Task Manager mới (BleepingComputer)](https://www.bleepingcomputer.com/news/microsoft/closer-look-at-windows-11s-new-task-manager/)
-- [Task Manager Windows 11 24H2: Ctrl+K, GPU/NPU (kluczesoft)](https://kluczesoft.pl/wiedza/poradniki/task-manager-menedzer-zadan-windows-11-zaawansowane)
+- [The new Windows 11 Task Manager (BleepingComputer)](https://www.bleepingcomputer.com/news/microsoft/closer-look-at-windows-11s-new-task-manager/)
+- [Windows 11 24H2 Task Manager: Ctrl+K, GPU/NPU (kluczesoft)](https://kluczesoft.pl/wiedza/poradniki/task-manager-menedzer-zadan-windows-11-zaawansowane)
 - [System Informer (Neowin)](https://www.neowin.net/software/system-informer-3225011/)
 - [Activity Monitor (How-To Geek)](https://www.howtogeek.com/227240/how-to-monitor-your-macs-health-with-activity-monitor)
-- [Stats (GitHub)](https://github.com/exelban/stats) và [mac-stats.com](https://mac-stats.com/)
-- [Mission Center (Linuxiac)](https://linuxiac.com/mission-center-system-monitoring-app/) và [Mission Center 1.0 (OMG! Ubuntu)](https://www.omgubuntu.co.uk/2025/05/mission-center-1-0-adds-new-features)
+- [Stats (GitHub)](https://github.com/exelban/stats) and [mac-stats.com](https://mac-stats.com/)
+- [Mission Center (Linuxiac)](https://linuxiac.com/mission-center-system-monitoring-app/) and [Mission Center 1.0 (OMG! Ubuntu)](https://www.omgubuntu.co.uk/2025/05/mission-center-1-0-adds-new-features)
 - [btop (Pardus)](https://tracker.pardus.org.tr/yirmibir/btop)
 
-Bảng API theo nền tảng dựa trên kiến thức chung, chưa kiểm chứng bằng tài liệu chính thức.
+The per-platform API table is based on general knowledge and has not been checked against official documentation.

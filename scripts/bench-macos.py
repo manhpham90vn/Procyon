@@ -35,7 +35,7 @@ PAGES = [
     "history", "inspect", "system", "settings", "menubar",
 ]
 
-# Targets from "Yêu cầu phi chức năng" in docs/procyon-spec.md. A value must stay below its limit.
+# Targets from "Non-functional requirements" in docs/procyon-spec.md. A value must stay below its limit.
 STARTUP_SECONDS = 1.0  # launch to first window, median
 CPU_LIMIT = 2.0  # % of a 4-core machine with the window open at a 1 s refresh
 # Memory is the 90th percentile of the per-second footprint: the peak alone swings by 20 MB between
