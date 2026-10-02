@@ -42,6 +42,9 @@ enum MenuBarSettings {
 /// menu bar monitors. One line of text per module made the item about 300 pt wide with every module
 /// on; on a notched MacBook that slid it under the notch, where it can't be seen.
 struct MenuBarLabel: View {
+    /// SwiftUI keeps evaluating the label of a removed `MenuBarExtra`: while the item is hidden the
+    /// label reads nothing, so it isn't re-rendered on every sample behind the open window.
+    var isShown: Bool
     @Environment(SystemStore.self) private var store
     @AppStorage(MenuBarSettings.Module.cpu.key) private var cpu = true
     @AppStorage(MenuBarSettings.Module.memory.key) private var memory = true
@@ -52,7 +55,7 @@ struct MenuBarLabel: View {
     @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system
 
     var body: some View {
-        let columns = self.columns
+        let columns = isShown ? self.columns : []
         if columns.isEmpty {
             Image(systemName: "gauge.with.dots.needle.33percent")
         } else if let image = Self.render(columns) {
@@ -63,6 +66,10 @@ struct MenuBarLabel: View {
     struct Column: Hashable {
         let top: String
         let bottom: String
+        /// The widest value the column can show. Columns keep that width whatever they show, so the
+        /// item never changes size: a status item resizing every sample (network rates, mostly)
+        /// swallowed clicks and the panel did not open.
+        var widest = "100%"
     }
 
     private var columns: [Column] {
@@ -74,11 +81,15 @@ struct MenuBarLabel: View {
         if memory { columns.append(Column(top: "MEM", bottom: Format.percent(s.memoryFraction))) }
         if network {
             columns.append(
-                Column(top: "↓\(Self.compact(s.networkReceiveRate))", bottom: "↑\(Self.compact(s.networkSendRate))"))
+                Column(
+                    top: "↓\(Self.compact(s.networkReceiveRate))", bottom: "↑\(Self.compact(s.networkSendRate))",
+                    widest: "↓888M"))
         }
         if gpu, caps.contains(.gpu) { columns.append(Column(top: "GPU", bottom: Format.percent(s.gpuUsage))) }
         if temperature, caps.contains(.temperature) {
-            columns.append(Column(top: "TEMP", bottom: Format.temperature(s.cpuTemperature, unit: temperatureUnit)))
+            columns.append(
+                Column(
+                    top: "TEMP", bottom: Format.temperature(s.cpuTemperature, unit: temperatureUnit), widest: "188°F"))
         }
         if battery, let level = store.battery?.level { columns.append(Column(top: "BAT", bottom: Format.percent(level))) }
         return columns
@@ -90,10 +101,14 @@ struct MenuBarLabel: View {
         let content = HStack(spacing: 5) {
             ForEach(columns, id: \.self) { column in
                 VStack(alignment: .center, spacing: -1) {
-                    Text(column.top).font(.system(size: 7.5, weight: .semibold))
+                    Text(column.top).font(.system(size: 7.5, weight: .semibold).monospacedDigit())
                     Text(column.bottom).font(.system(size: 9.5, weight: .medium).monospacedDigit())
                 }
                 .fixedSize()
+                .background(alignment: .center) {
+                    // Sets the column width; never drawn.
+                    Text(column.widest).font(.system(size: 9.5, weight: .medium).monospacedDigit()).fixedSize().hidden()
+                }
             }
         }
         .foregroundStyle(.black)
@@ -105,13 +120,18 @@ struct MenuBarLabel: View {
         return image
     }
 
-    /// "1.2M", "640K": rates short enough for the menu bar.
+    /// "1.2M", "640K": rates short enough for the menu bar, never more than three digits.
     static func compact(_ bytesPerSecond: Double) -> String {
+        let kib = bytesPerSecond / 1024
+        let mib = kib / 1024
+        let gib = mib / 1024
         switch bytesPerSecond {
-        case ..<1024: "0K"
-        case ..<(1024 * 1024): String(format: "%.0fK", bytesPerSecond / 1024)
-        case ..<(1024 * 1024 * 1024): String(format: "%.1fM", bytesPerSecond / 1_048_576)
-        default: String(format: "%.1fG", bytesPerSecond / 1_073_741_824)
+        case ..<1024: return "0K"
+        case _ where kib < 999.5: return String(format: "%.0fK", kib)
+        case _ where mib < 9.95: return String(format: "%.1fM", max(mib, 1))
+        case _ where mib < 999.5: return String(format: "%.0fM", mib)
+        case _ where gib < 9.95: return String(format: "%.1fG", max(gib, 1))
+        default: return String(format: "%.0fG", gib)
         }
     }
 }

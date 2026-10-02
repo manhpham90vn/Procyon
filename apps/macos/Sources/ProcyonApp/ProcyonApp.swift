@@ -54,7 +54,7 @@ struct ProcyonApp: App {
                 .environment(store)
                 .onAppear { store.start() }
         } label: {
-            MenuBarLabel()
+            MenuBarLabel(isShown: menuBarEnabled && !windowOpen)
                 .environment(store)
                 .onAppear { store.start() }
         }

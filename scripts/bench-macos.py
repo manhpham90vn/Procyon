@@ -27,6 +27,10 @@ APP = ROOT / "dist/Procyon.app"
 CLI = ROOT / "build/core/procyon-cli"
 MB = 1024 * 1024
 
+# Every screen of the main window (Settings aside). The CPU target holds whichever one is open; a
+# screen the machine lacks (GPU, Battery on a VM) shows its empty state and is measured all the same.
+PAGES = ["overview", "processes", "cpu", "memory", "gpu", "disk", "network", "battery", "startup", "services", "system"]
+
 # Targets from "Yêu cầu phi chức năng" in docs/procyon-spec.md. A value must stay below its limit.
 STARTUP_SECONDS = 1.0  # launch to first window, median
 CPU_LIMIT = 2.0  # % of a 4-core machine with the window open at a 1 s refresh
@@ -132,7 +136,7 @@ def accuracy(seconds):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--pages", nargs="+", default=["overview", "processes"], help="screens to measure")
+    parser.add_argument("--pages", nargs="+", default=PAGES, help="screens to measure")
     parser.add_argument("--warmup", type=float, default=5, help="seconds after the window appears")
     parser.add_argument("--duration", type=float, default=20, help="seconds of sampling per screen")
     parser.add_argument("--launches", type=int, default=3, help="extra launches for the startup median")
