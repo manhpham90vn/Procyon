@@ -17,11 +17,17 @@ public struct SystemInfo: Sendable, Hashable {
     public var cpuFrequencyHz: UInt64 = 0
     public var memoryTotal: UInt64 = 0
     public var bootTime = Date()
+    /// Kind of each logical CPU, in the order of `SystemSample.coreUsage`; empty when unknown.
+    public var coreKinds: [CoreKind] = []
 
     public init() {}
 
     public var displayModel: String { modelName.isEmpty ? modelID : modelName }
     public var isLaptop: Bool { displayModel.localizedCaseInsensitiveContains("book") }
+}
+
+public enum CoreKind: UInt8, Sendable, Hashable {
+    case unknown = 0, performance, efficiency
 }
 
 public struct Volume: Sendable, Hashable, Identifiable {
@@ -64,6 +70,38 @@ public struct Capabilities: OptionSet, Sendable, Hashable {
     public static let memoryPressure = Capabilities(rawValue: 1 << 3)
     public static let swap = Capabilities(rawValue: 1 << 4)
     public static let hybridCores = Capabilities(rawValue: 1 << 5)
+    public static let gpu = Capabilities(rawValue: 1 << 6)
+    public static let processGPU = Capabilities(rawValue: 1 << 7)
+    public static let priority = Capabilities(rawValue: 1 << 8)
+    public static let suspend = Capabilities(rawValue: 1 << 9)
+    public static let signals = Capabilities(rawValue: 1 << 10)
+    public static let cpuAffinity = Capabilities(rawValue: 1 << 11)
+    public static let temperature = Capabilities(rawValue: 1 << 12)
+    public static let battery = Capabilities(rawValue: 1 << 13)
+    public static let services = Capabilities(rawValue: 1 << 14)
+    public static let startup = Capabilities(rawValue: 1 << 15)
+}
+
+/// One GPU. Unknown values are nil.
+public struct GPUInfo: Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var name = ""
+    public var vendor = ""
+    public var cores = 0
+    /// Shares system memory: `memoryTotal` is nil and `memoryUsed` counts system memory the GPU holds.
+    public var unifiedMemory = false
+    /// 0...1
+    public var utilization: Double?
+    public var rendererUtilization: Double?
+    public var tilerUtilization: Double?
+    public var encoderUtilization: Double?
+    public var decoderUtilization: Double?
+    public var memoryUsed: Int64?
+    public var memoryTotal: Int64?
+    /// Celsius
+    public var temperature: Double?
+
+    public init(id: Int) { self.id = id }
 }
 
 /// Whole-machine metrics for one refresh.
@@ -95,6 +133,12 @@ public struct SystemSample: Sendable, Hashable {
     public var networkReceiveTotal: UInt64 = 0
     public var networkSendTotal: UInt64 = 0
 
+    /// Hottest CPU die sensor in Celsius; nil without `Capabilities.temperature`.
+    public var cpuTemperature: Double?
+    /// Internal SSD in Celsius; nil where no sensor is published.
+    public var diskTemperature: Double?
+    public var gpus: [GPUInfo] = []
+
     public var processCount = 0
     public var threadCount = 0
     /// Processes whose metrics need administrator privileges (zero once full access is on).
@@ -104,6 +148,8 @@ public struct SystemSample: Sendable, Hashable {
 
     public var memoryFraction: Double { memoryTotal > 0 ? Double(memoryUsed) / Double(memoryTotal) : 0 }
     public var swapFraction: Double { swapTotal > 0 ? Double(swapUsed) / Double(swapTotal) : 0 }
+    /// Busiest GPU, 0...1; nil when no GPU reports utilization.
+    public var gpuUsage: Double? { gpus.compactMap(\.utilization).max() }
 }
 
 public enum ViewMode: Int, CaseIterable, Sendable, Identifiable {
@@ -132,7 +178,7 @@ public enum ViewMode: Int, CaseIterable, Sendable, Identifiable {
 }
 
 public enum ProcessColumn: Int, CaseIterable, Sendable {
-    case name = 0, pid, user, cpu, memory, diskRead, diskWrite, networkReceive, networkSend, threads
+    case name = 0, pid, user, cpu, memory, diskRead, diskWrite, networkReceive, networkSend, threads, gpu
 
     /// Natural first sort direction when a column header is clicked.
     public var prefersDescending: Bool {
@@ -151,6 +197,20 @@ public struct ProcessFlags: OptionSet, Sendable, Hashable {
     public static let restricted = ProcessFlags(rawValue: 1 << 1)
     public static let protected = ProcessFlags(rawValue: 1 << 2)
     public static let appBundle = ProcessFlags(rawValue: 1 << 3)
+}
+
+public enum ProcessState: Int32, Sendable, Hashable {
+    case unknown = 0, running, sleeping, stopped, zombie
+
+    public var title: String {
+        switch self {
+        case .unknown: "Unknown"
+        case .running: "Running"
+        case .sleeping: "Sleeping"
+        case .stopped: "Suspended"
+        case .zombie: "Zombie"
+        }
+    }
 }
 
 /// One display row: a process or an application group.
@@ -180,11 +240,18 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
     public let startTime: Date?
     /// Every pid this row stands for (a group lists all its members).
     public let memberPIDs: [Int32]
+    /// Percent of one GPU's time (a group sums its members).
+    public let gpu: Double?
+    /// -20 (highest priority) ... 20; a group row has its main process's.
+    public let nice: Int32
+    /// A group is suspended when its main process is.
+    public let state: ProcessState
 
     public var hasChildren: Bool { childCount > 0 }
     public var isSystem: Bool { flags.contains(.system) }
     public var isRestricted: Bool { flags.contains(.restricted) }
     public var isProtected: Bool { flags.contains(.protected) }
+    public var isSuspended: Bool { state == .stopped }
     /// Bundle path used for the icon when the row belongs to an app.
     public var bundlePath: String? { flags.contains(.appBundle) || kind == .group && appID.hasSuffix(".app") ? appID : nil }
 
@@ -197,7 +264,8 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
         id: String, kind: Kind, pid: Int32, parentID: String?, depth: Int, childCount: Int, processCount: Int,
         name: String, user: String, path: String, appID: String, appName: String, flags: ProcessFlags,
         cpu: Double?, memory: Int64?, diskRead: Double?, diskWrite: Double?, networkReceive: Double?,
-        networkSend: Double?, threads: Int?, startTime: Date?, memberPIDs: [Int32]
+        networkSend: Double?, threads: Int?, startTime: Date?, memberPIDs: [Int32], gpu: Double? = nil, nice: Int32 = 0,
+        state: ProcessState = .unknown
     ) {
         self.id = id
         self.kind = kind
@@ -221,6 +289,9 @@ public struct ProcessRow: Identifiable, Sendable, Hashable {
         self.threads = threads
         self.startTime = startTime
         self.memberPIDs = memberPIDs
+        self.gpu = gpu
+        self.nice = nice
+        self.state = state
     }
 }
 
@@ -232,7 +303,7 @@ extension ProcessRow {
             processCount: processCount, name: name, user: user, path: path, appID: appID, appName: appName,
             flags: flags, cpu: cpu, memory: memory, diskRead: diskRead, diskWrite: diskWrite,
             networkReceive: networkReceive, networkSend: networkSend, threads: threads, startTime: startTime,
-            memberPIDs: memberPIDs)
+            memberPIDs: memberPIDs, gpu: gpu, nice: nice, state: state)
     }
 }
 
@@ -287,16 +358,22 @@ public extension Array where Element == ProcessRow {
     }
 }
 
-public enum EndResult: Sendable, Equatable {
-    case ok, notFound, permissionDenied, protected, failed
+/// Outcome of an action on a process, service or startup item.
+public enum ActionResult: Sendable, Equatable {
+    case ok, notFound, permissionDenied, protected, failed, unsupported, invalid
 
     public var message: String {
         switch self {
         case .ok: "Done"
-        case .notFound: "The process no longer exists."
-        case .permissionDenied: "You don't have permission to end this process. System processes need administrator privileges."
-        case .protected: "This process is critical to the system and can't be ended."
-        case .failed: "The process could not be ended."
+        case .notFound: "It no longer exists."
+        case .permissionDenied: "You don't have permission. System processes and services need full access."
+        case .protected: "This is critical to the system and can't be changed."
+        case .failed: "The operation failed."
+        case .unsupported: "Not supported on this system."
+        case .invalid: "Invalid request."
         }
     }
+
+    /// Ending something that already exited counts as done.
+    public var isFailure: Bool { self != .ok && self != .notFound }
 }

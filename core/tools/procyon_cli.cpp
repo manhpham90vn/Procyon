@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 
 #include "procyon/procyon.h"
@@ -52,6 +53,43 @@ int main(int argc, char **argv) {
         std::printf("volume %s at %s: %.1f / %.1f GB free\n", volumes[i].name, volumes[i].mount_point,
                     volumes[i].available_bytes / 1e9, volumes[i].total_bytes / 1e9);
 
+    pc_battery battery;
+    if (pc_battery_get(&battery) && battery.present)
+        std::printf("battery %.0f%% %s · health %.0f%% · %d cycles · %.1f °C · %.1f W · %s\n", battery.level * 100,
+                    battery.charging      ? "charging"
+                    : battery.on_ac_power ? "on AC"
+                                          : "on battery",
+                    battery.health * 100, battery.cycle_count, battery.temperature, battery.power_watts,
+                    battery.condition);
+    const pc_power_assertion *assertions = nullptr;
+    for (int i = 0, n = pc_monitor_power_assertions(monitor, &assertions); i < n; ++i)
+        std::printf(
+            "keeps awake: %s (pid %d%s) %s — %s\n", assertions[i].process_name, assertions[i].pid,
+            assertions[i].on_behalf_of > 0 ? (", for " + std::to_string(assertions[i].on_behalf_of)).c_str() : "",
+            assertions[i].type, assertions[i].reason);
+    const pc_service *services = nullptr;
+    const int service_count = pc_monitor_services(monitor, &services);
+    int running = 0, third_party = 0;
+    for (int i = 0; i < service_count; ++i) {
+        running += services[i].pid > 0;
+        third_party += !services[i].apple;
+    }
+    std::printf("services: %d (%d running, %d third-party)\n", service_count, running, third_party);
+    const pc_startup_item *items = nullptr;
+    for (int i = 0, n = pc_monitor_startup_items(monitor, &items); i < n; ++i)
+        std::printf("startup: %-24s %-44s scope %d %s pid %d\n", items[i].name, items[i].label, items[i].scope,
+                    items[i].enabled ? "enabled " : "disabled", items[i].pid);
+    const pc_startup_item *managed = nullptr;
+    bool managed_ready = false;
+    for (int i = 0, n = pc_monitor_startup_managed_items(monitor, &managed, &managed_ready); i < n; ++i)
+        std::printf("managed: %-34s scope %d %s pid %-6d app %s (%s)\n", managed[i].name, managed[i].scope,
+                    managed[i].enabled ? "enabled " : "disabled", managed[i].pid, managed[i].app_path,
+                    managed[i].parent_name);
+    const pc_process_details *details = nullptr;
+    if (pc_process_details_get(monitor, getpid(), &details) == PC_OK)
+        std::printf("self: %d args, %d env, %d threads, cwd %s, nice %d\n", details->argument_count,
+                    details->environment_count, details->thread_count, details->cwd, details->nice);
+
     const double cpu_start = cpu_seconds();
     const auto wall_start = std::chrono::steady_clock::now();
     for (int s = 0; s < samples; ++s) {
@@ -64,8 +102,20 @@ int main(int argc, char **argv) {
             snap->memory_total / 1073741824.0, snap->memory_pressure, snap->swap_used / 1073741824.0,
             snap->disk_read_bps, snap->disk_write_bps, snap->net_rx_bps, snap->net_tx_bps, snap->process_count,
             snap->thread_count, snap->restricted_count, snap->helper_state);
+        if (snap->cpu_temperature >= 0)
+            std::printf("cpu temperature %.1f °C · ssd %.1f °C\n", snap->cpu_temperature, snap->disk_temperature);
+        for (int g = 0; g < snap->gpu_count; ++g) {
+            const pc_gpu &gpu = snap->gpus[g];
+            double per_process = 0;
+            for (int p = 0; p < snap->process_count; ++p)
+                if (snap->processes[p].gpu_percent > 0) per_process += snap->processes[p].gpu_percent;
+            std::printf("gpu %s (%s, %d cores): %.0f%% · memory %.2f GB · processes sum %.1f%%\n", gpu.name, gpu.vendor,
+                        gpu.cores, gpu.utilization * 100, gpu.memory_used / 1073741824.0, per_process);
+        }
 
-        pc_view_query query{PC_VIEW_GROUPED, PC_COLUMN_CPU, true, filter, 8};
+        const char *sort = std::getenv("PROCYON_SORT");
+        pc_view_query query{PC_VIEW_GROUPED, sort && !std::strcmp(sort, "gpu") ? PC_COLUMN_GPU : PC_COLUMN_CPU, true,
+                            filter, 8};
         const pc_row *rows = nullptr;
         const int count = pc_monitor_build_view(monitor, &query, &rows);
         for (int r = 0; r < count; ++r) {
@@ -73,9 +123,10 @@ int main(int argc, char **argv) {
             const char *name = row.process_index >= 0 ? snap->processes[row.process_index].name : row.group_name;
             if (row.depth > 1) continue;
             std::printf(
-                "%*s%-40s pid %-6d cpu %6.1f%% mem %8.1f MB  net rx %9.0f tx %9.0f B/s  (%d procs)\n", row.depth * 2,
-                "", name, row.process_index >= 0 ? snap->processes[row.process_index].pid : row.group_pid,
-                row.cpu_percent, row.memory_bytes / 1048576.0, row.net_rx_bps, row.net_tx_bps, row.process_count);
+                "%*s%-40s pid %-6d cpu %6.1f%% gpu %5.1f%% mem %8.1f MB  net rx %9.0f tx %9.0f B/s  (%d procs)\n",
+                row.depth * 2, "", name,
+                row.process_index >= 0 ? snap->processes[row.process_index].pid : row.group_pid, row.cpu_percent,
+                row.gpu_percent, row.memory_bytes / 1048576.0, row.net_rx_bps, row.net_tx_bps, row.process_count);
         }
     }
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();

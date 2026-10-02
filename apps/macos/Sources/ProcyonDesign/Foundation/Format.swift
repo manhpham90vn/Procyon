@@ -67,7 +67,49 @@ public enum Format {
         return "\(minutes)m \(total % 60)s"
     }
 
+    /// Celsius in, shown in the unit chosen in Settings (`TemperatureUnit`).
+    public static func temperature(_ celsius: Double?, unit: TemperatureUnit = .current) -> String {
+        guard let celsius, celsius.isFinite else { return unavailable }
+        let measurement = Measurement(value: celsius, unit: UnitTemperature.celsius)
+        let number = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(0))
+        switch unit {
+        // The locale's unit: °F in the US, °C almost everywhere else.
+        case .system:
+            return measurement.formatted(.measurement(width: .abbreviated, usage: .weather, numberFormatStyle: number))
+        case .celsius: return "\(celsius.formatted(number))°C"
+        case .fahrenheit: return "\(measurement.converted(to: .fahrenheit).value.formatted(number))°F"
+        }
+    }
+
+    /// Watts with one decimal.
+    public static func watts(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return unavailable }
+        return String(format: "%.1f W", value)
+    }
+
     public static func interval(_ seconds: Double) -> String {
         seconds < 1 ? String(format: "%.1fs", seconds) : String(format: "%.0fs", seconds)
+    }
+}
+
+/// How temperatures are shown; stored in the user defaults under `storageKey`.
+public enum TemperatureUnit: String, CaseIterable, Identifiable, Sendable {
+    /// Follows the region: °F in the US, °C elsewhere.
+    case system, celsius, fahrenheit
+
+    public static let storageKey = "temperatureUnit"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .system: "Region default (\(Locale.current.measurementSystem == .us ? "°F" : "°C"))"
+        case .celsius: "Celsius (°C)"
+        case .fahrenheit: "Fahrenheit (°F)"
+        }
+    }
+
+    public static var current: TemperatureUnit {
+        UserDefaults.standard.string(forKey: storageKey).flatMap(TemperatureUnit.init(rawValue:)) ?? .system
     }
 }

@@ -16,6 +16,16 @@ struct ProcessCounters {
     uint64_t disk_write = 0;
     uint64_t net_rx = 0;
     uint64_t net_tx = 0;
+    uint64_t gpu_time_ns = 0;
+};
+
+// Storage behind pc_process_details pointers.
+struct DetailsStorage {
+    pc_process_details details{};
+    platform::Details data;
+    std::vector<const char *> arguments;
+    std::vector<const char *> environment;
+    std::vector<pc_thread> threads;
 };
 
 }  // namespace procyon
@@ -23,11 +33,18 @@ struct ProcessCounters {
 struct pc_monitor {
     uint32_t capabilities = 0;
     double last_refresh = 0;
+    bool sample_processes = true;
 
     pc_snapshot snapshot{};
     std::vector<double> core_usage;
     std::vector<pc_process> processes;
     std::vector<pc_volume> volumes;
+    std::vector<pc_gpu> gpus;
+    std::vector<pc_service> services;
+    std::vector<pc_startup_item> startup_items;
+    std::vector<pc_startup_item> managed_startup_items;
+    std::vector<pc_power_assertion> power_assertions;
+    procyon::DetailsStorage details;
     procyon::View view;
 
     std::vector<procyon::platform::CpuTicks> previous_ticks;

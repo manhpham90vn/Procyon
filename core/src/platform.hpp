@@ -25,6 +25,10 @@ struct RawProcess {
     uint64_t net_rx = 0;  // cumulative bytes over the process's sockets
     uint64_t net_tx = 0;
     int32_t threads = -1;
+    int32_t nice = 0;
+    int32_t state = PC_STATE_UNKNOWN;
+    bool has_gpu = false;
+    uint64_t gpu_time_ns = 0;  // cumulative GPU time over the process's GPU clients
     std::string name;
     std::string path;
 };
@@ -46,6 +50,38 @@ struct IoCounters {
 struct AppIdentity {
     std::string id;
     std::string name;
+};
+
+struct ThreadInfo {
+    uint64_t id = 0;
+    std::string name;
+    double cpu_percent = -1;
+    uint64_t user_time_ns = 0;
+    uint64_t system_time_ns = 0;
+    int32_t priority = 0;
+    int32_t state = PC_STATE_UNKNOWN;
+};
+
+// What pc_process_details adds to the snapshot's per-process fields.
+struct Details {
+    std::string cwd;
+    bool arguments_known = false;
+    std::vector<std::string> arguments;
+    std::vector<std::string> environment;
+    bool threads_known = false;
+    std::vector<ThreadInfo> threads;
+
+    // Everything the OS lets this process see was read.
+    bool complete() const { return arguments_known && threads_known; }
+};
+
+struct PowerAssertion {
+    int32_t pid = 0;
+    int32_t on_behalf_of = -1;
+    uint32_t kind = 0;
+    std::string type;
+    std::string reason;
+    int64_t created = 0;
 };
 
 uint32_t capabilities();
@@ -71,5 +107,35 @@ int32_t self_pid();
 
 // Sends a termination request (force = false) or kill (force = true).
 pc_result signal_process(int32_t pid, bool force);
+pc_result send_signal(int32_t pid, int32_t signal);
+bool valid_signal(int32_t signal);
+pc_result set_priority(int32_t pid, int32_t nice);
+pc_result set_affinity(int32_t pid, uint64_t mask);
+bool process_details(int32_t pid, Details &out);
+
+// GPUs and per-process GPU time (fills has_gpu/gpu_time_ns).
+std::vector<pc_gpu> gpus();
+bool process_gpu_available();
+void process_gpu(std::vector<RawProcess> &processes);
+// Hottest CPU die sensor in Celsius, -1 when unknown.
+double cpu_temperature();
+// Hottest CPU die and internal SSD (NAND) sensors in Celsius, -1 each when unknown; one sensor read.
+void temperatures(double &cpu, double &disk);
+
+bool battery(pc_battery &out);
+std::vector<PowerAssertion> power_assertions();
+
+// Services and startup items (launchd, systemd, SCM).
+std::vector<pc_service> services();
+std::vector<pc_startup_item> startup_items();
+// Open at Login and app background items of `user` (plus machine-wide ones). macOS shares the list
+// only with administrators: the helper calls this as root for the app's user.
+std::vector<pc_startup_item> managed_startup_items(uint32_t user);
+// The parsing half, on `sfltool dumpbtm` output (exposed for tests).
+std::vector<pc_startup_item> parse_managed_startup_items(std::string dump, uint32_t user);
+// Runs the OS tool for one action in the given domain as the current user. The monitor routes
+// system-domain requests through the helper, which calls this as root.
+pc_result service_control(int32_t domain, const std::string &label, int32_t action);
+bool valid_service_label(const std::string &label);
 
 }  // namespace procyon::platform

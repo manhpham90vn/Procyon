@@ -8,8 +8,7 @@ struct ProcessesView: View {
     @State private var selection: ProcessRow.ID?
     /// Rows whose expansion differs from the current mode's default.
     @State private var toggled: Set<ProcessRow.ID> = []
-    @State private var pending: PendingAction?
-    @State private var failure: String?
+    @Environment(ProcessActionCenter.self) private var actionCenter
     @FocusState private var searchFocused: Bool
     @State private var tableController = ProcessTableController()
     /// Set by a view switch: select the pinned app once the rows of the new view arrive.
@@ -67,8 +66,15 @@ struct ProcessesView: View {
                     .buttonStyle(.borderless)
                     .help(allExpanded ? "Collapse all" : "Expand all")
                 }
+                Button("Get Info", systemImage: "info.circle") {
+                    if let row = selectedRow { actionCenter.inspect(row) }
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .disabled(selectedRow == nil)
+                .help("Path, command line, environment and threads of the selected process (⌘I)")
                 Button(role: .destructive) {
-                    if let row = selectedRow { request(.end, row) }
+                    if let row = selectedRow { actionCenter.request(.end, row) }
                 } label: {
                     Label("End Task", systemImage: "xmark.octagon.fill")
                 }
@@ -98,20 +104,6 @@ struct ProcessesView: View {
         }
         .onChange(of: selection) { unpinIfElsewhere() }
         .focusedSceneValue(\.processActions, actions)
-        .confirmationDialog(
-            pending?.title ?? "", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
-            presenting: pending
-        ) { action in
-            Button(action.confirmTitle, role: .destructive) { perform(action) }
-            Button("Cancel", role: .cancel) {}
-        } message: { action in
-            Text(action.message)
-        }
-        .alert("Couldn't end process", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(failure ?? "")
-        }
     }
 
     private var hasNetwork: Bool { store.capabilities.contains(.processNetwork) }
@@ -119,10 +111,11 @@ struct ProcessesView: View {
     private var table: some View {
         ProcessTable(
             rows: visibleRows, selection: $selection, sortColumn: store.sortColumn, sortDescending: store.sortDescending,
-            hasNetwork: hasNetwork, memoryTotal: Double(max(store.sample.memoryTotal, 1)), controller: tableController,
+            hasNetwork: hasNetwork, hasGPU: store.capabilities.contains(.processGPU),
+            memoryTotal: Double(max(store.sample.memoryTotal, 1)), controller: tableController,
             isExpanded: isExpanded, isPinnedRoot: isPinnedRoot,
             onSort: { store.sort(by: $0, descending: $1) },
-            onToggle: toggle, onUnpin: { store.pinnedAppID = nil }, menuItems: menuItems
+            onToggle: toggle, onUnpin: { store.pinnedAppID = nil }, menuItems: actionCenter.menuItems(for:)
         )
         .overlay {
             if store.hasSample && visibleRows.isEmpty {
@@ -134,29 +127,6 @@ struct ProcessesView: View {
             }
         }
         .cardSurface(padding: 0)
-    }
-
-    private func menuItems(for row: ProcessRow) -> [NSMenuItem] {
-        var items: [NSMenuItem] = [
-            ActionMenuItem(row.kind == .group ? "End \(row.processCount) Processes" : "End Task", isEnabled: !row.isProtected) {
-                request(.end, row)
-            },
-            ActionMenuItem("Force Quit", isEnabled: !row.isProtected) { request(.forceQuit, row) },
-        ]
-        if row.kind == .process && row.hasChildren {
-            items.append(ActionMenuItem("End Process Tree", isEnabled: !row.isProtected) { request(.endTree, row) })
-        }
-        items.append(.separator())
-        if !row.path.isEmpty {
-            items.append(
-                ActionMenuItem("Show in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: row.bundlePath ?? row.path)])
-                })
-        }
-        items.append(ActionMenuItem("Copy Name") { copy(row.name) })
-        items.append(ActionMenuItem("Copy PID") { copy(String(row.pid)) })
-        if !row.path.isEmpty { items.append(ActionMenuItem("Copy Path") { copy(row.path) }) }
-        return items
     }
 
     // MARK: - Summary
@@ -237,40 +207,52 @@ struct ProcessesView: View {
     // MARK: - Actions
 
     private var actions: ProcessActions {
-        let row = selectedRow.flatMap { $0.isProtected ? nil : $0 }
+        let row = selectedRow
+        let editable = row.flatMap { $0.isProtected ? nil : $0 }
         return ProcessActions(
             focusSearch: { searchFocused = true },
-            endTask: row.map { row in { request(.end, row) } },
-            forceQuit: row.map { row in { request(.forceQuit, row) } },
-            endTree: row.flatMap { row in row.kind == .process && row.hasChildren ? { request(.endTree, row) } : nil }
+            endTask: editable.map { row in { actionCenter.request(.end, row) } },
+            forceQuit: editable.map { row in { actionCenter.request(.forceQuit, row) } },
+            endTree: editable.flatMap { row in
+                row.kind == .process && row.hasChildren ? { actionCenter.request(.endTree, row) } : nil
+            },
+            suspendOrResume: store.capabilities.contains(.suspend)
+                ? editable.map { row in { actionCenter.request(row.isSuspended ? .resume : .suspend, row) } } : nil,
+            isSuspended: row?.isSuspended ?? false,
+            getInfo: row.map { row in { actionCenter.inspect(row) } }
         )
     }
+}
 
-    private func request(_ kind: PendingAction.Kind, _ row: ProcessRow) {
-        let action = PendingAction(kind: kind, row: row)
-        // Plain "End Task" on a user process needs no confirmation, like the OS task managers.
-        if kind == .end && !row.isSystem && row.kind == .process {
-            perform(action)
-        } else {
-            pending = action
+/// Says up front what needs full access on a page and offers to unlock it, so a control never fails
+/// (or prompts) out of the blue. Hidden once full access is on.
+struct FullAccessNotice: View {
+    let title: String
+    let message: String
+    @Environment(SystemStore.self) private var store
+
+    var body: some View {
+        switch store.fullAccess {
+        case .on:
+            EmptyView()
+        case .failed(let error):
+            ActionBanner(
+                symbol: "exclamationmark.triangle.fill", title: "Full access stopped", message: error,
+                actionTitle: "Try Again", tone: .warning
+            ) { Task { await store.enableFullAccess() } }
+        case .needsApproval:
+            ActionBanner(
+                symbol: "lock.shield.fill", title: "Allow the Procyon helper",
+                message: "Turn on Procyon in System Settings → General → Login Items, then come back here.",
+                actionTitle: "Open System Settings"
+            ) { store.openHelperApproval() }
+        case .off, .starting:
+            ActionBanner(
+                symbol: "lock.shield.fill", title: title, message: message,
+                actionTitle: store.fullAccess == .starting ? "Waiting…" : "Unlock Full Access",
+                isBusy: store.fullAccess == .starting
+            ) { Task { await store.enableFullAccess() } }
         }
-    }
-
-    private func perform(_ action: PendingAction) {
-        Task {
-            let result: EndResult
-            switch action.kind {
-            case .end: result = await store.end(action.row, force: false)
-            case .forceQuit: result = await store.end(action.row, force: true)
-            case .endTree: result = await store.endTree(action.row)
-            }
-            if result != .ok && result != .notFound { failure = result.message }
-        }
-    }
-
-    private func copy(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 
@@ -308,41 +290,6 @@ struct FullAccessBanner: View {
                 ) { Task { await store.enableFullAccess() } }
             }
         }
-    }
-}
-
-private struct PendingAction: Identifiable {
-    enum Kind { case end, forceQuit, endTree }
-
-    let kind: Kind
-    let row: ProcessRow
-    var id: String { "\(kind)-\(row.id)" }
-
-    var title: String {
-        switch kind {
-        case .end: row.kind == .group ? "End all \(row.processCount) “\(row.name)” processes?" : "End “\(row.name)”?"
-        case .forceQuit: "Force quit “\(row.name)”?"
-        case .endTree: "End “\(row.name)” and all its child processes?"
-        }
-    }
-
-    var confirmTitle: String {
-        switch kind {
-        case .end: "End Task"
-        case .forceQuit: "Force Quit"
-        case .endTree: "End Process Tree"
-        }
-    }
-
-    var message: String {
-        var text =
-            switch kind {
-            case .end: "The process will be asked to quit."
-            case .forceQuit: "The process stops immediately. Unsaved changes will be lost."
-            case .endTree: "Every descendant process stops immediately. Unsaved changes will be lost."
-            }
-        if row.isSystem { text += "\n\n“\(row.name)” is a system process. Ending it can make macOS unstable." }
-        return text
     }
 }
 

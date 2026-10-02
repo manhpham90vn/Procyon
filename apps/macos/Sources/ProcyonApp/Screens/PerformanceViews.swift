@@ -4,6 +4,25 @@ import SwiftUI
 
 struct CPUView: View {
     @Environment(SystemStore.self) private var store
+    @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system
+
+    /// Performance cores first, each numbered within its kind ("P Core 1", "E Core 1").
+    private func cores(_ s: SystemSample) -> [CoreGrid.Core] {
+        let kinds = store.info.coreKinds
+        func kind(_ index: Int) -> CoreKind { index < kinds.count ? kinds[index] : .unknown }
+        func rank(_ kind: CoreKind) -> Int { kind == .performance ? 0 : kind == .efficiency ? 1 : 2 }
+        let order = s.coreUsage.indices.sorted { (rank(kind($0)), $0) < (rank(kind($1)), $1) }
+        var numbers: [CoreKind: Int] = [:]
+        return order.map { index in
+            let kind = kind(index)
+            numbers[kind, default: 0] += 1
+            let samples = index < store.history.cores.count ? store.history.cores[index].samples : []
+            return CoreGrid.Core(
+                id: index, label: "Core \(numbers[kind]!)", usage: s.coreUsage[index], samples: samples,
+                badge: kind == .performance ? "P" : kind == .efficiency ? "E" : nil,
+                badgeTone: kind == .performance ? .accent : .success)
+        }
+    }
 
     var body: some View {
         let s = store.sample
@@ -28,29 +47,62 @@ struct CPUView: View {
                 .frame(height: 240)
             }
 
+            if let temperature = s.cpuTemperature {
+                Panel("Temperature", symbol: "thermometer.medium", tint: Tokens.Palette.warning) {
+                    // Celsius in the history; the axis and legend show the unit chosen in Settings.
+                    LiveChart(
+                        series: [
+                            ChartSeries(id: "temp", samples: store.history.cpuTemperature.samples, color: Tokens.Palette.warning)
+                        ],
+                        legend: [
+                            .init(
+                                "Chip (hottest sensor)", value: Format.temperature(temperature, unit: temperatureUnit),
+                                color: Tokens.Palette.warning),
+                            .init(
+                                "Peak", value: Format.temperature(store.history.cpuTemperature.peak, unit: temperatureUnit),
+                                color: Tokens.Palette.danger),
+                        ],
+                        maxValue: 110, axisLabel: { Format.temperature($0, unit: temperatureUnit) }
+                    )
+                    .frame(height: 160)
+                }
+            }
+
             Panel("Details", symbol: "list.bullet.rectangle") {
-                StatGrid([
-                    StatItem("Utilization", value: Format.percent(s.cpuUsage, digits: 1), tint: style.start),
-                    StatItem("User", value: Format.percent(s.cpuUser, digits: 1)),
-                    StatItem("System", value: Format.percent(s.cpuSystem, digits: 1), tint: style.end),
-                    StatItem("Idle", value: Format.percent(max(0, 1 - s.cpuUsage), digits: 1)),
-                    StatItem(
-                        "Load average", value: s.loadAverage.map { String(format: "%.2f", $0) }.joined(separator: " · "),
-                        detail: "1 · 5 · 15 minutes"),
-                    StatItem("Processes", value: Format.count(s.processCount)),
-                    StatItem("Threads", value: Format.count(s.threadCount)),
-                    StatItem("Uptime", value: Format.duration(store.uptime)),
-                    StatItem("Cores", value: store.info.coreSummary, detail: "\(store.info.logicalCores) logical"),
-                ])
+                StatGrid(
+                    [
+                        StatItem("Utilization", value: Format.percent(s.cpuUsage, digits: 1), tint: style.start),
+                        StatItem("User", value: Format.percent(s.cpuUser, digits: 1)),
+                        StatItem("System", value: Format.percent(s.cpuSystem, digits: 1), tint: style.end),
+                        StatItem("Idle", value: Format.percent(max(0, 1 - s.cpuUsage), digits: 1)),
+                        StatItem(
+                            "Load average", value: s.loadAverage.map { String(format: "%.2f", $0) }.joined(separator: " · "),
+                            detail: "1 · 5 · 15 minutes"),
+                        StatItem("Processes", value: Format.count(s.processCount)),
+                        StatItem("Threads", value: Format.count(s.threadCount)),
+                        StatItem("Uptime", value: Format.duration(store.uptime)),
+                        StatItem("Cores", value: store.info.coreSummary, detail: "\(store.info.logicalCores) logical"),
+                    ]
+                        + (s.cpuTemperature.map {
+                            [
+                                StatItem(
+                                    "Temperature", value: Format.temperature($0, unit: temperatureUnit),
+                                    detail: "Hottest die sensor")
+                            ]
+                        } ?? []))
             }
 
             Panel("Cores", symbol: "square.grid.3x3.fill") {
-                CoreGrid(
-                    cores: s.coreUsage.indices.map { index in
-                        CoreGrid.Core(
-                            id: index, label: "Core \(index + 1)", usage: s.coreUsage[index],
-                            samples: index < store.history.cores.count ? store.history.cores[index].samples : [])
-                    }, style: style)
+                if store.info.performanceCores > 0 {
+                    HStack(spacing: Tokens.Space.sm) {
+                        Badge("P", tone: .accent)
+                        Text("Performance").font(Tokens.Typography.caption).foregroundStyle(Tokens.Palette.textSecondary)
+                        Badge("E", tone: .success)
+                        Text("Efficiency").font(Tokens.Typography.caption).foregroundStyle(Tokens.Palette.textSecondary)
+                    }
+                }
+            } content: {
+                CoreGrid(cores: cores(s), style: style)
             }
 
             TopAppsPanel(
@@ -113,7 +165,7 @@ struct MemoryView: View {
                             StatItem("Wired", value: Format.bytes(s.memoryWired)),
                             StatItem("Compressed", value: Format.bytes(s.memoryCompressed)),
                             StatItem("Cached files", value: Format.bytes(s.memoryCached)),
-                        ], minimumWidth: 120)
+                        ], columns: 3)
                 }
                 Panel("Swap", symbol: "arrow.left.arrow.right") {
                     VStack(alignment: .leading, spacing: Tokens.Space.md) {
@@ -125,12 +177,14 @@ struct MemoryView: View {
                                 .foregroundStyle(Tokens.Palette.textTertiary)
                         }
                         UsageBar(value: s.swapFraction, style: style)
+                        // Takes the height the Details card leaves, so both cards end level.
                         Sparkline(samples: store.history.swap.samples, color: style.end)
-                            .frame(height: 56)
+                            .frame(minHeight: 40, maxHeight: .infinity)
                     }
                 }
-                .frame(maxWidth: 340)
+                .frame(maxWidth: 360)
             }
+            .equalHeightPanels()
 
             TopAppsPanel(
                 title: "Top Apps", symbol: "memorychip.fill", tint: style.start, rows: store.topMemory,
@@ -142,6 +196,7 @@ struct MemoryView: View {
 
 struct DiskView: View {
     @Environment(SystemStore.self) private var store
+    @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system
 
     var body: some View {
         let s = store.sample
@@ -168,15 +223,41 @@ struct DiskView: View {
                 .frame(height: 240)
             }
 
+            if let temperature = s.diskTemperature {
+                Panel("SSD Temperature", symbol: "thermometer.medium", tint: style.end) {
+                    // Celsius in the history; the axis and legend show the unit chosen in Settings.
+                    LiveChart(
+                        series: [ChartSeries(id: "ssd", samples: store.history.diskTemperature.samples, color: style.end)],
+                        legend: [
+                            .init(
+                                "Internal SSD", value: Format.temperature(temperature, unit: temperatureUnit), color: style.end),
+                            .init(
+                                "Peak", value: Format.temperature(store.history.diskTemperature.peak, unit: temperatureUnit),
+                                color: Tokens.Palette.danger),
+                        ],
+                        maxValue: 90, axisLabel: { Format.temperature($0, unit: temperatureUnit) }
+                    )
+                    .frame(height: 160)
+                }
+            }
+
             Panel("Details", symbol: "list.bullet.rectangle") {
-                StatGrid([
-                    StatItem("Read", value: Format.rate(s.diskReadRate), tint: style.start),
-                    StatItem("Write", value: Format.rate(s.diskWriteRate), tint: style.end),
-                    StatItem("Peak read (60s)", value: Format.rate(store.history.diskRead.peak)),
-                    StatItem("Peak write (60s)", value: Format.rate(store.history.diskWrite.peak)),
-                    StatItem("Read since boot", value: Format.bytes(s.diskReadTotal)),
-                    StatItem("Written since boot", value: Format.bytes(s.diskWriteTotal)),
-                ])
+                StatGrid(
+                    [
+                        StatItem("Read", value: Format.rate(s.diskReadRate), tint: style.start),
+                        StatItem("Write", value: Format.rate(s.diskWriteRate), tint: style.end),
+                        StatItem("Peak read (60s)", value: Format.rate(store.history.diskRead.peak)),
+                        StatItem("Peak write (60s)", value: Format.rate(store.history.diskWrite.peak)),
+                        StatItem("Read since boot", value: Format.bytes(s.diskReadTotal)),
+                        StatItem("Written since boot", value: Format.bytes(s.diskWriteTotal)),
+                    ]
+                        + (s.diskTemperature.map {
+                            [
+                                StatItem(
+                                    "SSD temperature", value: Format.temperature($0, unit: temperatureUnit),
+                                    detail: "Internal drive")
+                            ]
+                        } ?? []))
             }
 
             VolumesPanel(volumes: store.volumes)

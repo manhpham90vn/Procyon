@@ -34,6 +34,20 @@ struct OverviewView: View {
                         series: [ChartSeries(id: "mem", samples: store.history.memory.samples, color: Metric.memory.style.start)],
                         maxValue: 1)
                 }
+                if store.capabilities.contains(.gpu) {
+                    Button {
+                        page = .gpu
+                    } label: {
+                        MetricCard(
+                            title: "GPU", style: Metric.gpu.style,
+                            value: Format.percent(sample.gpuUsage).dropLast().description, unit: "%",
+                            caption: sample.gpus.first.map { gpu in
+                                "\(gpu.name) · \(Format.bytes(gpu.memoryUsed)) in use"
+                            } ?? "",
+                            series: [ChartSeries(id: "gpu", samples: store.history.gpu.samples, color: Metric.gpu.style.start)],
+                            maxValue: 1)
+                    }
+                }
                 Button {
                     page = .disk
                 } label: {

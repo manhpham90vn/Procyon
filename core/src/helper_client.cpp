@@ -75,18 +75,73 @@ bool HelperClient::sample(const std::vector<int32_t> &pids, std::vector<helper::
     return true;
 }
 
-pc_result HelperClient::end(int32_t pid, bool force) {
+pc_result HelperClient::simple(helper::Request type, int32_t pid, uint32_t flags, const void *payload,
+                               size_t payload_size) {
     if (!connected()) return PC_ERR_PERMISSION;
     helper::RequestHeader header;
-    header.type = static_cast<uint32_t>(helper::Request::End);
+    header.type = static_cast<uint32_t>(type);
     header.pid = pid;
-    header.flags = force ? 1 : 0;
+    header.flags = flags;
     int32_t result = PC_ERR_FAILED;
-    if (!send_all(&header, sizeof(header)) || !receive_all(&result, sizeof(result))) {
+    if (!send_all(&header, sizeof(header)) || (payload_size && !send_all(payload, payload_size)) ||
+        !receive_all(&result, sizeof(result))) {
         disconnect();
         return PC_ERR_FAILED;
     }
     return static_cast<pc_result>(result);
+}
+
+pc_result HelperClient::signal(int32_t pid, int32_t signal) {
+    return simple(helper::Request::Signal, pid, static_cast<uint32_t>(signal));
+}
+
+pc_result HelperClient::set_priority(int32_t pid, int32_t nice) {
+    return simple(helper::Request::Priority, pid, static_cast<uint32_t>(nice));
+}
+
+pc_result HelperClient::launchd(const std::string &label, int32_t action) {
+    char payload[helper::kLabelSize] = {};
+    if (label.size() >= sizeof(payload)) return PC_ERR_INVALID;
+    label.copy(payload, sizeof(payload) - 1);  // payload stays NUL-terminated
+    return simple(helper::Request::Launchd, 0, static_cast<uint32_t>(action), payload, sizeof(payload));
+}
+
+bool HelperClient::startup_items(std::vector<pc_startup_item> &out, bool &ready) {
+    out.clear();
+    if (!connected()) return false;
+    helper::RequestHeader header;
+    header.type = static_cast<uint32_t>(helper::Request::Startup);
+    uint32_t ready_flag = 0, count = 0;
+    if (!send_all(&header, sizeof(header)) || !receive_all(&ready_flag, sizeof(ready_flag)) ||
+        !receive_all(&count, sizeof(count)) || count > helper::kMaxStartupItems) {
+        disconnect();
+        return false;
+    }
+    out.resize(count);
+    if (!receive_all(out.data(), count * sizeof(pc_startup_item))) {
+        disconnect();
+        return false;
+    }
+    ready = ready_flag != 0;
+    return true;
+}
+
+bool HelperClient::details(int32_t pid, platform::Details &out) {
+    if (!connected()) return false;
+    helper::RequestHeader header;
+    header.type = static_cast<uint32_t>(helper::Request::Details);
+    header.pid = pid;
+    uint32_t size = 0;
+    if (!send_all(&header, sizeof(header)) || !receive_all(&size, sizeof(size)) || size > helper::kMaxDetailsBytes) {
+        disconnect();
+        return false;
+    }
+    std::vector<char> bytes(size);
+    if (!receive_all(bytes.data(), size)) {
+        disconnect();
+        return false;
+    }
+    return size > 0 && helper::decode_details(bytes, out);
 }
 
 bool HelperClient::send_all(const void *data, size_t size) {

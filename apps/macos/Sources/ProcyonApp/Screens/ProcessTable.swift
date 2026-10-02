@@ -15,6 +15,7 @@ struct ProcessTable: NSViewRepresentable {
     var sortColumn: ProcessColumn
     var sortDescending: Bool
     var hasNetwork: Bool
+    var hasGPU: Bool
     var memoryTotal: Double
     var controller: ProcessTableController
     var isExpanded: (ProcessRow) -> Bool
@@ -26,6 +27,19 @@ struct ProcessTable: NSViewRepresentable {
     var menuItems: (ProcessRow) -> [NSMenuItem]
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    /// A column order saved before the GPU column existed puts it last; move it after Memory once,
+    /// later the user's order wins.
+    private func placeGPUColumnOnce(in table: NSTableView) {
+        let key = "ProcessTable.gpuColumnPlaced"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        guard let gpu = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == ColumnSpec.gpuID }),
+            let memory = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == "memory" })
+        else { return }
+        let target = gpu > memory ? memory + 1 : memory
+        if gpu != target { table.moveColumn(gpu, toColumn: target) }
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = ProcessTableView()
@@ -53,6 +67,7 @@ struct ProcessTable: NSViewRepresentable {
         // Restores and then keeps saving widths, order and visibility in the user defaults.
         table.autosaveName = "ProcessTable"
         table.autosaveTableColumns = true
+        placeGPUColumnOnce(in: table)
 
         let coordinator = context.coordinator
         coordinator.tableView = table
@@ -106,9 +121,10 @@ struct ProcessTable: NSViewRepresentable {
             applying = true
             defer { applying = false }
 
-            if !parent.hasNetwork {
-                for id in ColumnSpec.networkIDs { table.tableColumn(withIdentifier: .init(id))?.isHidden = true }
+            for id in ColumnSpec.networkIDs where !parent.hasNetwork {
+                table.tableColumn(withIdentifier: .init(id))?.isHidden = true
             }
+            if !parent.hasGPU { table.tableColumn(withIdentifier: .init(ColumnSpec.gpuID))?.isHidden = true }
 
             let wanted = [NSSortDescriptor(key: ColumnSpec.id(for: parent.sortColumn), ascending: !parent.sortDescending)]
             if table.sortDescriptors.first != wanted.first { table.sortDescriptors = wanted }
@@ -222,6 +238,8 @@ struct ProcessTable: NSViewRepresentable {
                 cell.configure(
                     Format.rate(row.networkSend), intensity: (row.networkSend ?? 0) / 10_000_000, metric: .network,
                     restricted: row.networkSend == nil)
+            case (.gpu, let cell as HeatCell):
+                cell.configure(Format.cpu(row.gpu), intensity: (row.gpu ?? 0) / 100, metric: .gpu, restricted: row.gpu == nil)
             default:
                 break
             }
@@ -249,7 +267,9 @@ struct ProcessTable: NSViewRepresentable {
                     guard let column = table.tableColumn(withIdentifier: .init(spec.id)) else { continue }
                     let item = ActionMenuItem(spec.menuTitle) { column.isHidden.toggle() }
                     item.state = column.isHidden ? .off : .on
-                    item.isEnabled = parent.hasNetwork || !ColumnSpec.networkIDs.contains(spec.id)
+                    item.isEnabled =
+                        (parent.hasNetwork || !ColumnSpec.networkIDs.contains(spec.id))
+                        && (parent.hasGPU || spec.id != ColumnSpec.gpuID)
                     menu.addItem(item)
                 }
             } else if rows.indices.contains(table.clickedRow) {
@@ -347,6 +367,7 @@ private struct ColumnSpec {
         ColumnSpec(column: .user, id: "user", title: "User", minWidth: 56, width: 72, trailing: false),
         ColumnSpec(column: .cpu, id: "cpu", title: "CPU", minWidth: 56, width: 70),
         ColumnSpec(column: .memory, id: "memory", title: "Memory", minWidth: 64, width: 82),
+        ColumnSpec(column: .gpu, id: "gpu", title: "GPU", minWidth: 50, width: 64),
         ColumnSpec(column: .diskRead, id: "diskRead", title: "Disk Read", minWidth: 64, width: 78),
         ColumnSpec(column: .diskWrite, id: "diskWrite", title: "Disk Write", minWidth: 64, width: 78),
         ColumnSpec(column: .networkReceive, id: "networkReceive", title: "Net ↓", minWidth: 64, width: 78),
@@ -355,6 +376,7 @@ private struct ColumnSpec {
     ]
     static let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
     static let networkIDs: Set<String> = ["networkReceive", "networkSend"]
+    static let gpuID = "gpu"
 
     static func id(for column: ProcessColumn) -> String { all.first { $0.column == column }?.id ?? "cpu" }
 }
@@ -377,7 +399,7 @@ private enum CellStyle {
     static let sunken = NSColor(Tokens.Palette.surfaceSunken)
     static let border = NSColor(Tokens.Palette.border)
     static let heat: [Metric: NSColor] = Dictionary(
-        uniqueKeysWithValues: [Metric.cpu, .memory, .disk, .network].map { ($0, NSColor($0.style.start)) })
+        uniqueKeysWithValues: [Metric.cpu, .memory, .disk, .network, .gpu].map { ($0, NSColor($0.style.start)) })
 
     static func lineHeight(_ font: NSFont) -> CGFloat { ceil(font.ascender - font.descender + font.leading) }
 
@@ -521,6 +543,7 @@ private final class NameCell: NSTableCellView {
     private let countPill = ChromeView()
     private let countLabel = CellStyle.label()
     private let lock = NSImageView()
+    private let paused = NSImageView()
     private let pin = ClickableImage()
     /// What the frames depend on; layout runs only when it changes.
     private struct Layout: Equatable {
@@ -530,6 +553,7 @@ private final class NameCell: NSTableCellView {
         var font: NSFont
         var count: String?
         var locked: Bool
+        var suspended: Bool
         var pinned: Bool
     }
 
@@ -555,13 +579,18 @@ private final class NameCell: NSTableCellView {
         lock.contentTintColor = CellStyle.tertiary
         lock.toolTip = "Owned by the system. Unlock full access to read its CPU, memory and disk usage."
 
+        paused.image = CellStyle.symbol("pause.circle.fill", size: 11)
+        paused.contentTintColor = NSColor(Tokens.Palette.warning)
+        paused.toolTip = "Suspended. Choose Resume to let it run again."
+        paused.setAccessibilityLabel("Suspended")
+
         pin.image = CellStyle.pin
         pin.contentTintColor = CellStyle.accent
         pin.toolTip = "Pinned to the top in every view. Click to unpin."
         pin.setAccessibilityLabel("Unpin")
         pin.onClick = { [weak self] in self?.unpin?() }
 
-        for view in [disclosure, icon, label, countPill, lock, pin] { addSubview(view) }
+        for view in [disclosure, icon, label, countPill, lock, paused, pin] { addSubview(view) }
         textField = label
     }
 
@@ -577,7 +606,7 @@ private final class NameCell: NSTableCellView {
         let font = row.kind == .group ? CellStyle.headline : CellStyle.body
         let layout = Layout(
             depth: row.depth, hasChildren: row.hasChildren, name: row.name, font: font, count: count,
-            locked: row.isRestricted, pinned: pinned)
+            locked: row.isRestricted, suspended: row.isSuspended, pinned: pinned)
         if layout != current {
             current = layout
             disclosure.isHidden = !row.hasChildren
@@ -586,6 +615,7 @@ private final class NameCell: NSTableCellView {
             countPill.isHidden = count == nil
             countLabel.stringValue = count ?? ""
             lock.isHidden = !row.isRestricted
+            paused.isHidden = !row.isSuspended
             pin.isHidden = !pinned
             needsLayout = true
         }
@@ -614,7 +644,9 @@ private final class NameCell: NSTableCellView {
 
         let countWidth = countPill.isHidden ? 0 : ceil(countLabel.intrinsicContentSize.width) + 10
         let lockWidth: CGFloat = lock.isHidden ? 0 : 10
-        let extras = (countWidth > 0 ? countWidth + 6 : 0) + (lockWidth > 0 ? lockWidth + 6 : 0)
+        let pausedWidth: CGFloat = paused.isHidden ? 0 : 12
+        let extras =
+            (countWidth > 0 ? countWidth + 6 : 0) + (lockWidth > 0 ? lockWidth + 6 : 0) + (pausedWidth > 0 ? pausedWidth + 6 : 0)
         let height = CellStyle.lineHeight(label.font ?? CellStyle.body)
         // The label cell insets its text by 2 pt per side; without them the text truncates.
         let width = min(ceil(label.intrinsicContentSize.width) + 4, max(0, trailingEdge - x - extras))
@@ -628,6 +660,8 @@ private final class NameCell: NSTableCellView {
             x += countWidth + 6
         }
         lock.frame = NSRect(x: x, y: midY - 5, width: lockWidth, height: 10)
+        if lockWidth > 0 { x += lockWidth + 6 }
+        paused.frame = NSRect(x: x, y: midY - 6, width: pausedWidth, height: 12)
     }
 }
 

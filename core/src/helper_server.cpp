@@ -8,11 +8,15 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -113,18 +117,96 @@ bool serve_sample(int fd) {
            send_all(fd, reply.data(), reply.size() * sizeof(helper::Counters));
 }
 
-bool serve_end(int fd, const helper::RequestHeader &header, pid_t client_pid) {
-    int32_t result;
-    // Never kernel_task, launchd, ourselves or the app we serve.
-    if (header.pid <= 1 || header.pid == getpid() || header.pid == client_pid)
-        result = PC_ERR_PROTECTED;
-    else
-        result = platform::signal_process(header.pid, header.flags & 1);
-    return send_all(fd, &result, sizeof(result));
+// Never kernel_task, launchd, ourselves or the app we serve.
+bool is_protected(int32_t pid, pid_t client_pid) { return pid <= 1 || pid == getpid() || pid == client_pid; }
+
+bool send_result(int fd, int32_t result) { return send_all(fd, &result, sizeof(result)); }
+
+bool serve_signal(int fd, const helper::RequestHeader &header, pid_t client_pid) {
+    const auto signal = static_cast<int32_t>(header.flags);
+    if (is_protected(header.pid, client_pid)) return send_result(fd, PC_ERR_PROTECTED);
+    if (!platform::valid_signal(signal)) return send_result(fd, PC_ERR_INVALID);
+    return send_result(fd, platform::send_signal(header.pid, signal));
+}
+
+bool serve_priority(int fd, const helper::RequestHeader &header, pid_t client_pid) {
+    if (is_protected(header.pid, client_pid)) return send_result(fd, PC_ERR_PROTECTED);
+    return send_result(fd, platform::set_priority(header.pid, static_cast<int32_t>(header.flags)));
+}
+
+bool serve_details(int fd, const helper::RequestHeader &header) {
+    platform::Details details;
+    std::vector<char> bytes;
+    if (header.pid >= 0) {
+        platform::process_details(header.pid, details);
+        bytes = helper::encode_details(details);
+    }
+    if (bytes.size() > helper::kMaxDetailsBytes) bytes.clear();
+    const auto size = static_cast<uint32_t>(bytes.size());
+    return send_all(fd, &size, sizeof(size)) && send_all(fd, bytes.data(), bytes.size());
+}
+
+// The OS-managed startup list takes seconds to read (sfltool): keep the last one and refresh it on
+// a background thread, so the request answers at once and sampling never waits on it.
+struct StartupCache {
+    std::mutex mutex;
+    std::vector<pc_startup_item> items;
+    bool ready = false;
+    bool refreshing = false;
+    std::chrono::steady_clock::time_point fetched;
+};
+
+// One list per user: the daemon can serve several, and each sees their own login items.
+StartupCache &startup_cache(uid_t user) {
+    static std::mutex mutex;
+    static std::unordered_map<uid_t, std::unique_ptr<StartupCache>> caches;
+    std::lock_guard lock(mutex);
+    auto &cache = caches[user];
+    if (!cache) cache = std::make_unique<StartupCache>();
+    return *cache;
+}
+
+// `client_uid`: the app's user. We run as root, so "the current user" would be root.
+bool serve_startup(int fd, uid_t client_uid) {
+    constexpr auto kMaxAge = std::chrono::seconds(20);
+    auto &cache = startup_cache(client_uid);
+    std::vector<pc_startup_item> items;
+    uint32_t ready = 0;
+    {
+        std::lock_guard lock(cache.mutex);
+        if (!cache.refreshing && (!cache.ready || std::chrono::steady_clock::now() - cache.fetched > kMaxAge)) {
+            cache.refreshing = true;
+            std::thread([client_uid] {
+                auto list = platform::managed_startup_items(client_uid);
+                auto &cache = startup_cache(client_uid);
+                std::lock_guard lock(cache.mutex);
+                cache.items = std::move(list);
+                cache.ready = true;
+                cache.refreshing = false;
+                cache.fetched = std::chrono::steady_clock::now();
+            }).detach();
+        }
+        items = cache.items;
+        ready = cache.ready ? 1 : 0;
+    }
+    if (items.size() > helper::kMaxStartupItems) items.resize(helper::kMaxStartupItems);
+    const auto count = static_cast<uint32_t>(items.size());
+    return send_all(fd, &ready, sizeof(ready)) && send_all(fd, &count, sizeof(count)) &&
+           send_all(fd, items.data(), items.size() * sizeof(pc_startup_item));
+}
+
+// Only fixed launchctl verbs on validated labels in the system domain.
+bool serve_launchd(int fd, const helper::RequestHeader &header) {
+    char payload[helper::kLabelSize];
+    if (!receive_all(fd, payload, sizeof(payload))) return false;
+    payload[sizeof(payload) - 1] = '\0';
+    const std::string label(payload);
+    if (!platform::valid_service_label(label)) return send_result(fd, PC_ERR_INVALID);
+    return send_result(fd, platform::service_control(PC_DOMAIN_SYSTEM, label, static_cast<int32_t>(header.flags)));
 }
 
 // parent_watch < 0: no parent to watch (daemon mode); poll ignores the entry.
-void serve(int client, pid_t client_pid, int parent_watch) {
+void serve(int client, pid_t client_pid, uid_t client_uid, int parent_watch) {
     pollfd fds[2] = {{client, POLLIN, 0}, {parent_watch, POLLIN, 0}};
     while (true) {
         if (poll(fds, 2, -1) < 0) {
@@ -145,7 +227,11 @@ void serve(int client, pid_t client_pid, int parent_watch) {
                 break;
             }
             case helper::Request::Sample: ok = serve_sample(client); break;
-            case helper::Request::End: ok = serve_end(client, header, client_pid); break;
+            case helper::Request::Signal: ok = serve_signal(client, header, client_pid); break;
+            case helper::Request::Priority: ok = serve_priority(client, header, client_pid); break;
+            case helper::Request::Details: ok = serve_details(client, header); break;
+            case helper::Request::Launchd: ok = serve_launchd(client, header); break;
+            case helper::Request::Startup: ok = serve_startup(client, client_uid); break;
         }
         if (!ok) return;
     }
@@ -175,11 +261,12 @@ std::string client_requirement() {
 
 // The connecting process must be Procyon signed by our team (checked through its audit token, so a
 // recycled pid can't impersonate it) and run by an administrator, matching the legacy password prompt.
-bool daemon_peer_is_trusted(int fd, SecRequirementRef requirement, pid_t &peer_pid) {
+bool daemon_peer_is_trusted(int fd, SecRequirementRef requirement, pid_t &peer_pid, uid_t &peer_uid) {
     audit_token_t token;
     socklen_t length = sizeof(token);
     if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &length) != 0) return false;
     peer_pid = audit_token_to_pid(token);
+    peer_uid = audit_token_to_euid(token);
 
     uuid_t user;
     uuid_t admins;
@@ -241,7 +328,8 @@ int daemon_main() {
         int client = ::accept(server, nullptr, nullptr);
         if (client < 0) continue;
         pid_t peer_pid = 0;
-        if (!daemon_peer_is_trusted(client, requirement, peer_pid)) {
+        uid_t peer_uid = 0;
+        if (!daemon_peer_is_trusted(client, requirement, peer_pid, peer_uid)) {
             log("rejected untrusted client");
             ::close(client);
             continue;
@@ -249,8 +337,8 @@ int daemon_main() {
         int no_sigpipe = 1;
         setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
         ++active_clients;
-        std::thread([client, peer_pid] {
-            serve(client, peer_pid, -1);
+        std::thread([client, peer_pid, peer_uid] {
+            serve(client, peer_pid, peer_uid, -1);
             ::close(client);
             --active_clients;
         }).detach();
@@ -339,7 +427,7 @@ int pc_helper_main(int argc, char **argv) {
         ::close(server);
         server = -1;
         ::unlink(socket_path.c_str());
-        serve(client, parent, kq);
+        serve(client, parent, uid, kq);
         ::close(client);
         exit_code = 0;
         break;

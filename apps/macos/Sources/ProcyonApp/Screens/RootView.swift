@@ -4,7 +4,9 @@ import SwiftUI
 
 struct RootView: View {
     @Binding var page: Page
+    @Binding var showsPalette: Bool
     @Environment(SystemStore.self) private var store
+    @Environment(ProcessActionCenter.self) private var actions
 
     var body: some View {
         NavigationSplitView {
@@ -19,7 +21,12 @@ struct RootView: View {
                 case .memory: MemoryView()
                 case .disk: DiskView()
                 case .network: NetworkView()
+                case .gpu: GPUView()
+                case .startup: StartupView()
+                case .services: ServicesView()
+                case .battery: BatteryView()
                 case .system: SystemView()
+                case .settings: SettingsView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -31,6 +38,12 @@ struct RootView: View {
                 page = .processes
             }
         }
+        .overlay {
+            if showsPalette {
+                CommandPalette(page: $page, isPresented: $showsPalette)
+            }
+        }
+        .processActionDialogs(actions)
     }
 }
 
