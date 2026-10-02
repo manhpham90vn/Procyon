@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define PC_API_VERSION 2
+#define PC_API_VERSION 3
 
 typedef struct pc_monitor pc_monitor;
 
@@ -31,11 +31,27 @@ typedef enum {
     PC_CAP_MEMORY_PRESSURE = 1u << 3,
     PC_CAP_SWAP = 1u << 4,
     PC_CAP_HYBRID_CORES = 1u << 5, /* performance/efficiency core split is known */
+    PC_CAP_GPU = 1u << 6,          /* pc_snapshot.gpus */
+    PC_CAP_PROCESS_GPU = 1u << 7,  /* per-process GPU usage */
+    PC_CAP_PRIORITY = 1u << 8,     /* pc_process_set_priority */
+    PC_CAP_SUSPEND = 1u << 9,      /* pc_process_suspend / pc_process_resume */
+    PC_CAP_SIGNALS = 1u << 10,     /* pc_process_signal with POSIX signal numbers */
+    PC_CAP_CPU_AFFINITY = 1u << 11,
+    PC_CAP_TEMPERATURE = 1u << 12, /* pc_snapshot.cpu_temperature, disk_temperature where a sensor exists */
+    PC_CAP_BATTERY = 1u << 13,     /* pc_battery_get */
+    PC_CAP_SERVICES = 1u << 14,    /* pc_monitor_services, pc_service_control */
+    PC_CAP_STARTUP = 1u << 15,     /* pc_monitor_startup_items, pc_startup_set_enabled */
 } pc_capability;
 
 uint32_t pc_capabilities(void);
 
 /* ---------- static system info ---------- */
+
+typedef enum {
+    PC_CORE_UNKNOWN = 0,
+    PC_CORE_PERFORMANCE = 1,
+    PC_CORE_EFFICIENCY = 2,
+} pc_core_kind;
 
 typedef struct {
     char os_name[64];    /* "macOS" */
@@ -54,6 +70,8 @@ typedef struct {
     uint64_t cpu_frequency_hz; /* 0 when unknown */
     uint64_t memory_total;     /* bytes */
     int64_t boot_time;         /* unix seconds */
+    /* pc_core_kind of each logical CPU, in the order of pc_snapshot.core_usage */
+    uint8_t core_kinds[256];
 } pc_system_info;
 
 bool pc_system_info_get(pc_system_info *out);
@@ -77,6 +95,14 @@ typedef enum {
     PC_PROC_APP_BUNDLE = 1u << 3, /* belongs to an application bundle */
 } pc_process_flags;
 
+typedef enum {
+    PC_STATE_UNKNOWN = 0,
+    PC_STATE_RUNNING = 1,
+    PC_STATE_SLEEPING = 2,
+    PC_STATE_STOPPED = 3, /* suspended */
+    PC_STATE_ZOMBIE = 4,
+} pc_process_state;
+
 typedef struct {
     int32_t pid;
     int32_t ppid;
@@ -90,6 +116,9 @@ typedef struct {
     double net_tx_bps;     /* -1 unknown */
     int32_t threads;       /* -1 unknown */
     int64_t start_time;    /* unix seconds, 0 unknown */
+    double gpu_percent;    /* percent of the GPU's time (all processes sum to <= 100); -1 unknown */
+    int32_t nice;          /* -20 (highest priority) .. 20 */
+    int32_t state;         /* pc_process_state */
     char name[256];
     char user[64];
     char path[1024];
@@ -105,6 +134,22 @@ typedef enum {
 } pc_memory_pressure;
 
 typedef struct {
+    char name[128];      /* "Apple M3" */
+    char vendor[32];     /* "Apple", "AMD", "Intel", "NVIDIA" */
+    int32_t cores;       /* GPU cores, 0 unknown */
+    bool unified_memory; /* shares system memory (Apple Silicon, most integrated GPUs) */
+    /* 0..1, -1 unknown */
+    double utilization;
+    double renderer_utilization;
+    double tiler_utilization;
+    double encoder_utilization;
+    double decoder_utilization;
+    int64_t memory_used;  /* bytes, -1 unknown */
+    int64_t memory_total; /* bytes of dedicated VRAM, -1 unknown or unified */
+    double temperature;   /* Celsius, -1 unknown */
+} pc_gpu;
+
+typedef struct {
     double timestamp; /* unix seconds */
     double interval;  /* seconds since previous refresh */
 
@@ -115,6 +160,7 @@ typedef struct {
     int32_t core_count;
     const double *core_usage; /* core_count entries, 0..1 */
     double load_average[3];
+    double cpu_temperature; /* Celsius (hottest die sensor), -1 unknown */
 
     /* memory, bytes */
     uint64_t memory_total;
@@ -131,6 +177,7 @@ typedef struct {
     /* disk + network, whole machine */
     double disk_read_bps;
     double disk_write_bps;
+    double disk_temperature; /* Celsius (internal SSD), -1 unknown */
     uint64_t disk_read_total;
     uint64_t disk_write_total;
     double net_rx_bps;
@@ -144,10 +191,18 @@ typedef struct {
     int32_t restricted_count; /* processes whose metrics are unavailable (PC_PROC_RESTRICTED) */
     int32_t helper_state;     /* pc_helper_state */
     const pc_process *processes;
+
+    /* GPUs; per-process GPU time is in pc_process.gpu_percent */
+    int32_t gpu_count;
+    const pc_gpu *gpus;
 } pc_snapshot;
 
 pc_monitor *pc_monitor_create(void);
 void pc_monitor_destroy(pc_monitor *monitor);
+
+/* Per-process sampling is on by default. Off, a refresh reads only machine-wide metrics (a tray
+   widget with no window open): processes is empty and process_count 0. */
+void pc_monitor_set_process_sampling(pc_monitor *monitor, bool enabled);
 
 /* Collects a new sample. Rates are computed against the previous refresh. */
 const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor);
@@ -189,6 +244,7 @@ typedef enum {
     PC_COLUMN_NET_RX,
     PC_COLUMN_NET_TX,
     PC_COLUMN_THREADS,
+    PC_COLUMN_GPU,
 } pc_column;
 
 typedef struct {
@@ -213,6 +269,7 @@ typedef struct {
     double net_rx_bps;
     double net_tx_bps;
     int32_t threads;
+    double gpu_percent;
     const char *group_id;   /* group rows only, else NULL */
     const char *group_name; /* group rows only, else NULL */
     int32_t group_pid;      /* group rows: representative pid (main executable) */
@@ -229,6 +286,8 @@ typedef enum {
     PC_ERR_PERMISSION = 2,
     PC_ERR_PROTECTED = 3,
     PC_ERR_FAILED = 4,
+    PC_ERR_UNSUPPORTED = 5, /* not available on this OS (see pc_capabilities) */
+    PC_ERR_INVALID = 6,     /* bad argument */
 } pc_result;
 
 /* force = false asks the process to quit (SIGTERM); true kills it (SIGKILL). */
@@ -237,7 +296,164 @@ pc_result pc_process_end(pc_monitor *monitor, int32_t pid, bool force);
 /* Force-kills pid and all its descendants (children first). */
 pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid);
 
+/* Sends a POSIX signal number (PC_CAP_SIGNALS). Protected processes refuse every signal. */
+pc_result pc_process_signal(pc_monitor *monitor, int32_t pid, int32_t signal);
+
+/* Stops / continues every thread of the process (PC_CAP_SUSPEND). */
+pc_result pc_process_suspend(pc_monitor *monitor, int32_t pid);
+pc_result pc_process_resume(pc_monitor *monitor, int32_t pid);
+
+/* nice value -20 (highest) .. 20 (lowest). Raising priority needs the helper (PC_CAP_PRIORITY). */
+pc_result pc_process_set_priority(pc_monitor *monitor, int32_t pid, int32_t nice);
+
+/* Bit i = logical CPU i (PC_CAP_CPU_AFFINITY); PC_ERR_UNSUPPORTED where the OS has no affinity. */
+pc_result pc_process_set_affinity(pc_monitor *monitor, int32_t pid, uint64_t mask);
+
 const char *pc_result_message(pc_result result);
+
+/* ---------- process details ---------- */
+
+typedef struct {
+    uint64_t id;
+    char name[64];      /* thread name, may be empty */
+    double cpu_percent; /* recent usage of one core, -1 unknown */
+    uint64_t user_time_ns;
+    uint64_t system_time_ns;
+    int32_t priority; /* current scheduling priority */
+    int32_t state;    /* pc_process_state */
+} pc_thread;
+
+typedef struct {
+    int32_t pid;
+    int32_t ppid;
+    uint32_t uid;
+    int32_t nice;
+    int32_t state; /* pc_process_state */
+    int64_t start_time;
+    char name[256];
+    char user[64];
+    char path[1024];
+    char cwd[1024];       /* empty when unreadable */
+    bool arguments_known; /* false: needs elevated privileges */
+    int32_t argument_count;
+    const char *const *arguments; /* argv, argument_count entries */
+    int32_t environment_count;
+    const char *const *environment; /* "KEY=value" */
+    bool threads_known;
+    int32_t thread_count;
+    const pc_thread *threads;
+} pc_process_details;
+
+/* Reads path, command line, environment and threads of one process, through the helper when
+   needed. The result stays valid until the next call. */
+pc_result pc_process_details_get(pc_monitor *monitor, int32_t pid, const pc_process_details **out);
+
+/* ---------- power ---------- */
+
+typedef struct {
+    bool present;
+    double level; /* 0..1 */
+    bool on_ac_power;
+    bool charging;
+    bool fully_charged;
+    int32_t minutes_to_empty; /* -1 unknown / calculating */
+    int32_t minutes_to_full;
+    int32_t cycle_count;         /* -1 unknown */
+    double health;               /* maximum / design capacity, 0..1, -1 unknown */
+    char condition[64];          /* "Normal", "Service Recommended", … ; empty when unknown */
+    int32_t design_capacity_mah; /* -1 unknown */
+    int32_t max_capacity_mah;
+    double temperature; /* Celsius, -1 unknown */
+    double power_watts; /* negative while discharging; 0 unknown */
+    char adapter[128];  /* power adapter description, empty on battery */
+} pc_battery;
+
+bool pc_battery_get(pc_battery *out);
+
+typedef enum {
+    PC_ASSERT_SYSTEM_SLEEP = 1u << 0,  /* keeps the machine awake */
+    PC_ASSERT_DISPLAY_SLEEP = 1u << 1, /* keeps the display on */
+} pc_assertion_kind;
+
+typedef struct {
+    int32_t pid;          /* process holding the assertion */
+    int32_t on_behalf_of; /* pid it was taken for, -1 none */
+    uint32_t kind;        /* pc_assertion_kind */
+    char process_name[256];
+    char type[64]; /* OS assertion type */
+    char reason[256];
+    int64_t created; /* unix seconds, 0 unknown */
+} pc_power_assertion;
+
+/* Apps currently preventing sleep. Valid until the next call. */
+int32_t pc_monitor_power_assertions(pc_monitor *monitor, const pc_power_assertion **out);
+
+/* ---------- services and startup items ---------- */
+
+typedef enum {
+    PC_DOMAIN_SYSTEM = 0, /* machine-wide (launchd system, systemd system, Windows services) */
+    PC_DOMAIN_USER = 1,   /* the current user's session */
+} pc_domain;
+
+typedef struct {
+    char label[256];        /* unique id within its domain */
+    char name[256];         /* display name */
+    char program[1024];     /* executable, empty when unknown */
+    char config_path[1024]; /* definition file, empty when unknown */
+    int32_t domain;         /* pc_domain */
+    int32_t pid;            /* 0 when not running */
+    int32_t last_exit;      /* last exit status, 0 when none/unknown */
+    bool enabled;
+    bool apple; /* part of the OS */
+} pc_service;
+
+typedef enum {
+    PC_SERVICE_START = 0,
+    PC_SERVICE_STOP = 1,
+    PC_SERVICE_RESTART = 2,
+    PC_SERVICE_ENABLE = 3,
+    PC_SERVICE_DISABLE = 4,
+} pc_service_action;
+
+/* Every service the OS knows about. Spawns OS tools: call on demand, not every tick. */
+int32_t pc_monitor_services(pc_monitor *monitor, const pc_service **out);
+/* System-domain services go through the helper. */
+pc_result pc_service_control(pc_monitor *monitor, int32_t domain, const char *label, int32_t action);
+
+typedef enum {
+    PC_STARTUP_USER_AGENT = 0,     /* ~/Library/LaunchAgents, XDG autostart, HKCU Run */
+    PC_STARTUP_GLOBAL_AGENT = 1,   /* /Library/LaunchAgents: every user's login */
+    PC_STARTUP_DAEMON = 2,         /* /Library/LaunchDaemons: at boot, as root */
+    PC_STARTUP_OPEN_AT_LOGIN = 3,  /* an app the OS opens at login (macOS Login Items) */
+    PC_STARTUP_APP_BACKGROUND = 4, /* an app's registered background item (helper, agent, daemon, task) */
+} pc_startup_scope;
+
+typedef struct {
+    char label[256];
+    char name[256]; /* app or program name */
+    char program[1024];
+    char config_path[1024];
+    char app_path[1024];   /* owning .app bundle, empty when none */
+    int32_t scope;         /* pc_startup_scope */
+    int32_t pid;           /* running instance, 0 none */
+    char parent_name[256]; /* the app or developer it belongs to, may be empty */
+    bool enabled;
+    bool run_at_load;
+    bool keep_alive;
+    bool managed_by_os; /* only the OS's own settings can change it: pc_startup_set_enabled refuses */
+} pc_startup_item;
+
+/* Apps and programs that start with the system or at login (third-party only). */
+int32_t pc_monitor_startup_items(pc_monitor *monitor, const pc_startup_item **out);
+/* What the OS registers for apps beyond launchd definitions (macOS: Open at Login and "Allow in
+   the Background" items). The OS only shares this list with administrators, so it is read by the
+   helper: returns -1 without it. The helper refreshes the list in the background; `*ready` is false
+   (and the result possibly empty) until its first read finishes. Never blocks. Valid until the
+   next call. */
+int32_t pc_monitor_startup_managed_items(pc_monitor *monitor, const pc_startup_item **out, bool *ready);
+
+/* Daemons go through the helper. */
+pc_result pc_startup_set_enabled(pc_monitor *monitor, int32_t scope, const char *label, bool enabled);
 
 #ifdef __cplusplus
 }

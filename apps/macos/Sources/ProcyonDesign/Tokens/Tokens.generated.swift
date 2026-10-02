@@ -27,6 +27,7 @@ public enum Tokens {
         public static let disk = MetricStyle(start: Color(hex: 0xF59E0BFF), end: Color(hex: 0xF97316FF), symbol: "internaldrive")
         public static let network = MetricStyle(start: Color(hex: 0x10B981FF), end: Color(hex: 0x84CC16FF), symbol: "network")
         public static let gpu = MetricStyle(start: Color(hex: 0xF43F5EFF), end: Color(hex: 0xFB923CFF), symbol: "cube.transparent")
+        public static let battery = MetricStyle(start: Color(hex: 0xA3E635FF), end: Color(hex: 0x22C55EFF), symbol: "battery.100percent")
     }
 
     public enum Space {

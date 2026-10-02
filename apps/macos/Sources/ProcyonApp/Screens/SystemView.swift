@@ -47,7 +47,7 @@ struct SystemView: View {
                             + (info.cpuFrequencyHz > 0
                                 ? [StatItem("Frequency", value: String(format: "%.2f GHz", Double(info.cpuFrequencyHz) / 1e9))]
                                 : []),
-                        minimumWidth: 150)
+                        columns: 2)
                 }
                 Panel("Software", symbol: "apple.logo") {
                     StatGrid(
@@ -61,9 +61,10 @@ struct SystemView: View {
                             StatItem(
                                 "Processes", value: Format.count(store.sample.processCount),
                                 detail: "\(Format.count(store.sample.threadCount)) threads"),
-                        ], minimumWidth: 150)
+                        ], columns: 2)
                 }
             }
+            .equalHeightPanels()
 
             Panel("Kernel", symbol: "terminal") {
                 Text(info.kernel)
@@ -82,41 +83,38 @@ struct SystemView: View {
 struct SettingsView: View {
     @Environment(SystemStore.self) private var store
     @AppStorage(Appearance.storageKey) private var appearance: Appearance = .system
+    @AppStorage(MenuBarSettings.enabledKey) private var menuBarEnabled = true
+    @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system
 
     var body: some View {
         @Bindable var store = store
-        Form {
+        VStack(alignment: .leading, spacing: Tokens.Space.lg) {
+            PageHeader("Settings", subtitle: "Updates, menu bar, appearance and processes")
+                .padding(.horizontal, Tokens.Space.xxl)
+            form
+        }
+        .padding(.top, Tokens.Space.lg)
+    }
+
+    private var form: some View {
+        @Bindable var store = store
+        return Form {
             Section("Updates") {
                 Picker("Update speed", selection: $store.interval) {
                     ForEach(SystemStore.refreshIntervals, id: \.self) { Text("Every \(Format.interval($0))").tag($0) }
                 }
-                Toggle("Pause updates", isOn: $store.isPaused)
             }
-            Section("Full access") {
-                LabeledContent("Administrator helper") {
-                    switch store.fullAccess {
-                    case .on: Label("Running", systemImage: "lock.open.fill").foregroundStyle(Tokens.Palette.success)
-                    case .starting: ProgressView().controlSize(.small)
-                    case .needsApproval: Text("Waiting for approval").foregroundStyle(Tokens.Palette.warning)
-                    case .failed(let message): Text(message).foregroundStyle(Tokens.Palette.warning)
-                    case .off: Text("Off").foregroundStyle(.secondary)
+            Section("Menu bar") {
+                Toggle("Keep running in the menu bar when the window is closed", isOn: $menuBarEnabled)
+                if menuBarEnabled {
+                    ForEach(MenuBarSettings.Module.allCases.filter { $0.isAvailable(store.capabilities) }) { module in
+                        MenuBarModuleToggle(module: module)
                     }
                 }
-                if store.fullAccess.isOn {
-                    Button("Turn Off Full Access") { store.disableFullAccess() }
-                } else if store.fullAccess == .needsApproval {
-                    Button("Open System Settings…") { store.openHelperApproval() }
-                } else {
-                    Button("Unlock Full Access…") { Task { await store.enableFullAccess() } }
-                        .disabled(store.fullAccess == .starting)
-                }
-                if store.usesBackgroundHelper && store.backgroundHelperRegistered {
-                    Button("Remove Helper", role: .destructive) { Task { await store.removeBackgroundHelper() } }
-                }
                 Text(
-                    store.usesBackgroundHelper
-                        ? "Reads CPU, memory and disk usage of system processes and lets you end them. You allow the helper once in System Settings → General → Login Items; it starts only when Procyon connects and talks only to Procyon."
-                        : "Reads CPU, memory and disk usage of system processes and lets you end them. The helper asks for your password, talks only to this app and quits with it."
+                    menuBarEnabled
+                        ? "Closing the window moves Procyon to the menu bar (and out of the Dock), with live figures and the busiest apps one click away. Opening the window hides it from the menu bar again."
+                        : "Closing the window quits Procyon."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -126,6 +124,9 @@ struct SettingsView: View {
                     ForEach(Appearance.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                Picker("Temperature", selection: $temperatureUnit) {
+                    ForEach(TemperatureUnit.allCases) { Text($0.title).tag($0) }
+                }
             }
             Section("Processes") {
                 Picker("Default view", selection: $store.viewMode) {
@@ -138,7 +139,22 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
-        .fixedSize()
+        .scrollContentBackground(.hidden)
+        .frame(maxWidth: 720, alignment: .leading)
+        .padding(.horizontal, Tokens.Space.lg)
+    }
+}
+
+private struct MenuBarModuleToggle: View {
+    let module: MenuBarSettings.Module
+    @AppStorage private var isOn: Bool
+
+    init(module: MenuBarSettings.Module) {
+        self.module = module
+        _isOn = AppStorage(wrappedValue: module.defaultOn, module.key)
+    }
+
+    var body: some View {
+        Toggle(module.title, isOn: $isOn)
     }
 }

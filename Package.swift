@@ -14,12 +14,14 @@ let package = Package(
         .target(
             name: "ProcyonCore",
             path: "core",
-            exclude: ["CMakeLists.txt", "tools", "helper"],
+            exclude: ["CMakeLists.txt", "tools", "helper", "tests"],
             sources: ["src"],
             publicHeadersPath: "include",
             cxxSettings: [.headerSearchPath("src")],
             linkerSettings: [
                 .linkedFramework("CoreFoundation"), .linkedFramework("IOKit"),
+                // launchd jobs: the app that installed them (LaunchServices)
+                .linkedFramework("CoreServices"),
                 // helper: client code-signature checks and audit tokens
                 .linkedFramework("Security"), .linkedLibrary("bsm"),
             ]

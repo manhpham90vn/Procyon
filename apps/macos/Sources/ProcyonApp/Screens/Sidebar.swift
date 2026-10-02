@@ -38,6 +38,14 @@ struct Sidebar: View {
                         series: [ChartSeries(id: "mem", samples: store.history.memory.samples, color: Metric.memory.style.start)],
                         maxValue: 1)
                 }
+                if store.capabilities.contains(.gpu) {
+                    SidebarItem(page: .gpu, selection: $page) {
+                        MetricRow(
+                            metric: .gpu, value: Format.percent(store.sample.gpuUsage),
+                            series: [ChartSeries(id: "gpu", samples: store.history.gpu.samples, color: Metric.gpu.style.start)],
+                            maxValue: 1)
+                    }
+                }
                 SidebarItem(page: .disk, selection: $page) {
                     MetricRow(
                         metric: .disk,
@@ -62,7 +70,28 @@ struct Sidebar: View {
                         ])
                 }
 
+                if Page.startup.isAvailable(store.capabilities) || Page.services.isAvailable(store.capabilities) {
+                    SectionLabel("Manage")
+                    if Page.startup.isAvailable(store.capabilities) {
+                        SidebarItem(page: .startup, selection: $page) {
+                            PageRow(page: .startup, detail: "Apps that start with your Mac")
+                        }
+                    }
+                    if Page.services.isAvailable(store.capabilities) {
+                        SidebarItem(page: .services, selection: $page) {
+                            PageRow(page: .services, detail: "Background services")
+                        }
+                    }
+                }
+
                 SectionLabel("Machine")
+                if let battery = store.battery {
+                    SidebarItem(page: .battery, selection: $page) {
+                        PageRow(
+                            page: .battery, symbol: BatteryGlyph.symbol(for: battery),
+                            detail: "\(Format.percent(battery.level)) · \(battery.stateTitle)")
+                    }
+                }
                 SidebarItem(page: .system, selection: $page) {
                     PageRow(page: .system, detail: "\(store.info.osName) \(store.info.osVersion)")
                 }
@@ -71,7 +100,14 @@ struct Sidebar: View {
             .padding(.top, Tokens.Space.xs)
 
             Spacer(minLength: Tokens.Space.md)
-            LiveControls().padding(Tokens.Space.md)
+            VStack(alignment: .leading, spacing: Tokens.Space.sm) {
+                LiveControls()
+                SidebarItem(page: .settings, selection: $page) {
+                    PageRow(page: .settings, detail: "Updates, menu bar, appearance")
+                }
+            }
+            .padding(.horizontal, Tokens.Space.sm + 2)
+            .padding(.bottom, Tokens.Space.md)
         }
     }
 }
@@ -156,11 +192,12 @@ private struct Brand: View {
 
 private struct PageRow: View {
     let page: Page
+    var symbol: String?
     let detail: String
 
     var body: some View {
         HStack(spacing: Tokens.Space.sm + 2) {
-            Image(systemName: page.symbol)
+            Image(systemName: symbol ?? page.symbol)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Tokens.Palette.accent)
                 .frame(width: 22, height: 22)
@@ -195,36 +232,17 @@ private struct MetricRow: View {
     }
 }
 
-/// Live/paused status and update-speed control pinned to the sidebar bottom.
+/// Live/paused status pinned to the sidebar bottom; the update speed is in Settings.
 private struct LiveControls: View {
     @Environment(SystemStore.self) private var store
 
     var body: some View {
-        @Bindable var store = store
         HStack(spacing: Tokens.Space.sm) {
             LiveIndicator(isLive: !store.isPaused)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(store.isPaused ? "Paused" : "Live")
-                    .font(Tokens.Typography.label)
-                    .foregroundStyle(Tokens.Palette.textPrimary)
-                Text("Every \(Format.interval(store.interval))")
-                    .font(Tokens.Typography.caption)
-                    .foregroundStyle(Tokens.Palette.textSecondary)
-            }
+            Text(store.isPaused ? "Paused" : "Live")
+                .font(Tokens.Typography.label)
+                .foregroundStyle(Tokens.Palette.textPrimary)
             Spacer()
-            Menu {
-                Picker("Update Speed", selection: $store.interval) {
-                    ForEach(SystemStore.refreshIntervals, id: \.self) { Text(Format.interval($0)).tag($0) }
-                }
-                .pickerStyle(.inline)
-            } label: {
-                Image(systemName: "speedometer")
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Update speed")
-
             Button {
                 store.isPaused.toggle()
             } label: {

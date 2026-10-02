@@ -69,12 +69,20 @@ public struct CoreGrid: View {
         public let label: String
         public let usage: Double
         public let samples: [ChartSample]
+        /// Short tag shown next to the label ("P", "E"); nil for none.
+        public let badge: String?
+        public let badgeTone: Badge.Tone
 
-        public init(id: Int, label: String, usage: Double, samples: [ChartSample]) {
+        public init(
+            id: Int, label: String, usage: Double, samples: [ChartSample], badge: String? = nil,
+            badgeTone: Badge.Tone = .neutral
+        ) {
             self.id = id
             self.label = label
             self.usage = usage
             self.samples = samples
+            self.badge = badge
+            self.badgeTone = badgeTone
         }
     }
 
@@ -90,7 +98,8 @@ public struct CoreGrid: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: Tokens.Space.sm)], spacing: Tokens.Space.sm) {
             ForEach(cores) { core in
                 VStack(alignment: .leading, spacing: Tokens.Space.xs) {
-                    HStack {
+                    HStack(spacing: Tokens.Space.xs) {
+                        if let badge = core.badge { Badge(badge, tone: core.badgeTone) }
                         Text(core.label).font(Tokens.Typography.caption).foregroundStyle(Tokens.Palette.textSecondary)
                         Spacer()
                         Text(Format.percent(core.usage))

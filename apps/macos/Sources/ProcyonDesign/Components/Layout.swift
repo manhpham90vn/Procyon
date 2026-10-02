@@ -59,6 +59,8 @@ public struct Panel<Content: View, Accessory: View>: View {
         self.content = content()
     }
 
+    @Environment(\.panelFillsHeight) private var fillsHeight
+
     public var body: some View {
         VStack(alignment: .leading, spacing: Tokens.Space.md) {
             HStack(spacing: Tokens.Space.xs + 2) {
@@ -75,7 +77,7 @@ public struct Panel<Content: View, Accessory: View>: View {
             }
             content
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: fillsHeight ? .infinity : nil, alignment: .topLeading)
         .cardSurface(tint: tint)
     }
 }
@@ -106,15 +108,31 @@ public struct StatItem: Identifiable, Sendable {
 public struct StatGrid: View {
     var items: [StatItem]
     var minimumWidth: CGFloat
+    var columnCount: Int?
 
     public init(_ items: [StatItem], minimumWidth: CGFloat = 140) {
         self.items = items
         self.minimumWidth = minimumWidth
     }
 
+    /// Exactly `columns` equal columns, for grids that must line up with a neighbor.
+    public init(_ items: [StatItem], columns: Int) {
+        self.items = items
+        self.minimumWidth = 0
+        self.columnCount = columns
+    }
+
+    private var columns: [GridItem] {
+        if let columnCount {
+            return Array(
+                repeating: GridItem(.flexible(), spacing: Tokens.Space.md, alignment: .topLeading), count: columnCount)
+        }
+        return [GridItem(.adaptive(minimum: minimumWidth), spacing: Tokens.Space.md, alignment: .topLeading)]
+    }
+
     public var body: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: minimumWidth), spacing: Tokens.Space.md, alignment: .topLeading)],
+            columns: columns,
             alignment: .leading, spacing: Tokens.Space.lg
         ) {
             ForEach(items) { item in
@@ -137,5 +155,18 @@ public struct StatGrid: View {
                 .textSelection(.enabled)
             }
         }
+    }
+}
+
+public extension EnvironmentValues {
+    /// Panels stretch to the height they are offered, so cards side by side end up the same height
+    /// (pair with `.fixedSize(horizontal: false, vertical: true)` on the row).
+    @Entry var panelFillsHeight = false
+}
+
+public extension View {
+    /// A row of panels that share the tallest one's height.
+    func equalHeightPanels() -> some View {
+        environment(\.panelFillsHeight, true).fixedSize(horizontal: false, vertical: true)
     }
 }

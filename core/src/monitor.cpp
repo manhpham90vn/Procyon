@@ -1,6 +1,7 @@
 // Portable monitor: turns raw adapter counters into rates and implements the C ABI.
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -65,14 +66,42 @@ void fill_from_helper(pc_monitor &monitor, std::vector<platform::RawProcess> &ra
     }
 }
 
-// Signals directly, falling back to the helper when the process belongs to someone else.
-pc_result signal_with_fallback(pc_monitor *monitor, int32_t pid, bool force) {
-    pc_result result = platform::signal_process(pid, force);
+// Runs `local` and, when the OS refuses for lack of privileges, `elevated` through the helper.
+template <typename Local, typename Elevated>
+pc_result with_fallback(pc_monitor *monitor, Local local, Elevated elevated) {
+    pc_result result = local();
     if (result == PC_ERR_PERMISSION && monitor && monitor->helper.connected()) {
-        result = monitor->helper.end(pid, force);
+        result = elevated(monitor->helper);
         if (!monitor->helper.connected()) monitor->helper_state = PC_HELPER_LOST;
     }
     return result;
+}
+
+// Signals directly, falling back to the helper when the process belongs to someone else.
+pc_result signal_with_fallback(pc_monitor *monitor, int32_t pid, int32_t signal) {
+    return with_fallback(
+        monitor, [&] { return platform::send_signal(pid, signal); },
+        [&](HelperClient &helper) { return helper.signal(pid, signal); });
+}
+
+pc_result signal_with_fallback(pc_monitor *monitor, int32_t pid, bool force) {
+    return signal_with_fallback(monitor, pid, force ? SIGKILL : SIGTERM);
+}
+
+// Kernel, init/launchd and Procyon itself never take signals or priority changes.
+bool is_protected(const pc_monitor *monitor, int32_t pid) {
+    if (pid <= 1 || pid == platform::self_pid()) return true;
+    if (monitor) {
+        for (const auto &p : monitor->processes)
+            if (p.pid == pid) return (p.flags & PC_PROC_PROTECTED) != 0;
+    }
+    return false;
+}
+
+const pc_process *find_process(const pc_monitor *monitor, int32_t pid) {
+    for (const auto &p : monitor->processes)
+        if (p.pid == pid) return &p;
+    return nullptr;
 }
 
 }  // namespace
@@ -106,6 +135,10 @@ pc_monitor *pc_monitor_create(void) {
 }
 
 void pc_monitor_destroy(pc_monitor *monitor) { delete monitor; }
+
+void pc_monitor_set_process_sampling(pc_monitor *monitor, bool enabled) {
+    if (monitor) monitor->sample_processes = enabled;
+}
 
 const pc_snapshot *pc_monitor_snapshot(const pc_monitor *monitor) { return monitor ? &monitor->snapshot : nullptr; }
 
@@ -150,6 +183,11 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
     snap.core_count = static_cast<int32_t>(monitor->core_usage.size());
     snap.core_usage = monitor->core_usage.data();
     platform::load_average(snap.load_average);
+    snap.cpu_temperature = snap.disk_temperature = -1;
+    if (monitor->capabilities & PC_CAP_TEMPERATURE) platform::temperatures(snap.cpu_temperature, snap.disk_temperature);
+    if (monitor->capabilities & PC_CAP_GPU) monitor->gpus = platform::gpus();
+    snap.gpu_count = static_cast<int32_t>(monitor->gpus.size());
+    snap.gpus = monitor->gpus.data();
 
     platform::Memory mem;
     if (platform::memory(mem)) {
@@ -185,9 +223,10 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
 
     // Processes: identity is (pid, start_time) so a reused pid never inherits old counters.
     std::vector<platform::RawProcess> raw;
-    platform::processes(raw);
+    if (monitor->sample_processes) platform::processes(raw);
     fill_from_helper(*monitor, raw);
-    platform::process_network(raw);
+    if (!raw.empty()) platform::process_network(raw);
+    if (!raw.empty() && (monitor->capabilities & PC_CAP_PROCESS_GPU)) platform::process_gpu(raw);
     const int32_t self = platform::self_pid();
     std::unordered_map<uint64_t, ProcessCounters> current;
     current.reserve(raw.size());
@@ -205,14 +244,17 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         p.start_time = r.start_time;
         p.threads = r.threads;
         p.memory_bytes = r.memory_bytes;
+        p.nice = r.nice;
+        p.state = r.state;
         p.cpu_percent = -1;
+        p.gpu_percent = -1;
         p.disk_read_bps = p.disk_write_bps = -1;
         p.net_rx_bps = p.net_tx_bps = -1;
         if (r.threads > 0) threads += r.threads;
 
         const uint64_t key =
             (static_cast<uint64_t>(static_cast<uint32_t>(r.pid)) << 32) ^ static_cast<uint64_t>(r.start_time);
-        ProcessCounters counters{r.cpu_time_ns, r.disk_read, r.disk_write, r.net_rx, r.net_tx};
+        ProcessCounters counters{r.cpu_time_ns, r.disk_read, r.disk_write, r.net_rx, r.net_tx, r.gpu_time_ns};
         auto previous = monitor->previous_processes.find(key);
         const bool has_previous = previous != monitor->previous_processes.end() && elapsed > 0;
 
@@ -226,6 +268,10 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         if (r.has_net_io) {
             p.net_rx_bps = has_previous ? rate(r.net_rx, previous->second.net_rx, elapsed) : 0;
             p.net_tx_bps = has_previous ? rate(r.net_tx, previous->second.net_tx, elapsed) : 0;
+        }
+        if (r.has_gpu) {
+            // Nanoseconds of GPU time per second of wall time, as a percentage of one GPU.
+            p.gpu_percent = has_previous ? rate(r.gpu_time_ns, previous->second.gpu_time_ns, elapsed) / 1e7 : 0;
         }
         current.emplace(key, counters);
 
@@ -269,11 +315,7 @@ int32_t pc_monitor_build_view(pc_monitor *monitor, const pc_view_query *query, c
 }
 
 pc_result pc_process_end(pc_monitor *monitor, int32_t pid, bool force) {
-    if (monitor) {
-        for (const auto &p : monitor->processes)
-            if (p.pid == pid && (p.flags & PC_PROC_PROTECTED)) return PC_ERR_PROTECTED;
-    }
-    if (pid <= 1 || pid == platform::self_pid()) return PC_ERR_PROTECTED;
+    if (is_protected(monitor, pid)) return PC_ERR_PROTECTED;
     return signal_with_fallback(monitor, pid, force);
 }
 
@@ -315,13 +357,181 @@ pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid) {
     return result;
 }
 
+pc_result pc_process_signal(pc_monitor *monitor, int32_t pid, int32_t signal) {
+    if (!monitor || !(monitor->capabilities & PC_CAP_SIGNALS)) return PC_ERR_UNSUPPORTED;
+    if (!platform::valid_signal(signal)) return PC_ERR_INVALID;
+    if (is_protected(monitor, pid)) return PC_ERR_PROTECTED;
+    return signal_with_fallback(monitor, pid, signal);
+}
+
+pc_result pc_process_suspend(pc_monitor *monitor, int32_t pid) {
+    if (is_protected(monitor, pid)) return PC_ERR_PROTECTED;
+    return signal_with_fallback(monitor, pid, SIGSTOP);
+}
+
+pc_result pc_process_resume(pc_monitor *monitor, int32_t pid) {
+    if (is_protected(monitor, pid)) return PC_ERR_PROTECTED;
+    return signal_with_fallback(monitor, pid, SIGCONT);
+}
+
+pc_result pc_process_set_priority(pc_monitor *monitor, int32_t pid, int32_t nice) {
+    if (is_protected(monitor, pid)) return PC_ERR_PROTECTED;
+    // Raising priority (lowering nice) is reserved to root on Unix, even for your own processes.
+    return with_fallback(
+        monitor, [&] { return platform::set_priority(pid, nice); },
+        [&](HelperClient &helper) { return helper.set_priority(pid, nice); });
+}
+
+pc_result pc_process_set_affinity(pc_monitor *monitor, int32_t pid, uint64_t mask) {
+    if (is_protected(monitor, pid)) return PC_ERR_PROTECTED;
+    if (mask == 0) return PC_ERR_INVALID;
+    return platform::set_affinity(pid, mask);
+}
+
 const char *pc_result_message(pc_result result) {
     switch (result) {
         case PC_OK: return "Done";
         case PC_ERR_NOT_FOUND: return "The process no longer exists.";
-        case PC_ERR_PERMISSION: return "You don't have permission to end this process.";
-        case PC_ERR_PROTECTED: return "This process is critical to the system and can't be ended.";
-        case PC_ERR_FAILED: return "The process could not be ended.";
+        case PC_ERR_PERMISSION: return "You don't have permission to do this.";
+        case PC_ERR_PROTECTED: return "This process is critical to the system and can't be changed.";
+        case PC_ERR_FAILED: return "The operation failed.";
+        case PC_ERR_UNSUPPORTED: return "Not supported on this system.";
+        case PC_ERR_INVALID: return "Invalid argument.";
     }
     return "Unknown error";
+}
+
+pc_result pc_process_details_get(pc_monitor *monitor, int32_t pid, const pc_process_details **out) {
+    if (!monitor || !out) return PC_ERR_INVALID;
+    *out = nullptr;
+    const pc_process *process = find_process(monitor, pid);
+    if (!process) return PC_ERR_NOT_FOUND;
+
+    DetailsStorage &storage = monitor->details;
+    platform::process_details(pid, storage.data);
+    if (!storage.data.complete() && monitor->helper.connected()) {
+        platform::Details elevated;
+        if (monitor->helper.details(pid, elevated) && elevated.arguments_known + elevated.threads_known >
+                                                          storage.data.arguments_known + storage.data.threads_known)
+            storage.data = std::move(elevated);
+        if (!monitor->helper.connected()) monitor->helper_state = PC_HELPER_LOST;
+    }
+    const platform::Details &data = storage.data;
+
+    pc_process_details &d = storage.details;
+    d = {};
+    d.pid = process->pid;
+    d.ppid = process->ppid;
+    d.uid = process->uid;
+    d.nice = process->nice;
+    d.state = process->state;
+    d.start_time = process->start_time;
+    std::memcpy(d.name, process->name, sizeof(d.name));
+    std::memcpy(d.user, process->user, sizeof(d.user));
+    std::memcpy(d.path, process->path, sizeof(d.path));
+    copy_string(d.cwd, sizeof(d.cwd), data.cwd);
+
+    storage.arguments.clear();
+    storage.environment.clear();
+    for (const auto &a : data.arguments) storage.arguments.push_back(a.c_str());
+    for (const auto &e : data.environment) storage.environment.push_back(e.c_str());
+    d.arguments_known = data.arguments_known;
+    d.argument_count = static_cast<int32_t>(storage.arguments.size());
+    d.arguments = storage.arguments.data();
+    d.environment_count = static_cast<int32_t>(storage.environment.size());
+    d.environment = storage.environment.data();
+
+    storage.threads.clear();
+    for (const auto &t : data.threads) {
+        pc_thread thread{};
+        thread.id = t.id;
+        copy_string(thread.name, sizeof(thread.name), t.name);
+        thread.cpu_percent = t.cpu_percent;
+        thread.user_time_ns = t.user_time_ns;
+        thread.system_time_ns = t.system_time_ns;
+        thread.priority = t.priority;
+        thread.state = t.state;
+        storage.threads.push_back(thread);
+    }
+    d.threads_known = data.threads_known;
+    d.thread_count = static_cast<int32_t>(storage.threads.size());
+    d.threads = storage.threads.data();
+    *out = &d;
+    return PC_OK;
+}
+
+bool pc_battery_get(pc_battery *out) { return out && platform::battery(*out); }
+
+int32_t pc_monitor_power_assertions(pc_monitor *monitor, const pc_power_assertion **out) {
+    if (!monitor) return 0;
+    monitor->power_assertions.clear();
+    for (const auto &a : platform::power_assertions()) {
+        pc_power_assertion assertion{};
+        assertion.pid = a.pid;
+        assertion.on_behalf_of = a.on_behalf_of;
+        assertion.kind = a.kind;
+        assertion.created = a.created;
+        copy_string(assertion.type, sizeof(assertion.type), a.type);
+        copy_string(assertion.reason, sizeof(assertion.reason), a.reason);
+        if (const pc_process *p = find_process(monitor, a.pid))
+            std::memcpy(assertion.process_name, p->name, sizeof(assertion.process_name));
+        monitor->power_assertions.push_back(assertion);
+    }
+    if (out) *out = monitor->power_assertions.data();
+    return static_cast<int32_t>(monitor->power_assertions.size());
+}
+
+int32_t pc_monitor_services(pc_monitor *monitor, const pc_service **out) {
+    if (!monitor) return 0;
+    monitor->services = (monitor->capabilities & PC_CAP_SERVICES) ? platform::services() : std::vector<pc_service>{};
+    if (out) *out = monitor->services.data();
+    return static_cast<int32_t>(monitor->services.size());
+}
+
+// System-domain changes need root: only through the helper.
+static pc_result control(pc_monitor *monitor, int32_t domain, const char *label, int32_t action) {
+    if (!monitor || !label || !platform::valid_service_label(label)) return PC_ERR_INVALID;
+    if (domain == PC_DOMAIN_USER) return platform::service_control(domain, label, action);
+    if (domain != PC_DOMAIN_SYSTEM) return PC_ERR_INVALID;
+    if (!monitor->helper.connected()) return PC_ERR_PERMISSION;
+    const pc_result result = monitor->helper.launchd(label, action);
+    if (!monitor->helper.connected()) monitor->helper_state = PC_HELPER_LOST;
+    return result;
+}
+
+pc_result pc_service_control(pc_monitor *monitor, int32_t domain, const char *label, int32_t action) {
+    if (!monitor || !(monitor->capabilities & PC_CAP_SERVICES)) return PC_ERR_UNSUPPORTED;
+    if (action < PC_SERVICE_START || action > PC_SERVICE_DISABLE) return PC_ERR_INVALID;
+    return control(monitor, domain, label, action);
+}
+
+int32_t pc_monitor_startup_items(pc_monitor *monitor, const pc_startup_item **out) {
+    if (!monitor) return 0;
+    monitor->startup_items =
+        (monitor->capabilities & PC_CAP_STARTUP) ? platform::startup_items() : std::vector<pc_startup_item>{};
+    if (out) *out = monitor->startup_items.data();
+    return static_cast<int32_t>(monitor->startup_items.size());
+}
+
+int32_t pc_monitor_startup_managed_items(pc_monitor *monitor, const pc_startup_item **out, bool *ready) {
+    if (ready) *ready = false;
+    if (out) *out = nullptr;
+    // Reading the list as a normal user makes the OS ask for an administrator password.
+    if (!monitor || !(monitor->capabilities & PC_CAP_STARTUP) || !monitor->helper.connected()) return -1;
+    bool done = false;
+    if (!monitor->helper.startup_items(monitor->managed_startup_items, done)) {
+        monitor->helper_state = PC_HELPER_LOST;
+        return -1;
+    }
+    if (ready) *ready = done;
+    if (out) *out = monitor->managed_startup_items.data();
+    return static_cast<int32_t>(monitor->managed_startup_items.size());
+}
+
+pc_result pc_startup_set_enabled(pc_monitor *monitor, int32_t scope, const char *label, bool enabled) {
+    if (!monitor || !(monitor->capabilities & PC_CAP_STARTUP)) return PC_ERR_UNSUPPORTED;
+    if (scope == PC_STARTUP_OPEN_AT_LOGIN || scope == PC_STARTUP_APP_BACKGROUND) return PC_ERR_UNSUPPORTED;
+    if (scope < PC_STARTUP_USER_AGENT || scope > PC_STARTUP_DAEMON) return PC_ERR_INVALID;
+    const int32_t domain = scope == PC_STARTUP_DAEMON ? PC_DOMAIN_SYSTEM : PC_DOMAIN_USER;
+    return control(monitor, domain, label, enabled ? PC_SERVICE_ENABLE : PC_SERVICE_DISABLE);
 }

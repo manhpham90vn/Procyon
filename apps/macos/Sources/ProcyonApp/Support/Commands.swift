@@ -8,6 +8,9 @@ struct ProcessActions {
     var endTask: (() -> Void)?
     var forceQuit: (() -> Void)?
     var endTree: (() -> Void)?
+    var suspendOrResume: (() -> Void)?
+    var isSuspended = false
+    var getInfo: (() -> Void)?
 }
 
 extension FocusedValues {
@@ -17,9 +20,19 @@ extension FocusedValues {
 struct AppCommands: Commands {
     let store: SystemStore
     @Binding var page: Page
+    @Binding var showsPalette: Bool
     @FocusedValue(\.processActions) private var processActions
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                page = .settings
+                openWindow(id: "main")
+            }
+            .keyboardShortcut(",")
+        }
+
         CommandGroup(after: .textEditing) {
             Button("Find Process…") {
                 page = .processes
@@ -27,12 +40,18 @@ struct AppCommands: Commands {
                 DispatchQueue.main.async { processActions?.focusSearch() }
             }
             .keyboardShortcut("f")
+            Button("Command Palette…") { showsPalette.toggle() }
+                .keyboardShortcut("k")
         }
 
         CommandGroup(before: .sidebar) {
-            ForEach(Page.allCases) { item in
-                Button(item.title) { page = item }
-                    .keyboardShortcut(item.shortcut)
+            ForEach(Page.allCases.filter { $0 != .settings && $0.isAvailable(store.capabilities) }) { item in
+                if let shortcut = item.shortcut {
+                    Button(item.title) { page = item }
+                        .keyboardShortcut(shortcut)
+                } else {
+                    Button(item.title) { page = item }
+                }
             }
             Divider()
         }
@@ -47,6 +66,12 @@ struct AppCommands: Commands {
             Button("End Process Tree") { processActions?.endTree?() }
                 .keyboardShortcut(.delete, modifiers: [.command, .option, .shift])
                 .disabled(processActions?.endTree == nil)
+            Divider()
+            Button(processActions?.isSuspended == true ? "Resume" : "Suspend") { processActions?.suspendOrResume?() }
+                .disabled(processActions?.suspendOrResume == nil)
+            Button("Get Info") { processActions?.getInfo?() }
+                .keyboardShortcut("i")
+                .disabled(processActions?.getInfo == nil)
             Divider()
             Picker("View As", selection: Binding(get: { store.viewMode }, set: { store.viewMode = $0 })) {
                 ForEach(ViewMode.allCases) { mode in

@@ -12,12 +12,15 @@ add_library(procyon_core STATIC
   src/helper_server.cpp
   src/platform/macos.cpp
   src/platform/macos_netstat.cpp
+  src/platform/macos_gpu.cpp
+  src/platform/macos_power.cpp
+  src/platform/macos_launchd.cpp
 )
 target_include_directories(procyon_core PUBLIC include PRIVATE src)
 target_compile_options(procyon_core PRIVATE -Wall -Wextra)
 
 if(APPLE)
-  target_link_libraries(procyon_core PUBLIC "-framework CoreFoundation" "-framework IOKit" "-framework Security" bsm)
+  target_link_libraries(procyon_core PUBLIC "-framework CoreFoundation" "-framework CoreServices" "-framework IOKit" "-framework Security" bsm)
 endif()
 
 # Prototype/measurement tool: prints live samples and the core's own overhead.
@@ -27,3 +30,10 @@ target_link_libraries(procyon-cli PRIVATE procyon_core)
 # Privileged helper: LaunchDaemon (--daemon) or launched with elevated rights by the UI.
 add_executable(procyon-helper helper/main.c)
 target_link_libraries(procyon-helper PRIVATE procyon_core)
+
+# Wire format, validation and refusal checks (`ctest`, run by `make core`).
+enable_testing()
+add_executable(procyon-core-tests tests/core_tests.cpp)
+target_include_directories(procyon-core-tests PRIVATE src)
+target_link_libraries(procyon-core-tests PRIVATE procyon_core)
+add_test(NAME core COMMAND procyon-core-tests)

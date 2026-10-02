@@ -38,6 +38,14 @@ public struct HistoryBank: Sendable, Hashable {
     public var diskWrite = MetricHistory()
     public var networkReceive = MetricHistory()
     public var networkSend = MetricHistory()
+    /// Busiest GPU, 0...1.
+    public var gpu = MetricHistory()
+    public var gpuMemory = MetricHistory()
+    public var cpuTemperature = MetricHistory()
+    /// Hottest GPU sensor, Celsius; only GPUs with their own sensor (not Apple Silicon).
+    public var gpuTemperature = MetricHistory()
+    /// Internal SSD, Celsius.
+    public var diskTemperature = MetricHistory()
 
     public init() {}
 
@@ -57,5 +65,12 @@ public struct HistoryBank: Sendable, Hashable {
         diskWrite.append(sample.diskWriteRate, at: t)
         networkReceive.append(sample.networkReceiveRate, at: t)
         networkSend.append(sample.networkSendRate, at: t)
+        if !sample.gpus.isEmpty {
+            gpu.append(sample.gpuUsage ?? 0, at: t)
+            gpuMemory.append(Double(sample.gpus.compactMap(\.memoryUsed).reduce(0, +)), at: t)
+        }
+        if let temperature = sample.cpuTemperature { cpuTemperature.append(temperature, at: t) }
+        if let temperature = sample.gpus.compactMap(\.temperature).max() { gpuTemperature.append(temperature, at: t) }
+        if let temperature = sample.diskTemperature { diskTemperature.append(temperature, at: t) }
     }
 }

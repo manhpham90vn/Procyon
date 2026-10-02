@@ -1,7 +1,7 @@
 # Procyon
 
 A lightweight, cross-platform task manager. The product spec is in [`docs/procyon-spec.md`](docs/procyon-spec.md).
-This repo holds the **P0 MVP for macOS**.
+This repo holds the **P0 MVP and the P1 features for macOS**.
 
 ## Layout
 
@@ -12,16 +12,21 @@ core/                       C++20 core with a stable C ABI (shared by every UI)
   src/view.cpp                filter, sort, group-by-app, process tree (portable)
   src/platform/macos.cpp      macOS adapter (libproc, mach, sysctl, IOKit)
   src/platform/macos_netstat.cpp  per-process network via NetworkStatistics (dlopen'd)
+  src/platform/macos_gpu.cpp      GPU usage and per-process GPU time (IOAccelerator)
+  src/platform/macos_power.cpp    battery, sleep assertions, temperature sensors (IOHID, dlsym'd)
+  src/platform/macos_launchd.cpp  services and startup items (launchd jobs via /bin/launchctl)
   src/helper_server.cpp       privileged helper (procyon-helper), src/helper_client.cpp its client
   helper/main.c               procyon-helper entry point
   tools/procyon_cli.cpp       headless prototype and overhead measurement
+  tests/core_tests.cpp        helper wire format, validation and refusal checks (ctest)
 design/
   tokens.json               design tokens: single source of truth for every platform
   components.md             component contract that the Win32 and GTK UIs must follow
 apps/macos/Sources/
   ProcyonKit                Swift bridge to the core + observable store (no UI)
   ProcyonDesign             generated tokens + reusable SwiftUI components
-  ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, System
+  ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Startup,
+                            Services, Battery, System; ⌘K palette; menu bar widget
 scripts/
   gen-tokens.py             tokens.json → Tokens.generated.swift
   build-macos-app.sh        builds dist/Procyon.app
@@ -75,18 +80,31 @@ git tag v0.1.0 && git push origin v0.1.0
 | End task / force quit / end process tree | Done. Confirmation for system processes and destructive actions; kernel, launchd and Procyon itself are protected. |
 | Live charts: CPU total and per core, RAM/swap, disk, network | Done. Keeps the last 60 seconds. |
 | System info: CPU, RAM, disks, OS, uptime | Done. |
-| Light/dark following the system, update speed 0.5–5 s, pause | Done (Settings `⌘,`, View menu, sidebar). |
+| Light/dark following the system, update speed 0.5–5 s, pause | Done (Settings page in the sidebar or `⌘,`, View menu; pause also at the sidebar bottom). |
+
+## P1 status (macOS)
+
+| Spec item | Status |
+| --- | --- |
+| GPU: usage, VRAM, temperature, encode/decode; per-process GPU | Done: device, renderer and tiler usage, memory in use, GPU column and top apps (from each process's accumulated GPU time). Apple Silicon has no separate GPU sensor, so the GPU page shows the chip temperature labelled as shared with the CPU. Encode/decode usage isn't published by macOS and stays hidden. |
+| Priority (nice), CPU affinity, suspend/resume, signals | Done except affinity: macOS has no CPU affinity (`PC_CAP_CPU_AFFINITY` off, nothing shown). Raising priority and acting on other users' processes go through the helper. |
+| Process details: path, command line, environment, running time, threads | Done (**Get Info**, `⌘I`): show in Finder, copy info. Other users' processes are read through the helper. |
+| Startup apps with impact, enable/disable | Done: what System Settings → Login Items lists. Launch agents and daemons outside `/System` (switchable here, enabled state from launchd's overrides), plus, with full access, apps that open at login and apps' background items from the Background Task Management database. The helper reads it (`sfltool dumpbtm` asks a normal user for an administrator password) and caches it, refreshing in the background (about 3 s per read). macOS has no API to switch those for another app, so their switch opens System Settings. Impact comes from the running copy's CPU and memory. |
+| Services: start/stop/restart | Done: every launchd job in the system and user domains, plus enable/disable. System-domain changes need full access; SIP-protected Apple services are reported as such. |
+| Command palette | Done (`⌘K`): screens, commands, and per-app actions (end, force quit, suspend, priority, Get Info, open location). |
+| Tray / menu bar widget, selectable modules | Done: closing the window moves Procyon to the menu bar (out of the Dock); opening the window hides the menu bar item again. Modules: CPU, memory, network, GPU, temperature, battery (Settings → Menu bar). With the window closed, sampling skips per-process data. |
+| Battery: level, health, apps preventing sleep | Done: charge, time remaining, power draw, maximum capacity, cycles, temperature, and sleep assertions attributed to the app they were taken for. |
 
 ### Measured overhead (M3, about 590 processes, 1 s updates, release build)
 
-- Core sampling: about 0.5% of one core (`procyon-cli`).
+- Core sampling: about 0.5% of one core before P1, 0.6% with GPU and temperature sampling (`procyon-cli`).
 - Whole app with the window open: 1.4–2.5% on dashboard screens, about 5–6% on Processes
   (SwiftUI `Table` re-sorting rows each tick). Spec target: under 1–2%.
 
 ### Full access (privileged helper)
 
 The app runs as a normal user. About 160 root-owned processes stay locked (`—` with a lock icon) until the
-user clicks **Unlock Full Access** (Processes banner or Settings). The same `procyon-helper` binary and socket
+user clicks **Unlock Full Access** (the banner on Processes, Startup or Services, or the ⌘K palette). The same `procyon-helper` binary and socket
 protocol serve two modes:
 
 **Developer ID builds (releases): background helper, approved once.**
@@ -97,7 +115,7 @@ protocol serve two modes:
 2. launchd owns `/var/run/dev.procyon.helper.sock` and starts `procyon-helper --daemon` on the first
    connection. The helper exits after a minute without clients.
 3. Each client must be `dev.procyon.app` signed by the helper's own team (checked via its audit token) and run
-   by an administrator. **Remove Helper** in Settings unregisters it.
+   by an administrator. **Remove Administrator Helper** in the ⌘K palette unregisters it.
 
 **Ad-hoc builds (development): password prompt per launch.** The plist is only embedded when
 `SIGN_IDENTITY` is a real identity, because `SMAppService` needs one.
@@ -110,7 +128,8 @@ protocol serve two modes:
 
 In both modes the core (`pc_monitor_attach_helper`) only talks to a root-owned peer, asks it for restricted
 processes on each refresh, and falls back to it when End Task is denied. The helper can only read counters and
-send signals, and refuses pids 0 and 1 and its client.
+process details, list the OS-managed startup items, send signals, change priority and run fixed `launchctl` verbs on
+validated labels in the system domain; it refuses pids 0 and 1 and its client.
 
 Test without the UI: `sudo PROCYON_HELPER=$PWD/build/core/procyon-helper build/core/procyon-cli 2`.
 

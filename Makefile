@@ -13,9 +13,10 @@ test: ## Run unit tests
 app: ## Release dist/Procyon.app
 	scripts/build-macos-app.sh release
 
-core: ## Build the C++ core, CLI and helper with CMake
+core: ## Build the C++ core, CLI and helper with CMake, run the core tests
 	cmake -S core -B build/core -DCMAKE_BUILD_TYPE=Release
 	cmake --build build/core -j
+	ctest --test-dir build/core --output-on-failure
 
 run: app ## Build and open the app
 	open dist/Procyon.app

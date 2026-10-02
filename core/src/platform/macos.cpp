@@ -8,6 +8,7 @@
 #include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/thread_info.h>
 #include <net/if.h>
 #include <net/route.h>
 #include <pwd.h>
@@ -18,6 +19,7 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -75,6 +77,36 @@ std::string model_name() {
     return name;
 }
 
+// Each core's cluster ("P" or "E") from the device tree, by logical CPU id. Hybrid chips don't
+// promise an order (M-series list efficiency cores first), so never infer it from the counts.
+void read_core_kinds(uint8_t *kinds, size_t capacity) {
+    io_registry_entry_t cpus = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/cpus");
+    if (!cpus) return;
+    io_iterator_t children = 0;
+    if (IORegistryEntryGetChildIterator(cpus, kIODeviceTreePlane, &children) == KERN_SUCCESS) {
+        while (io_registry_entry_t cpu = IOIteratorNext(children)) {
+            int64_t id = -1;
+            if (CFTypeRef value =
+                    IORegistryEntryCreateCFProperty(cpu, CFSTR("logical-cpu-id"), kCFAllocatorDefault, 0)) {
+                if (CFGetTypeID(value) == CFNumberGetTypeID())
+                    CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberSInt64Type, &id);
+                CFRelease(value);
+            }
+            if (CFTypeRef value = IORegistryEntryCreateCFProperty(cpu, CFSTR("cluster-type"), kCFAllocatorDefault, 0)) {
+                if (CFGetTypeID(value) == CFDataGetTypeID() && CFDataGetLength(static_cast<CFDataRef>(value)) > 0 &&
+                    id >= 0 && static_cast<size_t>(id) < capacity) {
+                    const char type = static_cast<char>(CFDataGetBytePtr(static_cast<CFDataRef>(value))[0]);
+                    kinds[id] = type == 'P' ? PC_CORE_PERFORMANCE : type == 'E' ? PC_CORE_EFFICIENCY : PC_CORE_UNKNOWN;
+                }
+                CFRelease(value);
+            }
+            IOObjectRelease(cpu);
+        }
+        IOObjectRelease(children);
+    }
+    IOObjectRelease(cpus);
+}
+
 std::string basename_of(const std::string &path) {
     auto slash = path.find_last_of('/');
     return slash == std::string::npos ? path : path.substr(slash + 1);
@@ -85,12 +117,105 @@ bool cf_number_u64(CFDictionaryRef dict, CFStringRef key, uint64_t &out) {
     return number && CFNumberGetValue(number, kCFNumberSInt64Type, &out);
 }
 
+int32_t process_state(int stat) {
+    switch (stat) {
+        case SRUN: return PC_STATE_RUNNING;
+        case SSLEEP: return PC_STATE_SLEEPING;
+        case SSTOP: return PC_STATE_STOPPED;
+        case SZOMB: return PC_STATE_ZOMBIE;
+        default: return PC_STATE_UNKNOWN;
+    }
+}
+
+int32_t thread_state(int run_state) {
+    switch (run_state) {
+        case TH_STATE_RUNNING: return PC_STATE_RUNNING;
+        case TH_STATE_STOPPED: return PC_STATE_STOPPED;
+        case TH_STATE_WAITING:
+        case TH_STATE_UNINTERRUPTIBLE: return PC_STATE_SLEEPING;
+        default: return PC_STATE_UNKNOWN;
+    }
+}
+
+pc_result errno_result() {
+    switch (errno) {
+        case ESRCH: return PC_ERR_NOT_FOUND;
+        case EPERM:
+        case EACCES: return PC_ERR_PERMISSION;
+        case EINVAL: return PC_ERR_INVALID;
+        default: return PC_ERR_FAILED;
+    }
+}
+
+// KERN_PROCARGS2: argc, the exec path, padding NULs, then argv and the environment as C strings.
+bool read_arguments(int32_t pid, Details &out) {
+    static const int max_size = [] {
+        int value = 0;
+        size_t size = sizeof(value);
+        int mib[2] = {CTL_KERN, KERN_ARGMAX};
+        return sysctl(mib, 2, &value, &size, nullptr, 0) == 0 && value > 0 ? value : 1 << 20;
+    }();
+    std::vector<char> buffer(static_cast<size_t>(max_size));
+    size_t size = buffer.size();
+    int mib[3] = {CTL_KERN, KERN_PROCARGS2, pid};
+    if (sysctl(mib, 3, buffer.data(), &size, nullptr, 0) != 0 || size < sizeof(int)) return false;
+
+    int argc = 0;
+    std::memcpy(&argc, buffer.data(), sizeof(argc));
+    const char *cursor = buffer.data() + sizeof(argc);
+    const char *end = buffer.data() + size;
+    cursor += strnlen(cursor, static_cast<size_t>(end - cursor));  // exec path
+    while (cursor < end && *cursor == '\0') ++cursor;
+    auto next = [&]() {
+        const size_t length = strnlen(cursor, static_cast<size_t>(end - cursor));
+        std::string value(cursor, length);
+        cursor += length + 1;
+        return value;
+    };
+    for (int i = 0; i < argc && cursor < end; ++i) out.arguments.push_back(next());
+    while (cursor < end && *cursor != '\0') out.environment.push_back(next());
+    out.arguments_known = true;
+    return true;
+}
+
+bool read_threads(int32_t pid, Details &out) {
+    proc_taskinfo task{};
+    if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task)) != sizeof(task)) return false;
+    std::vector<uint64_t> handles(static_cast<size_t>(std::max(task.pti_threadnum, 0)) + 16);
+    const int bytes =
+        proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, handles.data(), static_cast<int>(handles.size() * sizeof(uint64_t)));
+    if (bytes <= 0) return false;
+    handles.resize(static_cast<size_t>(bytes) / sizeof(uint64_t));
+    for (uint64_t handle : handles) {
+        proc_threadinfo info{};
+        if (proc_pidinfo(pid, PROC_PIDTHREADINFO, handle, &info, sizeof(info)) != sizeof(info)) continue;
+        ThreadInfo thread;
+        thread.id = handle;
+        thread.name = std::string(info.pth_name, strnlen(info.pth_name, sizeof(info.pth_name)));
+        thread.cpu_percent = info.pth_cpu_usage * 100.0 / TH_USAGE_SCALE;
+        thread.user_time_ns = info.pth_user_time;
+        thread.system_time_ns = info.pth_system_time;
+        thread.priority = info.pth_curpri;
+        thread.state = thread_state(info.pth_run_state);
+        out.threads.push_back(std::move(thread));
+    }
+    out.threads_known = true;
+    return true;
+}
+
 }  // namespace
 
 uint32_t capabilities() {
-    uint32_t caps = PC_CAP_PROCESS_DISK_IO | PC_CAP_MEMORY_COMPRESSED | PC_CAP_MEMORY_PRESSURE | PC_CAP_SWAP;
+    // No CPU affinity: macOS only takes affinity hints, and none on Apple Silicon.
+    uint32_t caps = PC_CAP_PROCESS_DISK_IO | PC_CAP_MEMORY_COMPRESSED | PC_CAP_MEMORY_PRESSURE | PC_CAP_SWAP |
+                    PC_CAP_PRIORITY | PC_CAP_SUSPEND | PC_CAP_SIGNALS | PC_CAP_SERVICES | PC_CAP_STARTUP;
     if (sysctl_value<int32_t>("hw.nperflevels") > 1) caps |= PC_CAP_HYBRID_CORES;
     if (process_network_available()) caps |= PC_CAP_PROCESS_NETWORK;
+    if (!gpus().empty()) caps |= PC_CAP_GPU;
+    if (process_gpu_available()) caps |= PC_CAP_PROCESS_GPU;
+    if (cpu_temperature() >= 0) caps |= PC_CAP_TEMPERATURE;
+    pc_battery battery_info;
+    if (battery(battery_info) && battery_info.present) caps |= PC_CAP_BATTERY;
     return caps;
 }
 
@@ -116,6 +241,7 @@ bool system_info(pc_system_info &out) {
     if (sysctl_value<int32_t>("hw.nperflevels") > 1) {
         out.performance_cores = sysctl_value<int32_t>("hw.perflevel0.physicalcpu");
         out.efficiency_cores = sysctl_value<int32_t>("hw.perflevel1.physicalcpu");
+        read_core_kinds(out.core_kinds, sizeof(out.core_kinds));
     }
     out.cpu_frequency_hz = sysctl_value<uint64_t>("hw.cpufrequency");
     out.memory_total = sysctl_value<uint64_t>("hw.memsize");
@@ -147,6 +273,8 @@ bool processes(std::vector<RawProcess> &out) {
         p.ppid = kp.kp_eproc.e_ppid;
         p.uid = kp.kp_eproc.e_ucred.cr_uid;
         p.start_time = kp.kp_proc.p_starttime.tv_sec;
+        p.nice = kp.kp_proc.p_nice;  // NOLINT(bugprone-signed-char-misuse): nice is a signed value
+        p.state = process_state(kp.kp_proc.p_stat);
 
         if (proc_pidpath(p.pid, path, sizeof(path)) > 0) p.path = path;
         p.name = p.path.empty() ? std::string(kp.kp_proc.p_comm) : basename_of(p.path);
@@ -372,13 +500,31 @@ bool is_system_process(const RawProcess &process) {
 
 int32_t self_pid() { return getpid(); }
 
-pc_result signal_process(int32_t pid, bool force) {
-    if (kill(pid, force ? SIGKILL : SIGTERM) == 0) return PC_OK;
-    switch (errno) {
-        case ESRCH: return PC_ERR_NOT_FOUND;
-        case EPERM: return PC_ERR_PERMISSION;
-        default: return PC_ERR_FAILED;
-    }
+pc_result signal_process(int32_t pid, bool force) { return send_signal(pid, force ? SIGKILL : SIGTERM); }
+
+bool valid_signal(int32_t signal) { return signal > 0 && signal < NSIG; }
+
+pc_result send_signal(int32_t pid, int32_t signal) {
+    if (!valid_signal(signal)) return PC_ERR_INVALID;
+    return kill(pid, signal) == 0 ? PC_OK : errno_result();
+}
+
+pc_result set_priority(int32_t pid, int32_t nice) {
+    if (nice < PRIO_MIN || nice > PRIO_MAX) return PC_ERR_INVALID;
+    errno = 0;
+    return setpriority(PRIO_PROCESS, static_cast<id_t>(pid), nice) == 0 ? PC_OK : errno_result();
+}
+
+pc_result set_affinity(int32_t, uint64_t) { return PC_ERR_UNSUPPORTED; }
+
+bool process_details(int32_t pid, Details &out) {
+    out = {};
+    proc_vnodepathinfo vnode{};
+    if (proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnode, sizeof(vnode)) == sizeof(vnode))
+        out.cwd = vnode.pvi_cdir.vip_path;
+    read_arguments(pid, out);
+    read_threads(pid, out);
+    return out.complete();
 }
 
 }  // namespace procyon::platform

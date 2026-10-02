@@ -4,23 +4,39 @@ import Observation
 /// Owns the core monitor; all calls into C happen on this actor, off the main thread.
 actor MonitorWorker {
     private let monitor = Monitor()
-    private let hasProcessNetwork = Monitor.capabilities.contains(.processNetwork)
+    private let capabilities = Monitor.capabilities
+    private var hasProcessNetwork: Bool { capabilities.contains(.processNetwork) }
+    private var samplesProcesses = true
 
     struct Tick: Sendable {
         var sample: SystemSample
-        var rows: [ProcessRow]
-        var topCPU: [ProcessRow]
-        var topMemory: [ProcessRow]
-        var topDisk: [ProcessRow]
-        var topNetwork: [ProcessRow]
+        var rows: [ProcessRow] = []
+        var topCPU: [ProcessRow] = []
+        var topMemory: [ProcessRow] = []
+        var topDisk: [ProcessRow] = []
+        var topNetwork: [ProcessRow] = []
+        var topGPU: [ProcessRow] = []
+        var battery: Battery?
         var helperConnected: Bool
     }
 
-    func tick(query: Monitor.Query) -> Tick {
+    /// `processes` false: only machine-wide metrics (no window open, the menu bar still updates).
+    func tick(query: Monitor.Query, processes: Bool, battery: Bool) -> Tick {
+        if processes != samplesProcesses {
+            samplesProcesses = processes
+            monitor.setProcessSampling(processes)
+        }
         let sample = monitor.refresh()
-        return Tick(
-            sample: sample, rows: monitor.buildView(query), topCPU: top(.cpu), topMemory: top(.memory),
-            topDisk: topDisk(), topNetwork: topNetwork(), helperConnected: monitor.helperConnected)
+        var tick = Tick(sample: sample, helperConnected: monitor.helperConnected)
+        if battery && capabilities.contains(.battery) { tick.battery = Monitor.battery() }
+        guard processes else { return tick }
+        tick.rows = monitor.buildView(query)
+        tick.topCPU = top(.cpu)
+        tick.topMemory = top(.memory)
+        tick.topDisk = topDisk()
+        tick.topNetwork = topNetwork()
+        tick.topGPU = capabilities.contains(.processGPU) ? top(.gpu).filter { ($0.gpu ?? 0) > 0 } : []
+        return tick
     }
 
     /// The helper needs a moment to create its socket after the password prompt closes, and launchd
@@ -41,8 +57,8 @@ actor MonitorWorker {
 
     func volumes() -> [Volume] { monitor.volumes() }
 
-    func end(pids: [Int32], force: Bool) -> EndResult {
-        var outcome = EndResult.ok
+    func end(pids: [Int32], force: Bool) -> ActionResult {
+        var outcome = ActionResult.ok
         for pid in pids {
             let result = monitor.end(pid: pid, force: force)
             if result != .ok, result != .notFound { outcome = result }
@@ -50,7 +66,31 @@ actor MonitorWorker {
         return outcome
     }
 
-    func endTree(pid: Int32) -> EndResult { monitor.endTree(pid: pid) }
+    func endTree(pid: Int32) -> ActionResult { monitor.endTree(pid: pid) }
+
+    /// Applies `action` to every pid and reports the first real failure.
+    func each(_ pids: [Int32], _ action: (Int32) -> ActionResult) -> ActionResult {
+        var outcome = ActionResult.ok
+        for pid in pids {
+            let result = action(pid)
+            if result.isFailure, !outcome.isFailure { outcome = result }
+        }
+        return outcome
+    }
+
+    func signal(pids: [Int32], _ signal: Int32) -> ActionResult { each(pids) { monitor.signal(pid: $0, signal) } }
+    func suspend(pids: [Int32]) -> ActionResult { each(pids) { monitor.suspend(pid: $0) } }
+    func resume(pids: [Int32]) -> ActionResult { each(pids) { monitor.resume(pid: $0) } }
+    func setPriority(pids: [Int32], nice: Int32) -> ActionResult { each(pids) { monitor.setPriority(pid: $0, nice: nice) } }
+    func details(pid: Int32) -> ProcessDetails? { monitor.details(pid: pid) }
+    func summaries(for pids: Set<Int32>) -> [Int32: ProcessSummary] { monitor.summaries(for: pids) }
+    func powerAssertions() -> [PowerAssertion] { monitor.powerAssertions() }
+    func services() -> [Service] { monitor.services() }
+    func control(_ service: Service, _ action: ServiceAction) -> ActionResult { monitor.control(service, action) }
+    func startupItems() -> [StartupItem] { monitor.startupItems() }
+    func pids(forApps paths: Set<String>) -> [String: Int32] { monitor.pids(forApps: paths) }
+    func managedStartupItems() -> (items: [StartupItem], ready: Bool)? { monitor.managedStartupItems() }
+    func setEnabled(_ item: StartupItem, _ enabled: Bool) -> ActionResult { monitor.setEnabled(item, enabled) }
 
     private func top(_ column: ProcessColumn) -> [ProcessRow] {
         monitor.buildView(.init(mode: .grouped, column: column, descending: true, filter: "", limit: SystemStore.topCount))
@@ -95,6 +135,10 @@ public final class SystemStore {
     public private(set) var topDisk: [ProcessRow] = []
     /// Empty without `Capabilities.processNetwork` or while nothing uses the network.
     public private(set) var topNetwork: [ProcessRow] = []
+    /// Apps using the GPU; empty without `Capabilities.processGPU`.
+    public private(set) var topGPU: [ProcessRow] = []
+    /// nil on machines without a battery.
+    public private(set) var battery: Battery?
     public private(set) var volumes: [Volume] = []
     public private(set) var hasSample = false
     /// A row the Processes screen should reveal and select once it shows (set by `showInProcesses`).
@@ -133,6 +177,19 @@ public final class SystemStore {
     }
     public var isPaused = false {
         didSet { if isPaused != oldValue { restart() } }
+    }
+    /// Off while nothing on screen needs per-process data (only the menu bar label is showing):
+    /// sampling then reads machine-wide metrics only, which is several times cheaper.
+    public private(set) var samplesProcesses = true
+    private var processConsumers: Set<String> = []
+
+    /// Registers whether a window or panel that shows processes is open.
+    public func needsProcesses(_ consumer: String, _ active: Bool) {
+        if active { processConsumers.insert(consumer) } else { processConsumers.remove(consumer) }
+        let wanted = !processConsumers.isEmpty
+        guard wanted != samplesProcesses else { return }
+        samplesProcesses = wanted
+        if wanted, !isPaused { Task { await refreshNow() } }
     }
 
     /// Off while another screen switches the view temporarily, so the saved default stays.
@@ -286,14 +343,83 @@ public final class SystemStore {
         Task { volumes = await worker.volumes() }
     }
 
-    public func end(_ row: ProcessRow, force: Bool) async -> EndResult {
+    public func end(_ row: ProcessRow, force: Bool) async -> ActionResult {
         let result = await worker.end(pids: row.kind == .group ? row.memberPIDs : [row.pid], force: force)
         await refreshNow()
         return result
     }
 
-    public func endTree(_ row: ProcessRow) async -> EndResult {
-        let result: EndResult
+    /// Sends `signal` to the process, or to every process of an app group.
+    public func signal(_ row: ProcessRow, _ signal: ProcessSignal) async -> ActionResult {
+        await refreshing { await worker.signal(pids: row.memberPIDs, signal.rawValue) }
+    }
+
+    public func suspend(_ row: ProcessRow) async -> ActionResult {
+        await refreshing { await worker.suspend(pids: row.memberPIDs) }
+    }
+
+    public func resume(_ row: ProcessRow) async -> ActionResult {
+        await refreshing { await worker.resume(pids: row.memberPIDs) }
+    }
+
+    public func setPriority(_ row: ProcessRow, _ priority: ProcessPriority) async -> ActionResult {
+        await refreshing { await worker.setPriority(pids: row.memberPIDs, nice: priority.rawValue) }
+    }
+
+    public func details(pid: Int32) async -> ProcessDetails? { await worker.details(pid: pid) }
+
+    /// Apps (and lone processes) matching `text`, busiest first, from the latest sample.
+    public func searchApps(_ text: String, limit: Int = 8) async -> [ProcessRow] {
+        await worker.rows(query: .init(mode: .grouped, column: .cpu, descending: true, filter: text, limit: limit))
+            .filter { $0.depth == 0 }
+    }
+
+    /// Live processes by pid, from the latest sample.
+    public func summaries(for pids: Set<Int32>) async -> [Int32: ProcessSummary] { await worker.summaries(for: pids) }
+
+    public func powerAssertions() async -> [PowerAssertion] { await worker.powerAssertions() }
+
+    /// Every service; reads the OS on each call, so screens load it on demand.
+    public func services() async -> [Service] { await worker.services() }
+
+    public func control(_ service: Service, _ action: ServiceAction) async -> ActionResult {
+        await worker.control(service, action)
+    }
+
+    public func startupItems() async -> [StartupItem] { await worker.startupItems() }
+
+    /// What System Settings lists under Login Items that launchd plists don't cover (apps opening
+    /// at login, apps' background items). nil without full access: reading it as a normal user makes
+    /// macOS ask for a password, so only the helper reads it. Waits (without blocking sampling) for
+    /// the helper's first read, which takes a few seconds.
+    public func managedStartupItems() async -> [StartupItem]? {
+        var result = await worker.managedStartupItems()
+        for _ in 0..<40 where result?.ready == false {
+            try? await Task.sleep(for: .milliseconds(500))
+            result = await worker.managedStartupItems()
+        }
+        guard let items = result?.items else { return nil }
+        // Apps that open at login have no launchd job: find them among running processes.
+        let apps = Set(items.filter { $0.scope == .openAtLogin && $0.pid == nil }.compactMap(\.appPath))
+        let pids = await worker.pids(forApps: apps)
+        return items.map { item in
+            guard item.pid == nil, item.scope == .openAtLogin, let app = item.appPath, let pid = pids[app] else { return item }
+            return item.running(pid)
+        }
+    }
+
+    public func setEnabled(_ item: StartupItem, _ enabled: Bool) async -> ActionResult {
+        await worker.setEnabled(item, enabled)
+    }
+
+    private func refreshing(_ action: () async -> ActionResult) async -> ActionResult {
+        let result = await action()
+        await refreshNow()
+        return result
+    }
+
+    public func endTree(_ row: ProcessRow) async -> ActionResult {
+        let result: ActionResult
         if row.kind == .group {
             result = await worker.end(pids: row.memberPIDs, force: true)
         } else {
@@ -326,22 +452,27 @@ public final class SystemStore {
 
     private func refreshNow() async {
         let requested = query
-        let tick = await worker.tick(query: requested)
+        let processes = samplesProcesses
+        let tick = await worker.tick(query: requested, processes: processes, battery: ticks % 5 == 0)
         guard !Task.isCancelled || !hasSample else { return }
         sample = tick.sample
         history.record(tick.sample)
-        rows = tick.rows
-        // The filter or sort changed while sampling: rebuild against the new query.
-        if requested != query { rebuild() }
-        topCPU = tick.topCPU
-        topMemory = tick.topMemory
-        topDisk = tick.topDisk
-        topNetwork = tick.topNetwork
+        if let battery = tick.battery { self.battery = battery }
         hasSample = true
+        if processes {
+            rows = tick.rows
+            // The filter or sort changed while sampling: rebuild against the new query.
+            if requested != query { rebuild() }
+            topCPU = tick.topCPU
+            topMemory = tick.topMemory
+            topDisk = tick.topDisk
+            topNetwork = tick.topNetwork
+            topGPU = tick.topGPU
+        }
         if fullAccess.isOn && !tick.helperConnected { await reconnectHelper() }
         // The user may allow the helper in System Settings at any moment.
         if fullAccess == .needsApproval, ticks % 2 == 0, HelperDaemon.state == .enabled { await attachBackgroundHelper() }
-        if ticks % 10 == 0 { volumes = await worker.volumes() }
+        if processes, ticks % 10 == 0 { volumes = await worker.volumes() }
         ticks += 1
     }
 
