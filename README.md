@@ -1,153 +1,203 @@
 # Procyon
 
-A lightweight, cross-platform task manager. The product spec is in [`docs/procyon-spec.md`](docs/procyon-spec.md).
-This repo holds the **P0 MVP, the P1 features and most of P2 for macOS**.
+A lightweight, open-source task manager for macOS. See what is using your CPU, memory, disk, network,
+GPU and battery, find out what a process is, and stop the ones you don't need.
 
-## Layout
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
+  <img src="docs/screenshots/overview-light.png" alt="Procyon's Overview screen">
+</picture>
 
-```
-core/                       C++20 core with a stable C ABI (shared by every UI)
-  include/procyon/procyon.h   the API: snapshot, views (flat/grouped/tree), actions, capabilities
-  src/monitor.cpp             rates and deltas, C ABI
-  src/view.cpp                filter, sort, group-by-app, process tree (portable)
-  src/platform/macos.cpp      macOS adapter (libproc, mach, sysctl, IOKit)
-  src/platform/macos_netstat.cpp  per-process network via NetworkStatistics (dlopen'd)
-  src/platform/macos_gpu.cpp      GPU usage and per-process GPU time (IOAccelerator)
-  src/platform/macos_power.cpp    battery, sleep assertions, temperature sensors (IOHID, dlsym'd)
-  src/platform/macos_launchd.cpp  services and startup items (launchd jobs via /bin/launchctl)
-  src/platform/macos_handles.cpp  open files and TCP/UDP sockets per process (libproc, like lsof)
-  src/helper_server.cpp       privileged helper (procyon-helper), src/helper_client.cpp its client
-  helper/main.c               procyon-helper entry point
-  tools/procyon_cli.cpp       headless prototype and overhead measurement
-  tests/core_tests.cpp        helper wire format, validation and refusal checks (ctest)
-design/
-  tokens.json               design tokens: single source of truth for every platform
-  components.md             component contract that the Win32 and GTK UIs must follow
-apps/macos/Sources/
-  ProcyonKit                Swift bridge to the core + observable store (no UI)
-  ProcyonDesign             generated tokens + reusable SwiftUI components
-  ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Energy,
-                            Startup, Services, History, Files & Ports, Battery, System; ⌘K palette;
-                            menu bar widget
-data/
-  process-catalog.json      plain-language explanations of common processes
-scripts/
-  gen-tokens.py             tokens.json → Tokens.generated.swift
-  build-macos-app.sh        builds dist/Procyon.app
-  make-icon.swift           renders the app icon
-```
+- **Processes**: every running process with CPU, memory, disk, network, GPU and power, as a flat list,
+  grouped by app or as a tree. Search, sort, end, force quit, suspend, change priority.
+- **Live charts**: CPU (total and per core), memory and swap, disk, network, GPU, temperatures.
+- **Startup and Services**: login items, launch agents and daemons. Turn them on or off, start, stop and restart them.
+- **Energy and Battery**: power use per app, battery health and cycles, and which apps keep your Mac awake.
+- **History**: the last 24 hours of every metric. Click a spike to see which apps caused it.
+- **Files & Ports**: listening ports, network connections, open files, and **Who Is Using…** for a file or disk.
+- **Plain-language explanations** for about 110 common macOS processes: what each one is, and whether it is safe to end.
+- **Menu bar widget**, **alerts** with your own thresholds, a **⌘K command palette**, and light and dark mode.
 
-## Build and run (macOS 14+, Xcode 27)
+Procyon is light on resources: sampling uses about 0.5% of one core.
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+
+**Processes**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/processes-dark.png">
+  <img src="docs/screenshots/processes-light.png" alt="Processes screen">
+</picture>
+
+</td>
+<td width="50%">
+
+**CPU**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/cpu-dark.png">
+  <img src="docs/screenshots/cpu-light.png" alt="CPU screen">
+</picture>
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Energy**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/energy-dark.png">
+  <img src="docs/screenshots/energy-light.png" alt="Energy screen">
+</picture>
+
+</td>
+<td width="50%">
+
+**History**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/history-dark.png">
+  <img src="docs/screenshots/history-light.png" alt="History screen">
+</picture>
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Files & Ports**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/inspect-dark.png">
+  <img src="docs/screenshots/inspect-light.png" alt="Files & Ports screen">
+</picture>
+
+</td>
+<td width="50%">
+
+**Startup**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/startup-dark.png">
+  <img src="docs/screenshots/startup-light.png" alt="Startup screen">
+</picture>
+
+</td>
+</tr>
+</table>
+
+## Requirements
+
+- macOS 14 Sonoma or later
+- Apple Silicon or Intel (the release is a universal app)
+
+## Install
+
+1. Download the latest `Procyon-x.y.z.dmg` from the [Releases page](https://github.com/manhpham90vn/Procyon/releases/latest).
+2. Open the DMG and drag **Procyon** into **Applications**.
+3. Open Procyon from Applications or Spotlight.
+
+Releases are signed with a Developer ID and notarized by Apple, so they open without Gatekeeper warnings.
+To check your download, compare it with the `.sha256` file from the same release:
 
 ```sh
-make run          # build dist/Procyon.app and open it
-make test         # unit tests
-make core         # C++ core, procyon-cli and procyon-helper via CMake
-make help         # everything else
+shasum -a 256 Procyon-x.y.z.dmg
 ```
 
-Open a specific screen at launch: `dist/Procyon.app/Contents/MacOS/Procyon -initialPage processes`.
+## Using Procyon
 
-## Development
+### Getting around
 
-| Command | What it does |
+Pick a screen in the sidebar, or use the keyboard:
+
+| Shortcut | Action |
 | --- | --- |
-| `make format` | `swift format` + `clang-format` in place (configs: `.swift-format`, `.clang-format`, `.editorconfig`) |
-| `make lint` | Read-only: stale tokens, swift-format, clang-format, clang-tidy (`.clang-tidy`), shellcheck. `SKIP_TIDY=1` skips clang-tidy. |
-| `make tokens` | Regenerate `Tokens.generated.swift` after editing `design/tokens.json` |
-| `make ci` | lint + test + core + app, same as CI |
+| `⌘1` … `⌘9` | Overview, Processes, CPU, Memory, GPU, Disk, Network, Startup, Services |
+| `⌘K` | Command palette: jump to a screen, run a command, act on an app |
+| `⌘F` | Find a process |
+| `⌘I` | Get Info on the selected process |
+| `⌘⌫` | End Task |
+| `⌥⌘⌫` | Force Quit |
+| `⇧⌥⌘⌫` | End Process Tree |
+| `⇧⌘P` | Pause or resume updates |
+| `⌘,` | Settings |
 
-Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellcheck` for the rest
-(the scripts also find Homebrew's keg-only LLVM).
+### Ending a process
 
-### CI/CD (GitHub Actions)
+Select a process in **Processes** and press `⌘⌫` (or use the **Process** menu or the ⌘K palette). Procyon asks for confirmation before
+ending system processes and shows what the process does, if it knows. The kernel, `launchd` and Procyon
+itself are protected and can't be ended.
 
-- **`ci.yml`** runs on every push to `main` and every PR: lint, then unit tests, a CMake core build with a
-  `procyon-cli` smoke run, and the .app uploaded as an artifact.
-- **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
-  SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
-  `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID
-  and notarizes; without them the build is ad-hoc signed.
+### Full access
+
+Procyon runs as your normal user. Processes owned by root show `—` with a lock icon until you click
+**Unlock Full Access** (the banner on Processes, Startup or Services, or in the ⌘K palette). macOS then asks
+you to allow Procyon's helper in **System Settings → General → Login Items**. You only do this once, and you
+need an administrator account.
+
+Full access lets Procyon show every process, act on other users' processes, raise priority, and manage
+system services. To remove the helper, run **Remove Administrator Helper** from the ⌘K palette.
+
+### Menu bar
+
+Closing the window keeps Procyon running in the menu bar instead of the Dock. Choose what the menu bar
+shows (CPU, memory, network, GPU, temperature, battery) in **Settings → Menu bar**. Click the menu bar item and
+choose **Open Procyon** to bring the window back, or **Quit** to exit.
+
+### Alerts
+
+**Settings → Alerts** sends a notification when CPU, memory, memory pressure, CPU temperature, or a single
+app's CPU or memory stays over a threshold for a time you choose.
+
+### History
+
+**History** keeps one sample a minute for 24 hours, so you can see what was slowing your Mac down earlier.
+Pick a metric and a range (1, 6 or 24 hours), then click the chart or a peak to see the busiest apps at that
+moment. You can turn recording off or clear it in Settings. It uses a few MB in
+`~/Library/Application Support/Procyon`.
+
+## Uninstall
+
+1. If you unlocked full access, run **Remove Administrator Helper** from the ⌘K palette.
+2. Quit Procyon and move it from Applications to the Trash.
+3. Optionally, delete its history: `~/Library/Application Support/Procyon`.
+
+## Known limitations
+
+- macOS only for now. The core is cross-platform C++, and Windows and Linux front ends are planned.
+- The interface is English only.
+- Not available on macOS: CPU affinity, GPU encode/decode usage, fan speeds, and closing another process's
+  network connection.
+
+## Building from source
+
+You need Xcode 27 on macOS 14 or later.
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git clone https://github.com/manhpham90vn/Procyon.git
+cd Procyon
+make run      # build dist/Procyon.app and open it
+make test     # run the unit tests
+make help     # all targets
 ```
 
-## P0 status (macOS)
+Builds from source are ad-hoc signed. Full access then works through a password prompt each launch
+instead of the one-time approval.
 
-| Spec item | Status |
-| --- | --- |
-| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done. Per-process network comes from the private NetworkStatistics framework (what `nettop` uses), loaded at runtime; if it is missing, `PC_CAP_PROCESS_NETWORK` is off and the columns are hidden. |
-| Optional columns with saved configuration | Done (table column customization, saved per window). |
-| Flat / by app / tree views | Done in the core (`pc_monitor_build_view`). |
-| Search, filter, sort by every column | Done. `⌘F` focuses search; sorting runs in the core. |
-| End task / force quit / end process tree | Done. Confirmation for system processes and destructive actions; kernel, launchd and Procyon itself are protected. |
-| Live charts: CPU total and per core, RAM/swap, disk, network | Done. Keeps the last 60 seconds. |
-| System info: CPU, RAM, disks, OS, uptime | Done. |
-| Light/dark following the system, update speed 0.5–5 s, pause | Done (Settings page in the sidebar or `⌘,`, View menu; pause also at the sidebar bottom). |
+## Contributing
 
-## P1 status (macOS)
+Bug reports, ideas and pull requests are welcome on
+[GitHub Issues](https://github.com/manhpham90vn/Procyon/issues). Before opening a pull request, run
+`make format` and `make ci`, which runs the same checks as CI.
 
-| Spec item | Status |
-| --- | --- |
-| GPU: usage, VRAM, temperature, encode/decode; per-process GPU | Done: device, renderer and tiler usage, memory in use, GPU column and top apps (from each process's accumulated GPU time). Apple Silicon has no separate GPU sensor, so the GPU page shows the chip temperature labelled as shared with the CPU. Encode/decode usage isn't published by macOS and stays hidden. |
-| Priority (nice), CPU affinity, suspend/resume, signals | Done except affinity: macOS has no CPU affinity (`PC_CAP_CPU_AFFINITY` off, nothing shown). Raising priority and acting on other users' processes go through the helper. |
-| Process details: path, command line, environment, running time, threads | Done (**Get Info**, `⌘I`): show in Finder, copy info. Other users' processes are read through the helper. |
-| Startup apps with impact, enable/disable | Done: what System Settings → Login Items lists. Launch agents and daemons outside `/System` (switchable here, enabled state from launchd's overrides), plus, with full access, apps that open at login and apps' background items from the Background Task Management database. The helper reads it (`sfltool dumpbtm` asks a normal user for an administrator password) and caches it, refreshing in the background (about 3 s per read). macOS has no API to switch those for another app, so their switch opens System Settings. Impact comes from the running copy's CPU and memory. |
-| Services: start/stop/restart | Done: every launchd job in the system and user domains, plus enable/disable. System-domain changes need full access; SIP-protected Apple services are reported as such. |
-| Command palette | Done (`⌘K`): screens, commands, and per-app actions (end, force quit, suspend, priority, Get Info, open location). |
-| Tray / menu bar widget, selectable modules | Done: closing the window moves Procyon to the menu bar (out of the Dock); opening the window hides the menu bar item again. Modules: CPU, memory, network, GPU, temperature, battery (Settings → Menu bar). With the window closed, sampling skips per-process data. |
-| Battery: level, health, apps preventing sleep | Done: charge, time remaining, power draw, maximum capacity, cycles, temperature, and sleep assertions attributed to the app they were taken for. |
+The repo layout, CI and release process, how the privileged helper works, and feature status against the
+[product spec](docs/procyon-spec.md) are in [docs/development.md](docs/development.md).
 
-## P2 status (macOS)
+## License
 
-| Spec item | Status |
-| --- | --- |
-| History: every resource per app, look back at peaks | Done for 24 hours (the free tier in the spec): one row a minute for the machine (CPU average and peak, memory, disk, network, GPU, temperature, app power) and one per busy app (the union of each tick's top-10 lists), in SQLite under `~/Library/Application Support/Procyon`, older minutes deleted as new ones arrive (a few MB). **History** charts any metric over 1, 6 or 24 hours; clicking the chart or a peak lists the busiest apps of that minute. Per-app rows are only written while processes are sampled (window open, or an app alert on). Recording can be switched off or cleared. |
-| Energy tab like Activity Monitor | Done: the **Power** column in Processes and the **Energy** screen (apps now, energy per app since launch, total app power chart) from `ri_energy_nj` (`proc_pid_rusage` v6, no root): measured on Apple Silicon, modelled on Intel. Activity Monitor's 8-hour average comes from History once there is per-app energy for that long. |
-| Deep analysis: files held, ports, connections | Done: **Files & Ports** lists listening ports (and whether they're reachable from the network), connections and open files, with **Who Is Using…** for a file, folder or disk; Get Info has Files and Network tabs. Other users' processes go through the helper. Closing another process's connection isn't possible on macOS (no public API), so it isn't offered. |
-| Sensors: temperatures, fans | CPU, SSD and battery temperatures since P1. Fan speeds: not yet (SMC). |
-| Alerts with custom thresholds | Done (Settings → Alerts): machine CPU, memory, memory pressure, CPU temperature, one app's CPU or memory, each over a threshold for a chosen time, as notifications; 15 minutes of quiet per alert. Per-app alerts keep process sampling on in the menu bar. |
-| Explanations: "what is this process, can I end it" | Done for about 110 common macOS process names (63 explanations) (`data/process-catalog.json` → `scripts/gen-catalog.py` → Swift; `make lint` checks it is up to date). Shown in Get Info and in the End Task / Force Quit confirmation. |
-| Plugins | Not started. |
-
-### Measured overhead (M3, about 590 processes, 1 s updates, release build)
-
-- Core sampling: about 0.5% of one core before P1, 0.6% with GPU and temperature sampling (`procyon-cli`).
-- Whole app with the window open: 1.4–2.5% on dashboard screens, about 5–6% on Processes
-  (SwiftUI `Table` re-sorting rows each tick). Spec target: under 1–2%.
-
-### Full access (privileged helper)
-
-The app runs as a normal user. About 160 root-owned processes stay locked (`—` with a lock icon) until the
-user clicks **Unlock Full Access** (the banner on Processes, Startup or Services, or the ⌘K palette). The same `procyon-helper` binary and socket
-protocol serve two modes:
-
-**Developer ID builds (releases): background helper, approved once.**
-
-1. `HelperDaemon` registers `Contents/Library/LaunchDaemons/dev.procyon.helper.plist` with
-   `SMAppService.daemon`. macOS asks the user to allow it in System Settings → General → Login Items; the app
-   connects as soon as they do, and on every later launch without asking.
-2. launchd owns `/var/run/dev.procyon.helper.sock` and starts `procyon-helper --daemon` on the first
-   connection. The helper exits after a minute without clients.
-3. Each client must be `dev.procyon.app` signed by the helper's own team (checked via its audit token) and run
-   by an administrator. **Remove Administrator Helper** in the ⌘K palette unregisters it.
-
-**Ad-hoc builds (development): password prompt per launch.** The plist is only embedded when
-`SIGN_IDENTITY` is a real identity, because `SMAppService` needs one.
-
-1. `HelperLauncher` shows the macOS password prompt (`osascript … with administrator privileges`) and starts
-   `Contents/Helpers/procyon-helper` as root.
-2. The helper creates a 0600 Unix socket owned by the user and accepts only the launching app
-   (checks peer uid and `LOCAL_PEERPID`).
-3. The helper exits when the app quits, disconnects, or nobody connects within 30 seconds.
-
-In both modes the core (`pc_monitor_attach_helper`) only talks to a root-owned peer, asks it for restricted
-processes on each refresh, and falls back to it when End Task is denied. The helper can only read counters and
-process details, list the OS-managed startup items, send signals, change priority and run fixed `launchctl` verbs on
-validated labels in the system domain; it refuses pids 0 and 1 and its client.
-
-Test without the UI: `sudo PROCYON_HELPER=$PWD/build/core/procyon-helper build/core/procyon-cli 2`.
-
-### Known limits
-- English only: the UI and every text in it, by design.
+Procyon is released under the [MIT License](LICENSE).
