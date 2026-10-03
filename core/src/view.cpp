@@ -25,11 +25,8 @@ struct Node {
 size_t decode_utf8(std::string_view text, size_t at, char32_t &out) {
     const auto byte = [&](size_t i) { return static_cast<unsigned char>(text[i]); };
     const unsigned char lead = byte(at);
-    size_t length = 0;
-    if (lead < 0x80) {
-        out = lead;
-        return 1;
-    } else if ((lead & 0xE0) == 0xC0) {
+    size_t length = 1;  // ASCII, or a stray byte passed through as-is
+    if ((lead & 0xE0) == 0xC0) {
         length = 2;
         out = lead & 0x1F;
     } else if ((lead & 0xF0) == 0xE0) {
@@ -38,11 +35,8 @@ size_t decode_utf8(std::string_view text, size_t at, char32_t &out) {
     } else if ((lead & 0xF8) == 0xF0) {
         length = 4;
         out = lead & 0x07;
-    } else {
-        out = lead;
-        return 1;
     }
-    if (at + length > text.size()) {
+    if (length == 1 || at + length > text.size()) {
         out = lead;
         return 1;
     }

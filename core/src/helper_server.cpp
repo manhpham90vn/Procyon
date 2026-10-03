@@ -475,16 +475,15 @@ int pc_helper_main(int argc, char **argv) {
     bool valid = true;
     // Every flag takes exactly one value; anything left over or unknown is a usage error.
     for (int i = 1; i < argc && valid; i += 2) {
-        if (i + 1 >= argc) {
-            valid = false;
-        } else if (!std::strcmp(argv[i], "--socket")) {
+        const bool has_value = i + 1 < argc;
+        if (has_value && !std::strcmp(argv[i], "--socket")) {
             socket_path = argv[i + 1];
-        } else if (!std::strcmp(argv[i], "--parent")) {
+        } else if (has_value && !std::strcmp(argv[i], "--parent")) {
             valid = parse_number(argv[i + 1], parent_arg);
-        } else if (!std::strcmp(argv[i], "--uid")) {
+        } else if (has_value && !std::strcmp(argv[i], "--uid")) {
             valid = parse_number(argv[i + 1], uid_arg);
         } else {
-            valid = false;
+            valid = false;  // unknown flag, or a flag without its value
         }
     }
     // uid 0 is refused: the helper serves an app run by a user, never root itself.
