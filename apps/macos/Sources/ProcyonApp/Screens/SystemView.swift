@@ -89,7 +89,7 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var store = store
         VStack(alignment: .leading, spacing: Tokens.Space.lg) {
-            PageHeader("Settings", subtitle: "Updates, menu bar, alerts, appearance, processes and full access")
+            PageHeader("Settings", subtitle: "Updates, full access, menu bar, alerts, appearance, processes and about")
                 .padding(.horizontal, Tokens.Space.xxl)
             form
         }
@@ -139,11 +139,42 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            AboutSection()
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .frame(maxWidth: 720, alignment: .leading)
         .padding(.horizontal, Tokens.Space.lg)
+    }
+}
+
+/// Which build this is and where Procyon lives on GitHub.
+private struct AboutSection: View {
+    var body: some View {
+        Section("About") {
+            LabeledContent("Version") {
+                VStack(alignment: .trailing, spacing: Tokens.Space.xs) {
+                    Text(AppInfo.versionDescription).foregroundStyle(.secondary)
+                    if let commit = AppInfo.commit {
+                        Text(commit).font(Tokens.Typography.mono).foregroundStyle(.tertiary)
+                    }
+                }
+                .textSelection(.enabled)
+            }
+            LabeledContent("Source code") {
+                Link("github.com/manhpham90vn/Procyon", destination: AppInfo.repository)
+            }
+            LabeledContent("Releases") {
+                Link("Latest release", destination: AppInfo.latestRelease)
+                    .help("Release notes and downloads on GitHub")
+            }
+            LabeledContent("Feedback") {
+                Link("Report an issue", destination: AppInfo.issues)
+            }
+            Text("Procyon is open source under the MIT license.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

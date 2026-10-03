@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds dist/Procyon.app. Usage: scripts/build-macos-app.sh [debug|release]
-#   VERSION=1.2.3       marketing version (default 0.1.0)
+#   VERSION=1.2.3       marketing version (default: the VERSION file)
 #   BUILD_NUMBER=42     bundle build number (default 1)
+#   COMMIT=abc123       git commit shown in Settings → About (default: HEAD)
 #   SIGN_IDENTITY="Developer ID Application: …"  real signing with hardened runtime;
 #                       default "-" signs ad hoc (runs locally, can't be notarized)
 #   UNIVERSAL=1         build arm64 + x86_64
@@ -10,8 +11,9 @@ cd "$(dirname "$0")/.."
 
 CONFIG="${1:-release}"
 APP="dist/Procyon.app"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-$(tr -d '[:space:]' < VERSION)}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
+COMMIT="${COMMIT:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 ARCH_FLAGS=()
 [ "${UNIVERSAL:-0}" = 1 ] && ARCH_FLAGS=(--arch arm64 --arch x86_64)
@@ -41,6 +43,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
+  <key>ProcyonCommit</key><string>${COMMIT}</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>

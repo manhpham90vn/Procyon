@@ -71,8 +71,14 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
   [manhpham90vn/homebrew-tap](https://github.com/manhpham90vn/homebrew-tap)), stable releases also update the `procyon`
   cask there through `scripts/publish-homebrew.sh`, rendered from `packaging/homebrew/procyon.rb`.
 
+The `VERSION` file is the single source of the version: `scripts/build-macos-app.sh` writes it (with the build
+number and git commit) into Info.plist, and the app shows it in Settings → About. The release job refuses a tag
+that doesn't match it.
+
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+echo 0.1.0 > VERSION
+git commit -am "release: 0.1.0"
+git tag v0.1.0 && git push origin main v0.1.0
 ```
 
 ## P0 status (macOS)
