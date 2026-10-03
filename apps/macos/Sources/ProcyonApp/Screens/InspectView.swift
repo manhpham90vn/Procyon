@@ -20,6 +20,13 @@ struct InspectView: View {
     @State private var target: URL?
     @State private var selection: String?
     @FocusState private var searchFocused: Bool
+    /// The current tab's rows, filtered and sorted once per change of data, search or sort order
+    /// (not on every body pass, which reads them several times).
+    @State private var ports: [SocketRow] = []
+    @State private var activeConnections: [SocketRow] = []
+    @State private var visibleFiles: [FileRow] = []
+    /// Bumped by every load, so the rows are rebuilt from the new data.
+    @State private var dataVersion = 0
 
     enum Tab: String, CaseIterable, Identifiable {
         case ports = "Listening Ports", connections = "Connections", files = "Open Files"
@@ -42,9 +49,9 @@ struct InspectView: View {
                     .frame(maxWidth: 340)
                 switch tab {
                 case .ports, .connections:
-                    Toggle("Hide this Mac only", isOn: $hideLoopback)
+                    Toggle("Hide local-only", isOn: $hideLoopback)
                         .toggleStyle(.checkbox)
-                        .help("Hide sockets that only talk to this Mac (127.0.0.1, ::1)")
+                        .help("Hide ports that only accept connections from this Mac (127.0.0.1, ::1)")
                 case .files:
                     Button("Who Is Using…", systemImage: "doc.viewfinder") { pickTarget() }
                         .help("Pick a file, folder or disk to see which processes keep it open")
@@ -92,6 +99,7 @@ struct InspectView: View {
             }
         }
         .onChange(of: store.fullAccess) { Task { await load(tab, force: true) } }
+        .onChange(of: rowInputs, initial: true) { rebuildRows() }
     }
 
     // MARK: - Data
@@ -145,9 +153,6 @@ struct InspectView: View {
     @State private var connectionOrder = [KeyPathComparator(\SocketRow.process, comparator: .localizedStandard)]
     @State private var fileOrder = [KeyPathComparator(\FileRow.path, comparator: .localizedStandard)]
 
-    private var ports: [SocketRow] { socketRows(\.isListening).sorted(using: portOrder) }
-    private var activeConnections: [SocketRow] { socketRows { !$0.isListening }.sorted(using: connectionOrder) }
-
     struct FileRow: Identifiable, Hashable {
         let file: OpenFile
         let process: String
@@ -156,12 +161,37 @@ struct InspectView: View {
         var kind: String { file.kind.title }
     }
 
-    private var visibleFiles: [FileRow] {
-        files.items
-            .filter { file in target.map { file.isWithin($0.path) } ?? true }
-            .filter { matches($0.pid, $0.path) }
-            .map { FileRow(file: $0, process: name($0.pid)) }
-            .sorted(using: fileOrder)
+    /// Everything the rows are derived from.
+    private struct RowInputs: Equatable {
+        var tab: Tab
+        var dataVersion: Int
+        var search: String
+        var hideLoopback: Bool
+        var target: URL?
+        var portOrder: [KeyPathComparator<SocketRow>]
+        var connectionOrder: [KeyPathComparator<SocketRow>]
+        var fileOrder: [KeyPathComparator<FileRow>]
+    }
+
+    private var rowInputs: RowInputs {
+        RowInputs(
+            tab: tab, dataVersion: dataVersion, search: search, hideLoopback: hideLoopback, target: target,
+            portOrder: portOrder, connectionOrder: connectionOrder, fileOrder: fileOrder)
+    }
+
+    /// Filters and sorts the shown tab's rows.
+    private func rebuildRows() {
+        switch tab {
+        case .ports: ports = socketRows(\.isListening).sorted(using: portOrder)
+        case .connections: activeConnections = socketRows { !$0.isListening }.sorted(using: connectionOrder)
+        case .files:
+            visibleFiles =
+                files.items
+                .filter { file in target.map { file.isWithin($0.path) } ?? true }
+                .filter { matches($0.pid, $0.path) }
+                .map { FileRow(file: $0, process: name($0.pid)) }
+                .sorted(using: fileOrder)
+        }
     }
 
     private func load(_ tab: Tab, force: Bool) async {
@@ -170,19 +200,20 @@ struct InspectView: View {
             guard force || !connectionsLoaded else { return }
             connections = await store.connections()
             connectionsLoaded = true
-            await name(Set(connections.items.map(\.pid)))
         case .files:
             guard force || !filesLoaded else { return }
             files = await store.openFiles()
             filesLoaded = true
-            await name(Set(files.items.map(\.pid)))
         }
+        await refreshNames()
+        dataVersion += 1
     }
 
-    private func name(_ pids: Set<Int32>) async {
-        let missing = pids.subtracting(processes.keys)
-        guard !missing.isEmpty else { return }
-        processes.merge(await store.summaries(for: missing)) { $1 }
+    /// Names for every pid shown, read again from the latest sample on each load: a pid can belong to
+    /// another process by the next refresh.
+    private func refreshNames() async {
+        let pids = Set(connections.items.map(\.pid)).union(files.items.map(\.pid))
+        processes = pids.isEmpty ? [:] : await store.summaries(for: pids)
     }
 
     private func pickTarget() {

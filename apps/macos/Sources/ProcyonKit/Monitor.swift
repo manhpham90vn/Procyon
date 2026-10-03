@@ -69,8 +69,15 @@ final class Monitor {
         sample.networkReceiveTotal = snap.net_rx_total
         sample.networkSendTotal = snap.net_tx_total
         if Monitor.capabilities.contains(.processEnergy), snap.process_count > 0 {
-            sample.appPower = UnsafeBufferPointer(start: snap.processes, count: Int(snap.process_count))
-                .reduce(0) { $0 + max($1.power_watts, 0) }
+            // Unknown (-1) processes don't count; nil when no process reports power (a first sample).
+            var total = 0.0
+            var known = false
+            for process in UnsafeBufferPointer(start: snap.processes, count: Int(snap.process_count))
+            where process.power_watts >= 0 {
+                total += process.power_watts
+                known = true
+            }
+            sample.appPower = known ? total : nil
         }
         sample.processCount = Int(snap.process_count)
         sample.threadCount = Int(snap.thread_count)
@@ -151,6 +158,9 @@ final class Monitor {
         var descending: Bool
         var filter: String
         var limit: Int = 0
+        /// Skip rows below the top level (a grouped view's member processes): the core still builds
+        /// them, but converting them is most of the Swift-side cost.
+        var topLevelOnly = false
     }
 
     func buildView(_ query: Query) -> [ProcessRow] {
@@ -167,11 +177,15 @@ final class Monitor {
         guard let rowsPointer, count > 0 else { return [] }
         let rawRows = UnsafeBufferPointer(start: rowsPointer, count: Int(count))
 
-        // Group members (all of them, not just the ones matching the filter) for group actions.
+        // Group members (all of them, not just the ones matching the filter) for group actions, and
+        // where each group's main process is, both built once for every group row.
         var members: [String: [Int32]] = [:]
+        var indexOfPID: [Int32: Int] = [:]
         if query.mode == .grouped {
-            for process in processes {
+            indexOfPID.reserveCapacity(processes.count)
+            for (index, process) in processes.enumerated() {
                 members[Monitor.string(process.app_id), default: []].append(process.pid)
+                indexOfPID[process.pid] = index
             }
         }
 
@@ -181,29 +195,22 @@ final class Monitor {
         rows.reserveCapacity(rawRows.count)
 
         for raw in rawRows {
+            // Row indices stay aligned with `ids` even when a row is skipped.
+            if query.topLevelOnly, raw.depth > 0 {
+                ids.append("")
+                continue
+            }
             let parentID = raw.parent_row >= 0 ? ids[Int(raw.parent_row)] : nil
             let row: ProcessRow
             if raw.process_index >= 0 {
-                let process = processes[Int(raw.process_index)]
-                let id = "p:\(process.pid):\(process.start_time)"
-                row = ProcessRow(
-                    id: id, kind: .process, pid: process.pid, parentID: parentID, depth: Int(raw.depth),
-                    childCount: Int(raw.child_count), processCount: 1,
-                    name: Monitor.string(process.name), user: Monitor.string(process.user),
-                    path: Monitor.string(process.path), appID: Monitor.string(process.app_id),
-                    appName: Monitor.string(process.app_name), flags: ProcessFlags(rawValue: process.flags),
-                    cpu: Monitor.known(raw.cpu_percent), memory: raw.memory_bytes >= 0 ? raw.memory_bytes : nil,
-                    diskRead: Monitor.known(raw.disk_read_bps), diskWrite: Monitor.known(raw.disk_write_bps),
-                    networkReceive: Monitor.known(raw.net_rx_bps), networkSend: Monitor.known(raw.net_tx_bps),
-                    threads: raw.threads >= 0 ? Int(raw.threads) : nil,
-                    startTime: process.start_time > 0 ? Date(timeIntervalSince1970: TimeInterval(process.start_time)) : nil,
-                    memberPIDs: [process.pid], gpu: Monitor.known(raw.gpu_percent), nice: process.nice,
-                    state: ProcessState(rawValue: process.state) ?? .unknown, power: Monitor.known(raw.power_watts)
-                )
+                // A process row carries the process's own values.
+                row = Monitor.row(
+                    for: processes[Int(raw.process_index)], parentID: parentID, depth: Int(raw.depth),
+                    childCount: Int(raw.child_count))
             } else {
                 let groupID = raw.group_id.map { String(cString: $0) } ?? ""
                 let name = raw.group_name.map { String(cString: $0) } ?? ""
-                let main = processes.first { $0.pid == raw.group_pid }
+                let main = indexOfPID[raw.group_pid].map { processes[$0] }
                 var flags = ProcessFlags()
                 if groupID.hasSuffix(".app") { flags.insert(.appBundle) }
                 if let main, ProcessFlags(rawValue: main.flags).contains(.system) { flags.insert(.system) }
@@ -230,12 +237,70 @@ final class Monitor {
         return rows
     }
 
+    /// The process `pid` as a top-level row of the flat list, straight from the last snapshot (no view
+    /// is built or sorted).
+    func processRow(pid: Int32) -> ProcessRow? {
+        guard let snap = pc_monitor_snapshot(handle)?.pointee, snap.process_count > 0 else { return nil }
+        let processes = UnsafeBufferPointer(start: snap.processes, count: Int(snap.process_count))
+        guard let process = processes.first(where: { $0.pid == pid }) else { return nil }
+        return Monitor.row(for: process, parentID: nil, depth: 0, childCount: 0)
+    }
+
+    private static func row(for process: pc_process, parentID: String?, depth: Int, childCount: Int) -> ProcessRow {
+        ProcessRow(
+            id: "p:\(process.pid):\(process.start_time)", kind: .process, pid: process.pid, parentID: parentID,
+            depth: depth, childCount: childCount, processCount: 1,
+            name: string(process.name), user: string(process.user), path: string(process.path),
+            appID: string(process.app_id), appName: string(process.app_name), flags: ProcessFlags(rawValue: process.flags),
+            cpu: known(process.cpu_percent), memory: process.memory_bytes >= 0 ? process.memory_bytes : nil,
+            diskRead: known(process.disk_read_bps), diskWrite: known(process.disk_write_bps),
+            networkReceive: known(process.net_rx_bps), networkSend: known(process.net_tx_bps),
+            threads: process.threads >= 0 ? Int(process.threads) : nil,
+            startTime: process.start_time > 0 ? Date(timeIntervalSince1970: TimeInterval(process.start_time)) : nil,
+            memberPIDs: [process.pid], gpu: known(process.gpu_percent), nice: process.nice,
+            state: ProcessState(rawValue: process.state) ?? .unknown, power: known(process.power_watts)
+        )
+    }
+
     func end(pid: Int32, force: Bool) -> ActionResult {
         Monitor.result(pc_process_end(handle, pid, force))
     }
 
     func endTree(pid: Int32) -> ActionResult {
         Monitor.result(pc_process_end_tree(handle, pid))
+    }
+
+    /// Force-kills every process in `pids` and all their descendants (an app group's members and the
+    /// children they spawned, whatever app those belong to). Reports the first real failure.
+    func endTree(pids: [Int32]) -> ActionResult {
+        var parentOf: [Int32: Int32] = [:]
+        if let snap = pc_monitor_snapshot(handle)?.pointee, snap.process_count > 0 {
+            for process in UnsafeBufferPointer(start: snap.processes, count: Int(snap.process_count)) {
+                parentOf[process.pid] = process.ppid
+            }
+        }
+        var outcome = ActionResult.ok
+        for root in Monitor.treeRoots(pids, parentOf: parentOf) {
+            let result = endTree(pid: root)
+            if result.isFailure, !outcome.isFailure { outcome = result }
+        }
+        return outcome
+    }
+
+    /// The members of `pids` that no other member is an ancestor of: ending their trees ends every
+    /// member and every descendant exactly once. Keeps the order of `pids`.
+    static func treeRoots(_ pids: [Int32], parentOf: [Int32: Int32]) -> [Int32] {
+        let set = Set(pids)
+        return pids.filter { pid in
+            var current = pid
+            var hops = 0
+            while let parent = parentOf[current], parent != current, hops < 1024 {
+                if set.contains(parent) { return false }
+                current = parent
+                hops += 1
+            }
+            return true
+        }
     }
 
     func signal(pid: Int32, _ signal: Int32) -> ActionResult {

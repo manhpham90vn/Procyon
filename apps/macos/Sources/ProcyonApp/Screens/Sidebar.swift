@@ -82,7 +82,7 @@ struct Sidebar: View {
                     MetricRow(
                         metric: .network,
                         value:
-                            "↓ \(Format.bytes(store.sample.networkReceiveRate)) ↑ \(Format.bytes(store.sample.networkSendRate))",
+                            "↓ \(Format.rate(store.sample.networkReceiveRate)) ↑ \(Format.rate(store.sample.networkSendRate))",
                         series: [
                             ChartSeries(
                                 id: "rx", samples: store.history.networkReceive.samples, color: Metric.network.style.start),

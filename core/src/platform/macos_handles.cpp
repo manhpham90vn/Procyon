@@ -7,6 +7,7 @@
 #include <sys/proc_info.h>
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -20,30 +21,40 @@ namespace {
 std::vector<int32_t> target_pids(int32_t pid) {
     if (pid >= 0) return {pid};
     std::vector<int32_t> pids(4096);
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0;; ++attempt) {
         const int count = proc_listallpids(pids.data(), static_cast<int>(pids.size() * sizeof(int32_t)));
         if (count < 0) return {};
-        if (static_cast<size_t>(count) < pids.size()) {
+        // A full buffer may have cut the list short; retry larger a few times, then take what fits.
+        if (static_cast<size_t>(count) < pids.size() || attempt == 2) {
             pids.resize(static_cast<size_t>(count));
             return pids;
         }
         pids.resize(pids.size() * 2);
     }
-    return pids;
 }
 
-// Descriptors of one process; false when the process is unreadable (another user's) or gone.
-bool descriptors(int32_t pid, std::vector<proc_fdinfo> &out) {
+enum class Descriptors {
+    Listed,  // `out` holds them
+    None,    // the process is gone, a zombie, or has nothing open: nothing to list
+    Denied,  // another user's process, hidden from us: the listing is incomplete
+};
+
+Descriptors descriptors(int32_t pid, std::vector<proc_fdinfo> &out) {
     out.clear();
+    errno = 0;
     const int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nullptr, 0);
-    if (size <= 0) return false;
+    if (size <= 0) return handles_denied(size, errno) ? Descriptors::Denied : Descriptors::None;
     // Headroom: descriptors open between the two calls.
     out.resize(static_cast<size_t>(size) / sizeof(proc_fdinfo) + 32);
+    errno = 0;
     const int filled =
         proc_pidinfo(pid, PROC_PIDLISTFDS, 0, out.data(), static_cast<int>(out.size() * sizeof(proc_fdinfo)));
-    if (filled <= 0) return false;
+    if (filled <= 0) {
+        out.clear();
+        return handles_denied(filled, errno) ? Descriptors::Denied : Descriptors::None;
+    }
     out.resize(static_cast<size_t>(filled) / sizeof(proc_fdinfo));
-    return true;
+    return Descriptors::Listed;
 }
 
 int32_t file_kind(uint32_t mode) {
@@ -85,6 +96,13 @@ void format_address(bool ipv4, const in_addr &v4, const in6_addr &v6, bool local
 
 }  // namespace
 
+bool handles_denied(int bytes, int error) {
+    if (bytes > 0) return false;
+    // libproc reports a missing or exiting process as ESRCH and an empty table as 0 bytes with no
+    // error; only a refusal hides descriptors that exist.
+    return error == EPERM || error == EACCES;
+}
+
 bool open_files(int32_t pid, std::vector<OpenFile> &out) {
     out.clear();
     bool complete = true;
@@ -95,10 +113,7 @@ bool open_files(int32_t pid, std::vector<OpenFile> &out) {
         if (proc_pidinfo(target, PROC_PIDVNODEPATHINFO, 0, &cwd, sizeof(cwd)) == sizeof(cwd) &&
             cwd.pvi_cdir.vip_path[0] != '\0')
             out.push_back({target, -1, PC_FILE_CWD, cwd.pvi_cdir.vip_path});
-        if (!descriptors(target, fds)) {
-            complete = false;
-            continue;
-        }
+        if (descriptors(target, fds) == Descriptors::Denied) complete = false;
         for (const auto &fd : fds) {
             if (fd.proc_fdtype != PROX_FDTYPE_VNODE) continue;
             vnode_fdinfowithpath info{};
@@ -119,10 +134,7 @@ bool connections(int32_t pid, std::vector<pc_connection> &out) {
     std::set<std::tuple<int32_t, int32_t, std::string, int32_t, std::string, int32_t, int32_t>> seen;
     for (int32_t target : target_pids(pid)) {
         if (target == 0) continue;
-        if (!descriptors(target, fds)) {
-            complete = false;
-            continue;
-        }
+        if (descriptors(target, fds) == Descriptors::Denied) complete = false;
         for (const auto &fd : fds) {
             if (fd.proc_fdtype != PROX_FDTYPE_SOCKET) continue;
             socket_fdinfo info{};

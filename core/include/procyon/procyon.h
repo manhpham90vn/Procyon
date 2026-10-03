@@ -264,9 +264,12 @@ typedef struct {
     int32_t process_index; /* index into snapshot->processes, -1 for a group row */
     int32_t parent_row;    /* -1 for top level */
     int32_t depth;
-    int32_t child_count;   /* direct children rows */
-    int32_t process_count; /* processes represented (1 for a process row, n for a group) */
-    /* group rows: sums of members; process rows: the process's own values */
+    int32_t child_count; /* direct children rows */
+    /* processes represented: 1 for a process row, every member of the app for a group row, also
+       with a filter (which only narrows the member rows listed under the group) */
+    int32_t process_count;
+    /* group rows: sums over every member of the app, filtered or not (the app's real totals); -1
+       when no member reports the metric. Process rows: the process's own values. */
     double cpu_percent;
     int64_t memory_bytes;
     double disk_read_bps;

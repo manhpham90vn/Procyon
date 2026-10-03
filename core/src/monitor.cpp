@@ -106,6 +106,13 @@ const pc_process *find_process(const pc_monitor *monitor, int32_t pid) {
     return nullptr;
 }
 
+// Probing the capabilities walks IOKit, HID sensors and the battery: once per process is enough,
+// they do not change while it runs.
+uint32_t cached_capabilities() {
+    static const uint32_t caps = platform::capabilities();
+    return caps;
+}
+
 }  // namespace
 
 bool pc_monitor_attach_helper(pc_monitor *monitor, const char *socket_path) {
@@ -125,13 +132,13 @@ int32_t pc_monitor_helper_state(const pc_monitor *monitor) {
     return monitor ? monitor->helper_state : PC_HELPER_DETACHED;
 }
 
-uint32_t pc_capabilities(void) { return platform::capabilities(); }
+uint32_t pc_capabilities(void) { return cached_capabilities(); }
 
 bool pc_system_info_get(pc_system_info *out) { return out && platform::system_info(*out); }
 
 pc_monitor *pc_monitor_create(void) {
     auto *monitor = new pc_monitor();
-    monitor->capabilities = platform::capabilities();
+    monitor->capabilities = cached_capabilities();
     pc_monitor_refresh(monitor);  // prime counters so the first real refresh has rates
     return monitor;
 }
@@ -161,12 +168,8 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         monitor->core_usage.assign(ticks.size(), 0);
         uint64_t busy_total = 0, user_total = 0, system_total = 0, all_total = 0;
         for (size_t i = 0; i < ticks.size(); ++i) {
-            platform::CpuTicks d = ticks[i];
-            if (i < monitor->previous_ticks.size()) {
-                const auto &p = monitor->previous_ticks[i];
-                d = {ticks[i].user - p.user, ticks[i].system - p.system, ticks[i].idle - p.idle,
-                     ticks[i].nice - p.nice};
-            }
+            const TickDelta d = i < monitor->previous_ticks.size() ? tick_delta(ticks[i], monitor->previous_ticks[i])
+                                                                   : tick_delta(ticks[i], platform::CpuTicks{});
             const uint64_t busy = d.user + d.system + d.nice;
             const uint64_t all = busy + d.idle;
             monitor->core_usage[i] = all ? static_cast<double>(busy) / all : 0;
@@ -263,30 +266,24 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
         const ProcessCounters *previous =
             found != monitor->previous_processes.end() && elapsed > 0 ? &found->second : nullptr;
 
-        if (counters.has_cpu) {
-            p.cpu_percent =
-                previous && previous->has_cpu ? rate(r.cpu_time_ns, previous->cpu_time_ns, elapsed) / 1e7 : 0;
+        // A rate needs the same counter at both ends. Until a process has been seen twice (or the
+        // helper has read it twice) its rates are unknown, -1, never a made-up zero.
+        if (previous && previous->has_cpu && counters.has_cpu)
+            p.cpu_percent = rate(r.cpu_time_ns, previous->cpu_time_ns, elapsed) / 1e7;
+        if (previous && previous->has_disk_io && counters.has_disk_io) {
+            p.disk_read_bps = rate(r.disk_read, previous->disk_read, elapsed);
+            p.disk_write_bps = rate(r.disk_write, previous->disk_write, elapsed);
         }
-        if (counters.has_disk_io) {
-            const bool both = previous && previous->has_disk_io;
-            p.disk_read_bps = both ? rate(r.disk_read, previous->disk_read, elapsed) : 0;
-            p.disk_write_bps = both ? rate(r.disk_write, previous->disk_write, elapsed) : 0;
+        if (previous && previous->has_net_io && counters.has_net_io) {
+            p.net_rx_bps = rate(r.net_rx, previous->net_rx, elapsed);
+            p.net_tx_bps = rate(r.net_tx, previous->net_tx, elapsed);
         }
-        if (counters.has_net_io) {
-            const bool both = previous && previous->has_net_io;
-            p.net_rx_bps = both ? rate(r.net_rx, previous->net_rx, elapsed) : 0;
-            p.net_tx_bps = both ? rate(r.net_tx, previous->net_tx, elapsed) : 0;
-        }
-        if (counters.has_gpu) {
-            // Nanoseconds of GPU time per second of wall time, as a percentage of one GPU.
-            p.gpu_percent =
-                previous && previous->has_gpu ? rate(r.gpu_time_ns, previous->gpu_time_ns, elapsed) / 1e7 : 0;
-        }
-        if (counters.has_energy && (monitor->capabilities & PC_CAP_PROCESS_ENERGY)) {
-            // Nanojoules per second = nanowatts.
-            p.power_watts =
-                previous && previous->has_energy ? rate(r.energy_nj, previous->energy_nj, elapsed) / 1e9 : 0;
-        }
+        // Nanoseconds of GPU time per second of wall time, as a percentage of one GPU.
+        if (previous && previous->has_gpu && counters.has_gpu)
+            p.gpu_percent = rate(r.gpu_time_ns, previous->gpu_time_ns, elapsed) / 1e7;
+        // Nanojoules per second = nanowatts.
+        if (previous && previous->has_energy && counters.has_energy && (monitor->capabilities & PC_CAP_PROCESS_ENERGY))
+            p.power_watts = rate(r.energy_nj, previous->energy_nj, elapsed) / 1e9;
         current.emplace(key, counters);
 
         if (r.restricted) {
@@ -337,12 +334,14 @@ pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid) {
     if (!monitor) return PC_ERR_FAILED;
     if (pid <= 1 || pid == platform::self_pid()) return PC_ERR_PROTECTED;
 
+    // The snapshot's process list is stale by up to a refresh and empty when process sampling is
+    // off (menu bar only): read the parent links fresh, so a child spawned since is ended too.
+    std::vector<platform::ProcessParent> links;
+    if (!platform::process_parents(links)) return PC_ERR_FAILED;
     std::unordered_map<int32_t, std::vector<int32_t>> children;
-    std::unordered_set<int32_t> protected_pids;
-    for (const auto &p : monitor->processes) {
-        children[p.ppid].push_back(p.pid);
-        if (p.flags & PC_PROC_PROTECTED) protected_pids.insert(p.pid);
-    }
+    for (const auto &link : links)
+        if (link.ppid != link.pid) children[link.ppid].push_back(link.pid);
+    const int32_t self = platform::self_pid();
     // Post-order: kill leaves first so parents cannot respawn them.
     std::vector<int32_t> order;
     std::vector<std::pair<int32_t, bool>> stack{{pid, false}};
@@ -361,7 +360,8 @@ pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid) {
 
     pc_result result = PC_OK;
     for (int32_t target : order) {
-        if (protected_pids.count(target)) continue;
+        // Kernel, launchd and Procyon itself stay, whatever the tree says.
+        if (target <= 1 || target == self) continue;
         pc_result r = signal_with_fallback(monitor, target, true);
         if (target == pid)
             result = r;

@@ -11,7 +11,11 @@ namespace procyon {
 // Connection from the monitor to a running procyon-helper.
 class HelperClient {
 public:
+    HelperClient() = default;
     ~HelperClient() { disconnect(); }
+    // Owns the socket descriptor: a copy would close it twice.
+    HelperClient(const HelperClient &) = delete;
+    HelperClient &operator=(const HelperClient &) = delete;
 
     bool connect(const std::string &socket_path);
     void disconnect();

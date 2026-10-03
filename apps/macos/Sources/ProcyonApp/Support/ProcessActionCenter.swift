@@ -55,14 +55,23 @@ final class ProcessActionCenter {
         case .end: return row.isSystem || row.kind == .group
         case .forceQuit, .endTree: return true
         case .suspend: return true
-        case .resume, .priority: return false
+        case .resume: return false
+        case .priority: return row.isSystem
         case .signal(let signal): return signal.isDisruptive || row.isSystem
         }
     }
 
     func perform(_ action: Pending) {
         Task {
-            let row = action.row
+            // The dialog may have stayed open for a while: act on the process as it is now, never on
+            // a pid that has since been reused, and on an app's current members.
+            guard let row = await liveRow(for: action.row) else {
+                failure = Failure(
+                    title: "Couldn't \(action.verb) “\(action.row.name)”",
+                    message: action.row.kind == .group
+                        ? "None of its processes are running anymore." : "The process is no longer running.")
+                return
+            }
             let result: ActionResult
             switch action.kind {
             case .end: result = await store.end(row, force: false)
@@ -82,6 +91,20 @@ final class ProcessActionCenter {
         }
     }
 
+    /// `row` as the latest sample has it, found by id (a process id carries pid and start time, so a
+    /// reused pid doesn't match); nil once it has exited.
+    private func liveRow(for row: ProcessRow) async -> ProcessRow? {
+        if let live = store.rows.first(where: { $0.id == row.id }) { return live }
+        // Not in the current view (another mode or a search): ask the snapshot directly.
+        switch row.kind {
+        case .process:
+            guard let live = await store.processRow(pid: row.pid), live.id == row.id else { return nil }
+            return live
+        case .group:
+            return await store.searchApps(row.name, limit: 50).first { $0.id == row.id }
+        }
+    }
+
     // MARK: - Menus
 
     /// The context menu of a process row.
@@ -93,9 +116,8 @@ final class ProcessActionCenter {
             },
             ActionMenuItem("Force Quit", isEnabled: enabled) { self.request(.forceQuit, row) },
         ]
-        if row.kind == .process && row.hasChildren {
-            items.append(ActionMenuItem("End Process Tree", isEnabled: enabled) { self.request(.endTree, row) })
-        }
+        // Offered whatever the view shows: the children exist even where the list doesn't display them.
+        items.append(ActionMenuItem("End Process Tree", isEnabled: enabled) { self.request(.endTree, row) })
         items.append(.separator())
         if capabilities.contains(.suspend) {
             items.append(
@@ -167,7 +189,10 @@ extension ProcessActionCenter.Pending {
         switch kind {
         case .end: row.kind == .group ? "End all \(row.processCount) “\(row.name)” processes?" : "End “\(row.name)”?"
         case .forceQuit: "Force quit “\(row.name)”?"
-        case .endTree: "End “\(row.name)” and all its child processes?"
+        case .endTree:
+            row.kind == .group
+                ? "End all \(row.processCount) “\(row.name)” processes immediately?"
+                : "End “\(row.name)” and all its child processes?"
         case .suspend: "Suspend “\(row.name)”?"
         case .resume: "Resume “\(row.name)”?"
         case .signal(let signal): "Send \(signal.name) to “\(row.name)”?"
@@ -192,7 +217,10 @@ extension ProcessActionCenter.Pending {
             switch kind {
             case .end: "The process will be asked to quit."
             case .forceQuit: "The process stops immediately. Unsaved changes will be lost."
-            case .endTree: "Every descendant process stops immediately. Unsaved changes will be lost."
+            case .endTree:
+                row.kind == .group
+                    ? "Every process of the app stops immediately. Unsaved changes will be lost."
+                    : "The process and every descendant stop immediately. Unsaved changes will be lost."
             case .suspend: "It stops running until you resume it. A suspended app looks frozen."
             case .resume: "It continues where it stopped."
             case .signal(let signal): "\(signal.meaning)."

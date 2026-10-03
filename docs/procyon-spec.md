@@ -17,6 +17,9 @@ A GUI task manager for Windows, macOS and Linux, as deep as the Windows Task Man
 | Gamers, graphics professionals | Temperatures, GPU, monitoring while gaming/rendering | Medium |
 | IT / managing a few machines | See several machines at once, alerts | After v1 |
 
+Status (Oct 3, 2026): the macOS app implements P0, P1 and most of P2 (`docs/development.md` tracks each item);
+Windows and Linux are not started.
+
 **Design principles:**
 
 1. Lightness is feature number one: a resource monitor must not eat resources itself.
@@ -108,7 +111,7 @@ The basics work on all three OSes; per-process GPU and per-process network are t
 | --- | --- | --- | --- |
 | Processes, CPU, RAM | NtQuerySystemInformation, PDH | /proc | libproc, host\_statistics |
 | Per-process disk I/O | Yes | /proc/\[pid\]/io (needs permission for other processes) | Yes (rusage) |
-| Per-process network | GetExtendedTcpTable + ETW | /proc/net + eBPF (needs permission) | Limited, mostly via nettop/NetworkStatistics |
+| Per-process network | GetExtendedTcpTable + ETW | /proc/net + eBPF (needs permission) | NetworkStatistics (the private framework `nettop` uses, loaded at runtime; hidden when it is missing) |
 | Total GPU | DXGI, PDH | NVML, sysfs (AMD/Intel) | IOKit |
 | Per-process GPU | PDH GPU Engine counters | NVML, fdinfo (DRM) | Very limited |
 | Temperatures, fans | WMI, often needs a vendor driver | hwmon/lm-sensors | SMC, IOHID (Apple Silicon) |
@@ -119,6 +122,12 @@ The basics work on all three OSes; per-process GPU and per-process network are t
 | Processes holding a file | Restart Manager API, handle enumeration | /proc/\[pid\]/fd | lsof/libproc |
 
 The "Estimated" and "Very limited" entries need a prototype to confirm them before promising them to users.
+
+**Private API risk (macOS):** per-process network (`NetworkStatistics`), per-process GPU time (IOAccelerator
+registry) and the Background Task Management list (`sfltool dumpbtm`) are not public API and can change with any
+macOS release. Each is loaded or probed at runtime and reported through a capability flag; when one is missing the
+app hides the feature rather than showing wrong numbers (principle 2). They must stay behind capability checks and
+be re-verified on every macOS beta.
 
 ## Architecture
 
@@ -139,22 +148,18 @@ A shared C++ core talks to the OS; each platform has its own native interface fo
 2. The core collects and computes metrics once per cycle; the UI only renders what is visible.
 3. Every feature is built 3 times at the UI layer, so the UI stays thin and everything shared goes down into the core.
 
-## Business model
+## Licensing and distribution
 
-Freemium: the free version is enough to replace the built-in Task Manager; some advanced features are paid (Pro).
-
-| Plan | Includes | Rationale |
-| --- | --- | --- |
-| Free | All of P0 and P1 | Enough for daily use; it is what brings users in and builds trust |
-| Pro (proposed) | Long-term history (over 24 hours), deep analysis (held files, ports, closing connections), custom alerts, energy tab | What differentiates us from competitors, mostly useful to power users |
-| Always free | Ending processes, viewing resources, process explanations | Core features are never put behind a paywall |
+Procyon is free and open source under the MIT license (decided Oct 3, 2026; this replaces the earlier freemium/Pro
+proposal). Every feature in P0, P1 and P2 ships in the same build; there is no paid tier, no license check and no
+call home.
 
 **Principles:**
 
-1. Licenses are checked offline (signed keys), with no call home on each launch, in line with running locally.
-2. The free version has no ads and no constant upgrade nagging; Pro features only show a small label.
-3. Pro features ship in the same installer and are unlocked with a license; no separate installer.
-4. Not sold through the Mac App Store or Microsoft Store; sold directly through a payment provider (e.g. Paddle, Lemon Squeezy) and distributed through the channels in "Distribution".
+1. No ads, no upgrade nagging, no telemetry. Everything runs locally.
+2. Distributed outside the app stores: GitHub releases and Homebrew on macOS (see "Distribution"); the Mac App Store
+   is not a target because the privileged helper and the private frameworks the app relies on are not allowed there.
+3. Contributions are welcome; `docs/development.md` describes the layout, build and the feature status against this spec.
 
 ## Roadmap and open questions
 
@@ -169,14 +174,18 @@ Start with a prototype that validates the adapters, because per-process GPU and 
 
 No dates set yet; each phase only starts once it passes the gate before it.
 
+**Decided:**
+
+- macOS goes first: the macOS app has reached P2 (status in `docs/development.md`); Windows and Linux start from the
+  shared core once it is stable.
+- Minimum macOS version: 14 (Sonoma), for the SwiftUI `Table` and Swift Charts APIs the app uses.
+- Open source under MIT; no Pro tier (see "Licensing and distribution").
+
 **Open questions:**
 
-- [ ] Which two OSes go first for the MVP?
+- [ ] Which of Windows and Linux comes second?
 - [ ] GTK: use the C API (GTK4) directly, or gtkmm?
-- [ ] Minimum OS version (SwiftUI and Swift Charts need macOS 13 or later)?
-- [ ] Pro pricing: one-time purchase (with 1 year of updates) or subscription?
-- [ ] Payment provider: Paddle or Lemon Squeezy (both handle VAT/sales tax)?
-- [ ] Finalize the Pro feature list after beta feedback
+- [ ] Fan speeds on macOS need the SMC; worth the private-API risk?
 
 ## Sources
 

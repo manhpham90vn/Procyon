@@ -83,7 +83,7 @@ public struct Sparkline: View {
     }
 
     /// Rounds up to 1, 2, 2.5 or 5 × 10ⁿ so axes don't jitter with every sample.
-    public static func niceCeiling(_ value: Double) -> Double {
+    nonisolated public static func niceCeiling(_ value: Double) -> Double {
         guard value > 0, value.isFinite else { return 1 }
         let exponent = pow(10, floor(log10(value)))
         for step in [1, 2, 2.5, 5, 10] where value <= step * exponent { return step * exponent }

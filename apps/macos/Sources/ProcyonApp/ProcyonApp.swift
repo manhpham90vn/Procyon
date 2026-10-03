@@ -7,6 +7,7 @@ struct ProcyonApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var store: SystemStore
     @State private var actions: ProcessActionCenter
+    @State private var processesUI = ProcessesUIState()
     // `-initialPage processes` on the command line opens a specific screen (handy for profiling).
     @State private var page: Page = UserDefaults.standard.string(forKey: "initialPage").flatMap(Page.init(rawValue:)) ?? .overview
     @State private var showsPalette = false
@@ -22,6 +23,7 @@ struct ProcyonApp: App {
         store.onAlert = { AlertNotifier.shared.post($0) }
         _store = State(initialValue: store)
         _actions = State(initialValue: ProcessActionCenter(store: store))
+        AppDelegate.store = store
     }
 
     var body: some Scene {
@@ -29,6 +31,7 @@ struct ProcyonApp: App {
             RootView(page: $page, showsPalette: $showsPalette)
                 .environment(store)
                 .environment(actions)
+                .environment(processesUI)
                 .frame(minWidth: 940, minHeight: 600)
                 .onAppear {
                     store.start()
@@ -46,7 +49,7 @@ struct ProcyonApp: App {
         }
         .defaultSize(width: 1220, height: 800)
         .windowStyle(.hiddenTitleBar)
-        .commands { AppCommands(store: store, page: $page, showsPalette: $showsPalette) }
+        .commands { AppCommands(store: store, ui: processesUI, page: $page, showsPalette: $showsPalette) }
         // Settings is a page of the main window (sidebar, ⌘,), not a separate window.
 
         MenuBarExtra(
@@ -66,6 +69,9 @@ struct ProcyonApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The app's store, so quitting can flush what it hasn't written yet.
+    @MainActor static weak var store: SystemStore?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Launched as a bare executable (swift run): make it a regular foreground app.
         NSApp.setActivationPolicy(.regular)
@@ -100,6 +106,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard MenuBarSettings.isEnabled, !windowOpen, !quitEvent, !Self.quitRequested else { return .terminateNow }
         sender.setActivationPolicy(.accessory)
         return .terminateCancel
+    }
+
+    /// Saves the history minute in progress, which would otherwise be lost with the process. A write
+    /// takes milliseconds; the wait is bounded so a quit never hangs.
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.store?.shutdown(waitingUpTo: 2)
     }
 }
 

@@ -20,6 +20,11 @@ struct StartupView: View {
     @State private var selection: StartupItem.ID?
     @State private var sortOrder = [KeyPathComparator(\Entry.name, comparator: .localizedStandard)]
     @State private var failure: String?
+    /// An item waiting for the user to confirm turning it off.
+    @State private var pending: StartupItem?
+    /// Where a switch has been flipped but the item not yet changed (confirming, or the change in
+    /// flight), so the switch shows the new position and snaps back on cancel or failure.
+    @State private var switching: [StartupItem.ID: Bool] = [:]
 
     /// A table row: the item with its current impact.
     struct Entry: Identifiable {
@@ -100,6 +105,19 @@ struct StartupView: View {
                 try? await Task.sleep(for: .seconds(30))
             }
         }
+        .confirmationDialog(
+            pending.map { "Turn off “\($0.name)”?" } ?? "",
+            isPresented: Binding(get: { pending != nil }, set: { if !$0 { cancelPending() } }), presenting: pending
+        ) { item in
+            Button("Turn Off", role: .destructive) {
+                // Before the dialog's dismissal runs `cancelPending`: the switch keeps its new position.
+                pending = nil
+                Task { await setEnabled(item, false) }
+            }
+            Button("Cancel", role: .cancel) { cancelPending() }
+        } message: { item in
+            Text(confirmationMessage(item))
+        }
         .alert(
             "Couldn't change the startup item", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
         ) {
@@ -150,7 +168,12 @@ struct StartupView: View {
             TableColumn("Enabled", value: \.enabledRank) { entry in
                 Toggle(
                     "Enabled",
-                    isOn: Binding(get: { entry.item.isEnabled }, set: { _ in Task { await toggle(entry.item) } })
+                    isOn: Binding(
+                        get: { switching[entry.id] ?? entry.item.isEnabled },
+                        set: { enabled in
+                            switching[entry.id] = enabled
+                            toggle(entry.item)
+                        })
                 )
                 .toggleStyle(.switch)
                 .controlSize(.small)
@@ -170,7 +193,7 @@ struct StartupView: View {
                 if item.isManagedByOS {
                     Button("Manage in Login Items Settings…") { Self.openLoginItemsSettings() }
                 } else {
-                    Button(item.isEnabled ? "Disable" : "Enable") { Task { await toggle(item) } }
+                    Button(item.isEnabled ? "Disable" : "Enable") { toggle(item) }
                         .disabled(needsFullAccess(item))
                 }
                 Divider()
@@ -215,15 +238,46 @@ struct StartupView: View {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!)
     }
 
-    private func toggle(_ item: StartupItem) async {
+    /// Turning an item on happens at once; turning one off asks first, as Services does.
+    private func toggle(_ item: StartupItem) {
         if item.isManagedByOS {
+            switching[item.id] = nil
             Self.openLoginItemsSettings()
             return
         }
-        guard !needsFullAccess(item) else { return }
-        let result = await store.setEnabled(item, !item.isEnabled)
+        guard !needsFullAccess(item) else {
+            switching[item.id] = nil
+            return
+        }
+        if item.isEnabled {
+            pending = item
+        } else {
+            Task { await setEnabled(item, true) }
+        }
+    }
+
+    private func cancelPending() {
+        if let item = pending { switching[item.id] = nil }
+        pending = nil
+    }
+
+    private func confirmationMessage(_ item: StartupItem) -> String {
+        var text = "It won't start again at \(item.scope == .daemon ? "startup" : "login") until you turn it back on."
+        if item.pid != nil { text += " The running copy keeps running." }
+        if Self.isPartOfMacOS(item) { text += "\n\nThis item is part of macOS. Turning it off can break system features." }
+        return text
+    }
+
+    /// Apple's own launchd jobs, by label and by where the definition lives.
+    private static func isPartOfMacOS(_ item: StartupItem) -> Bool {
+        item.label.hasPrefix("com.apple.") || item.configPath.hasPrefix("/System/")
+    }
+
+    private func setEnabled(_ item: StartupItem, _ enabled: Bool) async {
+        let result = await store.setEnabled(item, enabled)
         if result.isFailure { failure = result.message }
         await load()
+        switching[item.id] = nil
     }
 
     private func reveal(_ path: String) {

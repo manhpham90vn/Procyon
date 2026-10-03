@@ -1,17 +1,22 @@
 // Core checks that need no UI and change nothing on the machine: the helper wire format, input
-// validation, and the refusals that keep protected processes and system services safe.
+// validation, the view builder, the launchctl parsers, and the refusals that keep protected
+// processes and system services safe.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <string>
 
 #include "helper_protocol.hpp"
+#include "monitor.hpp"
 #include "platform.hpp"
 #include "procyon/procyon.h"
+#include "view.hpp"
 
 using namespace procyon;
 
@@ -152,18 +157,226 @@ void managed_startup_parsing() {
             if (std::string(item.label) == label) return &item;
         return nullptr;
     };
-    const auto mine = platform::parse_managed_startup_items(dump, getuid());
+    // Parsing spawns nothing: the loaded services come in as parameters.
+    platform::LoadedServices user_jobs, system_jobs;
+    user_jobs["com.example.opener"] = {4242, 0};
+    system_jobs["com.example.daemon"] = {77, 0};
+    const auto mine = platform::parse_managed_startup_items(dump, getuid(), user_jobs, system_jobs);
     const auto *opener = find(mine, "com.example.opener");
     check(opener && opener->scope == PC_STARTUP_OPEN_AT_LOGIN && opener->enabled, "user's open-at-login app listed");
     check(opener && std::string(opener->app_path).rfind("/Users/" + uid + "/", 0) != 0, "redacted home path restored");
     const auto *daemon = find(mine, "com.example.daemon");
     check(daemon && daemon->scope == PC_STARTUP_APP_BACKGROUND && daemon->managed_by_os, "machine-wide item listed");
     check(daemon && std::string(daemon->app_path) == "/Applications/Example.app", "embedded item uses its app");
+    check(daemon && daemon->pid == 77 && opener && opener->pid == 4242, "running pids from the given services");
     check(!find(mine, "com.example.legacy"), "legacy agents left to the launchd scan");
     check(!find(mine, "com.example.app"), "apps that don't open at login skipped");
 
-    const auto other = platform::parse_managed_startup_items(dump, getuid() + 1000);
+    const auto other = platform::parse_managed_startup_items(dump, getuid() + 1000, {}, {});
     check(!find(other, "com.example.opener") && find(other, "com.example.daemon"), "another user's records skipped");
+}
+
+void launchctl_parsing() {
+    const std::string print =
+        "system = {\n\ttype = system\n\thandle = 0\n\tactive count = 700\n"
+        "\tservices = {\n"
+        "\t\t  412    0  com.example.running\n"
+        "\t\t    -    1  com.example.failed\n"
+        "\t\t    -  (pe)  com.example.pending\n"
+        "\t\tgarbage line\n"
+        "\t}\n"
+        "\tdisabled services = {\n\t\t  9  9  com.example.after\n\t}\n}\n";
+    const auto loaded = platform::parse_launchctl_print(print);
+    check(loaded.size() == 3, "services block parsed");
+    check(loaded.count("com.example.running") && loaded.at("com.example.running").pid == 412 &&
+              loaded.at("com.example.running").last_exit == 0,
+          "running service pid");
+    check(loaded.count("com.example.failed") && loaded.at("com.example.failed").pid == 0 &&
+              loaded.at("com.example.failed").last_exit == 1,
+          "stopped service exit status");
+    check(loaded.count("com.example.pending") && loaded.at("com.example.pending").last_exit == 0, "(pe) reads 0");
+    check(!loaded.count("com.example.after"), "parsing stops at the block's end");
+    check(platform::parse_launchctl_print("nothing here").empty(), "no services block, no services");
+
+    const std::string disabled =
+        "disabled services = {\n"
+        "\t\"com.example.off\" => disabled\n"
+        "\t\"com.example.on\" => enabled\n"
+        "\t\"com.example.legacy_off\" => true\n"
+        "\t\"com.example.legacy_on\" => false\n"
+        "\tno quotes => disabled\n"
+        "}\n";
+    const auto overrides = platform::parse_launchctl_disabled(disabled);
+    check(overrides.size() == 4, "print-disabled entries parsed");
+    check(overrides.count("com.example.off") && overrides.at("com.example.off"), "disabled read as disabled");
+    check(overrides.count("com.example.on") && !overrides.at("com.example.on"), "enabled read as enabled");
+    check(overrides.count("com.example.legacy_off") && overrides.at("com.example.legacy_off") &&
+              overrides.count("com.example.legacy_on") && !overrides.at("com.example.legacy_on"),
+          "older true/false form");
+}
+
+// The kernel's per-core tick counters are 32-bit: a wrap must read as the small delta it is.
+void tick_wrap() {
+    platform::CpuTicks before{0xFFFFFFF0u, 0xFFFFFFFFu, 100, 5};
+    platform::CpuTicks now{0x00000010u, 0x00000002u, 160, 5};
+    const TickDelta d = tick_delta(now, before);
+    check(d.user == 0x20 && d.system == 3 && d.idle == 60 && d.nice == 0, "wrapped tick delta");
+    const TickDelta first = tick_delta(now, platform::CpuTicks{});
+    check(first.user == 0x10 && first.idle == 160, "first sample counts from zero");
+    // Widened: sums of several wrapped deltas never overflow 64 bits.
+    check(d.user + d.system + d.idle + d.nice == 0x20 + 3 + 60, "delta sum");
+}
+
+// A listing is incomplete only when descriptors exist that we may not see.
+void handle_denial() {
+    check(platform::handles_denied(0, EPERM) && platform::handles_denied(-1, EACCES), "refused reads are denials");
+    check(!platform::handles_denied(0, ESRCH), "a process that is gone or a zombie has nothing to list");
+    check(!platform::handles_denied(0, 0), "an empty descriptor table has nothing to list");
+    check(!platform::handles_denied(48, EPERM), "a successful read is never a denial");
+    check(!platform::handles_denied(0, EINVAL), "other failures hide nothing");
+}
+
+// ---- view builder ----
+
+pc_process make_process(int32_t pid, int32_t ppid, const char *name, const char *app_id, const char *app_name,
+                        double cpu, const char *user = "me") {
+    pc_process p{};
+    p.pid = pid;
+    p.ppid = ppid;
+    p.cpu_percent = cpu;
+    p.memory_bytes = 1000 * pid;
+    p.disk_read_bps = p.disk_write_bps = p.net_rx_bps = p.net_tx_bps = -1;
+    p.gpu_percent = p.power_watts = -1;
+    p.threads = 1;
+    (void)std::snprintf(p.name, sizeof(p.name), "%s", name);
+    (void)std::snprintf(p.app_id, sizeof(p.app_id), "%s", app_id);
+    (void)std::snprintf(p.app_name, sizeof(p.app_name), "%s", app_name);
+    (void)std::snprintf(p.user, sizeof(p.user), "%s", user);
+    return p;
+}
+
+std::vector<pc_process> sample_processes() {
+    return {
+        make_process(1, 0, "launchd", "exe:launchd", "launchd", 0.5, "root"),
+        // Safari: the helper has the lowest pid but its parent is inside the group; the app is the
+        // representative because its parent (launchd) is outside.
+        make_process(300, 200, "Safari Helper", "/Applications/Safari.app", "Safari", 3.0),
+        make_process(200, 1, "Safari", "/Applications/Safari.app", "Safari", 2.0),
+        make_process(310, 200, "Safari Networking", "/Applications/Safari.app", "Safari", -1),
+        make_process(400, 1, "zsh", "exe:zsh", "zsh", 0.0),
+        make_process(410, 400, "node", "exe:node", "node", 12.0),
+        make_process(411, 410, "Électron", "exe:Électron", "Électron", 1.0),
+        make_process(500, 1, "Mail", "/Applications/Mail.app", "Mail", -1),
+    };
+}
+
+int32_t pid_of(const std::vector<pc_process> &processes, const pc_row &row) {
+    return row.process_index >= 0 ? processes[static_cast<size_t>(row.process_index)].pid : row.group_pid;
+}
+
+void view_grouping() {
+    const auto processes = sample_processes();
+    View view;
+
+    pc_view_query query{PC_VIEW_GROUPED, PC_COLUMN_CPU, true, nullptr, 0};
+    build_view(processes, query, view);
+    const pc_row *safari = nullptr;
+    for (const auto &row : view.rows)
+        if (row.process_index < 0 && row.group_name && std::string(row.group_name) == "Safari") safari = &row;
+    check(safari && safari->group_pid == 200, "group representative: parent outside the group wins over lowest pid");
+    check(safari && safari->process_count == 3 && safari->child_count == 3, "group counts every member");
+    check(safari && safari->cpu_percent == 5.0 && safari->memory_bytes == 810000, "group sums known values");
+    check(safari && safari->gpu_percent == -1, "group stays unknown when no member reports");
+    size_t singles = 0;
+    for (const auto &row : view.rows)
+        if (row.depth == 0 && row.process_index >= 0) ++singles;
+    check(singles == 5, "single-process apps are plain rows");
+    check(!view.rows.empty() && view.rows.front().depth == 0 && pid_of(processes, view.rows.front()) == 410,
+          "grouped view sorted by cpu descending");
+
+    // A filter on a member's name keeps the group with its totals but lists only that member.
+    query.filter = "networking";
+    build_view(processes, query, view);
+    check(view.rows.size() == 2 && view.rows[0].process_index < 0 && view.rows[0].process_count == 3 &&
+              view.rows[0].cpu_percent == 5.0 && view.rows[0].child_count == 1 &&
+              pid_of(processes, view.rows[1]) == 310,
+          "filtered group keeps totals, lists matching members");
+    // A filter on the app name includes every member.
+    query.filter = "SAFARI";
+    build_view(processes, query, view);
+    check(view.rows.size() == 4 && view.rows[0].child_count == 3, "filter on the app name includes all members");
+    // Case folding beyond ASCII, both ways.
+    query.filter = "ÉLECTRON";
+    build_view(processes, query, view);
+    check(view.rows.size() == 1 && pid_of(processes, view.rows[0]) == 411, "UTF-8 upper-case filter matches");
+    query.filter = "électron";
+    build_view(processes, query, view);
+    check(view.rows.size() == 1 && pid_of(processes, view.rows[0]) == 411, "UTF-8 lower-case filter matches");
+    query.filter = "41";
+    build_view(processes, query, view);
+    check(view.rows.size() == 2, "pid digits match");
+    query.filter = "nothing-like-this";
+    build_view(processes, query, view);
+    check(view.rows.empty(), "no match, no rows");
+}
+
+void view_tree() {
+    const auto processes = sample_processes();
+    View view;
+    pc_view_query query{PC_VIEW_TREE, PC_COLUMN_PID, false, nullptr, 0};
+    build_view(processes, query, view);
+    check(view.rows.size() == processes.size(), "tree lists every process");
+    check(view.rows[0].process_index >= 0 && pid_of(processes, view.rows[0]) == 1 && view.rows[0].depth == 0,
+          "launchd is the root");
+    bool node_under_zsh = false;
+    for (size_t i = 0; i < view.rows.size(); ++i)
+        if (pid_of(processes, view.rows[i]) == 410)
+            node_under_zsh = view.rows[i].depth == 2 && view.rows[i].parent_row >= 0 &&
+                             pid_of(processes, view.rows[static_cast<size_t>(view.rows[i].parent_row)]) == 400;
+    check(node_under_zsh, "children nest under their parent in pre-order");
+
+    // A match deep in the tree brings its ancestors along, nothing else.
+    query.filter = "électron";
+    build_view(processes, query, view);
+    check(view.rows.size() == 4, "ancestors of a match are included");
+    check(view.rows.size() == 4 && pid_of(processes, view.rows[0]) == 1 && pid_of(processes, view.rows[1]) == 400 &&
+              pid_of(processes, view.rows[2]) == 410 && pid_of(processes, view.rows[3]) == 411,
+          "ancestor chain in order");
+    check(view.rows.size() == 4 && view.rows[3].depth == 3, "depth follows the chain");
+}
+
+void view_sorting_and_limit() {
+    const auto processes = sample_processes();
+    View view;
+    // Unknown (-1) sinks to the bottom whatever the direction.
+    pc_view_query query{PC_VIEW_FLAT, PC_COLUMN_CPU, true, nullptr, 0};
+    build_view(processes, query, view);
+    check(view.rows.size() == processes.size(), "flat view lists every process");
+    check(pid_of(processes, view.rows.front()) == 410, "descending: highest cpu first");
+    const auto last_two = [&] {
+        const size_t n = view.rows.size();
+        const int32_t a = pid_of(processes, view.rows[n - 2]), b = pid_of(processes, view.rows[n - 1]);
+        return (a == 310 && b == 500) || (a == 500 && b == 310);
+    };
+    check(last_two(), "descending: unknown values last");
+    query.descending = false;
+    build_view(processes, query, view);
+    check(pid_of(processes, view.rows.front()) == 400, "ascending: lowest known cpu first");
+    check(last_two(), "ascending: unknown values still last");
+    check(view.rows.size() >= 2 && pid_of(processes, view.rows[view.rows.size() - 2]) == 310,
+          "ties among unknowns break by pid");
+
+    query.descending = true;
+    query.limit = 3;
+    build_view(processes, query, view);
+    check(view.rows.size() == 3 && pid_of(processes, view.rows[0]) == 410 && pid_of(processes, view.rows[1]) == 300,
+          "limit keeps the top rows");
+    query.mode = PC_VIEW_GROUPED;
+    query.limit = 2;
+    build_view(processes, query, view);
+    size_t top_level = 0;
+    for (const auto &row : view.rows) top_level += row.depth == 0;
+    check(top_level == 2 && view.rows.size() == 5, "limit counts top-level rows, members come along");
 }
 
 void refusals() {
@@ -203,6 +416,12 @@ int main() {
         own_handles();
         validation();
         managed_startup_parsing();
+        launchctl_parsing();
+        tick_wrap();
+        handle_denial();
+        view_grouping();
+        view_tree();
+        view_sorting_and_limit();
         refusals();
     } catch (const std::exception &error) {
         (void)std::fprintf(stderr, "FAIL: exception %s\n", error.what());

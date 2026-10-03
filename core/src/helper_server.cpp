@@ -1,11 +1,15 @@
 // procyon-helper: the privileged side. Keep it small and paranoid: it runs as root.
+#include <fcntl.h>
 #include <poll.h>
+#include <pwd.h>
 #include <sys/event.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -38,10 +42,22 @@ constexpr int kAcceptTimeoutSeconds = 30;
 // Daemon mode: launchd keeps the socket and relaunches us on the next connection.
 constexpr int kDaemonIdleSeconds = 60;
 
-// Clients being served in daemon mode; static so detached threads never outlive it.
+// A client being served (daemon mode) keeps the idle timer from running down. The serving threads
+// are detached, so this must not be destroyed before they finish: it lives as long as the process.
 std::atomic<int> active_clients{0};
+// A trusted client that stops reading or writing mid-request must not pin a serving thread forever:
+// after this long the socket call fails and the client is dropped.
+constexpr time_t kClientIoTimeoutSeconds = 10;
 
 void log(const char *message) { (void)std::fprintf(stderr, "procyon-helper: %s\n", message); }
+
+void configure_client_socket(int fd) {
+    int no_sigpipe = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+    const timeval timeout{kClientIoTimeoutSeconds, 0};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+}
 
 // Strict decimal parse: the helper runs as root, so malformed arguments must be rejected.
 bool parse_number(const char *text, long &out) {
@@ -53,6 +69,8 @@ bool parse_number(const char *text, long &out) {
     return true;
 }
 
+// Both fail (and the caller drops the client) when the socket times out: EAGAIN after SO_SNDTIMEO
+// or SO_RCVTIMEO is a hung peer, not a reason to retry.
 bool send_all(int fd, const void *data, size_t size) {
     auto bytes = static_cast<const char *>(data);
     while (size > 0) {
@@ -151,9 +169,13 @@ bool serve_details(int fd, const helper::RequestHeader &header) {
 // Read-only, like Sample: paths and endpoints, never contents.
 bool serve_open_files(int fd, const helper::RequestHeader &header) {
     std::vector<platform::OpenFile> files;
-    const uint32_t complete = platform::open_files(header.pid < 0 ? -1 : header.pid, files) ? 1 : 0;
+    uint32_t complete = platform::open_files(header.pid < 0 ? -1 : header.pid, files) ? 1 : 0;
     auto bytes = helper::encode_files(files);
-    if (bytes.size() > helper::kMaxFilesBytes) bytes = helper::encode_files({});
+    if (bytes.size() > helper::kMaxFilesBytes) {
+        // Too much for one reply: send nothing rather than a partial list, and say so.
+        bytes = helper::encode_files({});
+        complete = 0;
+    }
     const auto size = static_cast<uint32_t>(bytes.size());
     return send_all(fd, &complete, sizeof(complete)) && send_all(fd, &size, sizeof(size)) &&
            send_all(fd, bytes.data(), bytes.size());
@@ -176,16 +198,43 @@ struct StartupCache {
     bool ready = false;
     bool refreshing = false;
     std::chrono::steady_clock::time_point fetched;
+    // The refresh in flight (or the last one, finished). Joined before the next refresh and before
+    // the process exits: a thread running past main() would touch destroyed statics.
+    std::thread refresher;
 };
 
 // One list per user: the daemon can serve several, and each sees their own login items.
+struct StartupCaches {
+    std::mutex mutex;
+    std::unordered_map<uid_t, std::unique_ptr<StartupCache>> by_user;
+};
+
+StartupCaches &startup_caches() {
+    static StartupCaches caches;
+    return caches;
+}
+
 StartupCache &startup_cache(uid_t user) {
-    static std::mutex mutex;
-    static std::unordered_map<uid_t, std::unique_ptr<StartupCache>> caches;
-    std::lock_guard lock(mutex);
-    auto &cache = caches[user];
+    auto &caches = startup_caches();
+    std::lock_guard lock(caches.mutex);
+    auto &cache = caches.by_user[user];
     if (!cache) cache = std::make_unique<StartupCache>();
     return *cache;
+}
+
+// Waits for every refresh still running. Called once, when no client is served any more.
+void join_startup_refreshes() {
+    // Collect first, join after: a refresher locks both mutexes itself when it finishes.
+    std::vector<std::thread> workers;
+    {
+        auto &caches = startup_caches();
+        std::lock_guard lock(caches.mutex);
+        for (auto &[_, cache] : caches.by_user) {
+            std::lock_guard cache_lock(cache->mutex);
+            if (cache->refresher.joinable()) workers.push_back(std::move(cache->refresher));
+        }
+    }
+    for (auto &worker : workers) worker.join();
 }
 
 // `client_uid`: the app's user. We run as root, so "the current user" would be root.
@@ -197,8 +246,11 @@ bool serve_startup(int fd, uid_t client_uid) {
     {
         std::lock_guard lock(cache.mutex);
         if (!cache.refreshing && (!cache.ready || std::chrono::steady_clock::now() - cache.fetched > kMaxAge)) {
+            // The previous refresher has finished its work (refreshing is false); only its thread
+            // handle is left to collect.
+            if (cache.refresher.joinable()) cache.refresher.join();
             cache.refreshing = true;
-            std::thread([client_uid] {
+            cache.refresher = std::thread([client_uid] {
                 auto list = platform::managed_startup_items(client_uid);
                 auto &cache = startup_cache(client_uid);
                 std::lock_guard lock(cache.mutex);
@@ -206,7 +258,7 @@ bool serve_startup(int fd, uid_t client_uid) {
                 cache.ready = true;
                 cache.refreshing = false;
                 cache.fetched = std::chrono::steady_clock::now();
-            }).detach();
+            });
         }
         items = cache.items;
         ready = cache.ready ? 1 : 0;
@@ -348,7 +400,6 @@ int daemon_main() {
             idle_seconds = active_clients.load() > 0 ? 0 : idle_seconds + 1;
             continue;
         }
-        idle_seconds = 0;
         int client = ::accept(server, nullptr, nullptr);
         if (client < 0) continue;
         pid_t peer_pid = 0;
@@ -358,8 +409,9 @@ int daemon_main() {
             ::close(client);
             continue;
         }
-        int no_sigpipe = 1;
-        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+        // Only a trusted client keeps us resident: anyone can connect to the socket.
+        idle_seconds = 0;
+        configure_client_socket(client);
         ++active_clients;
         std::thread([client, peer_pid, peer_uid] {
             serve(client, peer_pid, peer_uid, -1);
@@ -368,10 +420,48 @@ int daemon_main() {
         }).detach();
     }
     CFRelease(requirement);
+    join_startup_refreshes();
     return 0;
 }
 
 #endif
+
+// Opens the directory the dev-mode socket goes in and checks that it belongs to `uid` alone (owned
+// by them, not writable by the group or others). The helper runs as root: a shared or
+// attacker-owned directory would let a symlink redirect what root creates there. O_NOFOLLOW
+// refuses a symlinked directory outright. Returns the directory fd, -1 when refused.
+int open_private_directory(const std::string &directory, uid_t uid) {
+    const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat info{};
+    if (fstat(fd, &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != uid || (info.st_mode & (S_IWGRP | S_IWOTH))) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+// Switches the effective user to the client's for the socket system calls, so the socket node is
+// born owned by them (no chown by path, which follows symlinks). Restores root in the destructor.
+class AsUser {
+public:
+    AsUser(uid_t uid, gid_t gid) : switched_(geteuid() == 0) {
+        if (switched_) ok_ = setegid(gid) == 0 && seteuid(uid) == 0;
+    }
+    ~AsUser() {
+        if (!switched_) return;
+        // Failing to come back as root would leave the helper unable to serve: nothing to do but exit.
+        if (seteuid(0) != 0 || setegid(0) != 0) {
+            log("cannot restore root privileges");
+            std::abort();
+        }
+    }
+    bool ok() const { return ok_; }
+
+private:
+    bool switched_;
+    bool ok_ = true;
+};
 
 }  // namespace
 
@@ -383,22 +473,27 @@ int pc_helper_main(int argc, char **argv) {
     long parent_arg = -1;
     long uid_arg = -1;
     bool valid = true;
-    for (int i = 1; i + 1 < argc; i += 2) {
-        if (!std::strcmp(argv[i], "--socket"))
-            socket_path = argv[i + 1];
-        else if (!std::strcmp(argv[i], "--parent"))
-            valid &= parse_number(argv[i + 1], parent_arg);
-        else if (!std::strcmp(argv[i], "--uid"))
-            valid &= parse_number(argv[i + 1], uid_arg);
-        else
+    // Every flag takes exactly one value; anything left over or unknown is a usage error.
+    for (int i = 1; i < argc && valid; i += 2) {
+        if (i + 1 >= argc) {
             valid = false;
+        } else if (!std::strcmp(argv[i], "--socket")) {
+            socket_path = argv[i + 1];
+        } else if (!std::strcmp(argv[i], "--parent")) {
+            valid = parse_number(argv[i + 1], parent_arg);
+        } else if (!std::strcmp(argv[i], "--uid")) {
+            valid = parse_number(argv[i + 1], uid_arg);
+        } else {
+            valid = false;
+        }
     }
-    const auto parent = static_cast<pid_t>(parent_arg);
-    if (!valid || socket_path.empty() || parent_arg <= 1 || parent_arg > INT32_MAX || uid_arg < 0 ||
+    // uid 0 is refused: the helper serves an app run by a user, never root itself.
+    if (!valid || socket_path.empty() || parent_arg <= 1 || parent_arg > INT32_MAX || uid_arg <= 0 ||
         uid_arg > UINT32_MAX) {
-        log("usage: procyon-helper --socket <path> --parent <pid> --uid <uid>");
+        log("usage: procyon-helper --socket <path> --parent <pid> --uid <uid>  (uid must not be 0)");
         return 2;
     }
+    const auto parent = static_cast<pid_t>(parent_arg);
     const auto uid = static_cast<uid_t>(uid_arg);
     if (geteuid() != 0) log("warning: not running as root; system processes stay unreadable");
 
@@ -419,23 +514,57 @@ int pc_helper_main(int argc, char **argv) {
     address.sun_family = AF_UNIX;
     std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
 
-    int server = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    ::unlink(socket_path.c_str());
-    const mode_t previous_umask = umask(0177);  // socket born 0600
-    const bool bound = server >= 0 && ::bind(server, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0;
-    umask(previous_umask);
-    if (!bound || ::listen(server, 1) != 0 || ::chown(socket_path.c_str(), uid, static_cast<gid_t>(-1)) != 0) {
-        log("cannot create socket");
-        ::unlink(socket_path.c_str());
+    // The socket must live in a directory that is the user's alone (the app's private temp dir).
+    const auto slash = socket_path.rfind('/');
+    if (slash == std::string::npos) {
+        log("socket path must be absolute");
+        return 1;
+    }
+    const std::string directory = slash == 0 ? "/" : socket_path.substr(0, slash);
+    const std::string socket_name = socket_path.substr(slash + 1);
+    const int directory_fd = open_private_directory(directory, uid);
+    if (directory_fd < 0 || socket_name.empty()) {
+        log("socket directory must be owned by the user and writable by nobody else");
+        return 1;
+    }
+    passwd *user = getpwuid(uid);
+    if (!user) {
+        log("unknown user");
         return 1;
     }
 
+    // Create the socket as the user: it is born owned by them, 0600, with no privileged step on a
+    // path they control.
+    int server = -1;
+    {
+        AsUser as_user(uid, user->pw_gid);
+        if (!as_user.ok()) {
+            log("cannot switch to the user");
+            return 1;
+        }
+        server = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        unlinkat(directory_fd, socket_name.c_str(), 0);
+        const mode_t previous_umask = umask(0177);  // socket born 0600
+        const bool bound = server >= 0 && ::bind(server, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0;
+        umask(previous_umask);
+        if (!bound || ::listen(server, 1) != 0) {
+            log("cannot create socket");
+            unlinkat(directory_fd, socket_name.c_str(), 0);
+            return 1;
+        }
+    }
+
+    // Removal goes through the verified directory fd, never a path root might be led astray on.
+    auto remove_socket = [&] { unlinkat(directory_fd, socket_name.c_str(), 0); };
+
     int exit_code = 1;
     pollfd fds[2] = {{server, POLLIN, 0}, {kq, POLLIN, 0}};
-    int remaining_ms = kAcceptTimeoutSeconds * 1000;
-    while (remaining_ms > 0) {
-        if (poll(fds, 2, 1000) < 0 && errno != EINTR) break;
-        remaining_ms -= 1000;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kAcceptTimeoutSeconds);
+    while (true) {
+        const auto left =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) break;
+        if (poll(fds, 2, static_cast<int>(std::min<long long>(left.count(), 1000))) < 0 && errno != EINTR) break;
         if (fds[1].revents) break;
         if (!(fds[0].revents & POLLIN)) continue;
         int client = ::accept(server, nullptr, nullptr);
@@ -445,12 +574,11 @@ int pc_helper_main(int argc, char **argv) {
             ::close(client);
             continue;
         }
-        int no_sigpipe = 1;
-        setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+        configure_client_socket(client);
         // Stop listening before serving: there is only ever one client.
         ::close(server);
         server = -1;
-        ::unlink(socket_path.c_str());
+        remove_socket();
         serve(client, parent, uid, kq);
         ::close(client);
         exit_code = 0;
@@ -458,8 +586,10 @@ int pc_helper_main(int argc, char **argv) {
     }
     if (server >= 0) {
         ::close(server);
-        ::unlink(socket_path.c_str());
+        remove_socket();
     }
+    ::close(directory_fd);
     ::close(kq);
+    join_startup_refreshes();
     return exit_code;
 }

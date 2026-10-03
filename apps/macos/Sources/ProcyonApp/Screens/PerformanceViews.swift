@@ -29,7 +29,8 @@ struct CPUView: View {
         let style = Metric.cpu.style
         ScreenScroll {
             PageHeader("CPU", subtitle: "\(store.info.cpuBrand) · \(store.info.coreSummary)", style: style) {
-                ValueText(Format.percent(s.cpuUsage).dropLast().description, unit: "%", font: Tokens.Typography.display)
+                let usage = Format.percentParts(s.cpuUsage)
+                ValueText(usage.value, unit: usage.unit, font: Tokens.Typography.display)
             }
 
             Panel("Utilization", symbol: "waveform.path.ecg", tint: style.start) {

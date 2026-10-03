@@ -56,6 +56,11 @@ int run(std::string program, const std::vector<std::string> &args, std::string *
 
     int pipe_fds[2];
     if (pipe(pipe_fds) != 0) return -1;
+    // Close-on-exec on both ends: the helper runs several of these at once on different threads,
+    // and a child spawned by another thread must not inherit this pipe's write end, or our read
+    // would wait for its EOF too. dup2 onto stdout clears the flag on the child's copy alone.
+    fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC);
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, pipe_fds[1], STDOUT_FILENO);
@@ -105,53 +110,16 @@ int launchctl(const std::vector<std::string> &args, std::string *output = nullpt
 std::string gui_domain(uid_t uid = getuid()) { return "gui/" + std::to_string(uid); }
 std::string domain_name(int32_t domain) { return domain == PC_DOMAIN_SYSTEM ? "system" : gui_domain(); }
 
-struct Loaded {
-    int32_t pid = 0;
-    int32_t last_exit = 0;
-};
-
-// The "services = { pid status label }" block of `launchctl print <domain>`.
-std::unordered_map<std::string, Loaded> loaded_services(const std::string &domain) {
-    std::unordered_map<std::string, Loaded> result;
+LoadedServices loaded_services(const std::string &domain) {
     std::string text;
-    if (launchctl({"print", domain}, &text) != 0) return result;
-    std::istringstream lines(text);
-    std::string line;
-    bool inside = false;
-    while (std::getline(lines, line)) {
-        if (!inside) {
-            inside = line.find("services = {") != std::string::npos;
-            continue;
-        }
-        if (line.find('}') != std::string::npos) break;
-        std::istringstream fields(line);
-        std::string pid, status, label;
-        if (!(fields >> pid >> status >> label)) continue;
-        Loaded entry;
-        entry.pid = static_cast<int32_t>(std::strtol(pid.c_str(), nullptr, 10));
-        entry.last_exit = static_cast<int32_t>(std::strtol(status.c_str(), nullptr, 10));  // "-" and "(pe)" read 0
-        result[label] = entry;
-    }
-    return result;
+    if (launchctl({"print", domain}, &text) != 0) return {};
+    return parse_launchctl_print(text);
 }
 
-// `launchctl print-disabled <domain>`: "label" => disabled|enabled (true|false on older systems).
 std::unordered_map<std::string, bool> disabled_services(const std::string &domain) {
-    std::unordered_map<std::string, bool> result;
     std::string text;
-    if (launchctl({"print-disabled", domain}, &text) != 0) return result;
-    std::istringstream lines(text);
-    std::string line;
-    while (std::getline(lines, line)) {
-        const auto open = line.find('"');
-        const auto close = open == std::string::npos ? open : line.find('"', open + 1);
-        const auto arrow = line.find("=>");
-        if (close == std::string::npos || arrow == std::string::npos) continue;
-        const std::string value = line.substr(arrow + 2);
-        result[line.substr(open + 1, close - open - 1)] =
-            value.find("disabled") != std::string::npos || value.find("true") != std::string::npos;
-    }
-    return result;
+    if (launchctl({"print-disabled", domain}, &text) != 0) return {};
+    return parse_launchctl_disabled(text);
 }
 
 struct Job {
@@ -250,34 +218,71 @@ std::string home_directory(uid_t uid = getuid()) {
     return pw ? pw->pw_dir : "";
 }
 
-// Parsed plists per directory, re-read only when the directory changes.
+// What a directory of plists looked like: its own mtime (entries added or removed), plus the
+// count and newest mtime of the plists inside (a plist edited in place leaves the directory's
+// mtime alone).
+struct DirectoryStamp {
+    timespec directory{};
+    timespec newest_plist{};
+    size_t plist_count = 0;
+
+    bool operator==(const DirectoryStamp &other) const {
+        return directory.tv_sec == other.directory.tv_sec && directory.tv_nsec == other.directory.tv_nsec &&
+               newest_plist.tv_sec == other.newest_plist.tv_sec && newest_plist.tv_nsec == other.newest_plist.tv_nsec &&
+               plist_count == other.plist_count;
+    }
+};
+
+bool newer(const timespec &a, const timespec &b) {
+    return a.tv_sec > b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec > b.tv_nsec);
+}
+
+// Lists the plists of `directory` and stamps them; false when the directory cannot be read.
+bool scan_plists(const std::string &directory, std::vector<std::string> &paths, DirectoryStamp &stamp) {
+    paths.clear();
+    stamp = {};
+    struct stat info{};
+    if (stat(directory.c_str(), &info) != 0) return false;
+    stamp.directory = info.st_mtimespec;
+    DIR *dir = opendir(directory.c_str());
+    if (!dir) return false;
+    while (dirent *item = readdir(dir)) {
+        const std::string name = item->d_name;
+        if (name.size() < 7 || name.compare(name.size() - 6, 6, ".plist") != 0) continue;
+        std::string path = directory;
+        path += '/';
+        path += name;
+        struct stat plist{};
+        if (stat(path.c_str(), &plist) != 0) continue;
+        if (newer(plist.st_mtimespec, stamp.newest_plist)) stamp.newest_plist = plist.st_mtimespec;
+        ++stamp.plist_count;
+        paths.push_back(std::move(path));
+    }
+    closedir(dir);
+    return true;
+}
+
+// Parsed plists per directory, re-read only when the directory or a plist in it changes. A
+// directory that cannot be read right now is not cached: the next call tries again.
 std::vector<Job> jobs_in(const std::string &directory) {
     struct Entry {
-        timespec modified{};
+        DirectoryStamp stamp;
         std::vector<Job> jobs;
     };
     static std::mutex mutex;
     static std::unordered_map<std::string, Entry> cache;
 
-    struct stat info{};
-    if (stat(directory.c_str(), &info) != 0) return {};
+    std::vector<std::string> paths;
+    DirectoryStamp stamp;
+    if (!scan_plists(directory, paths, stamp)) return {};
     std::lock_guard lock(mutex);
     auto &entry = cache[directory];
-    if (entry.modified.tv_sec == info.st_mtimespec.tv_sec && entry.modified.tv_nsec == info.st_mtimespec.tv_nsec)
-        return entry.jobs;
+    if (entry.stamp == stamp) return entry.jobs;
     entry.jobs.clear();
-    entry.modified = info.st_mtimespec;
-    if (DIR *dir = opendir(directory.c_str())) {
-        while (dirent *item = readdir(dir)) {
-            const std::string name = item->d_name;
-            if (name.size() < 7 || name.compare(name.size() - 6, 6, ".plist") != 0) continue;
-            std::string path = directory;
-            path += '/';
-            path += name;
-            Job job;
-            if (read_job(path, job)) entry.jobs.push_back(std::move(job));
-        }
-        closedir(dir);
+    entry.stamp = stamp;
+    for (const auto &path : paths) {
+        Job job;
+        if (read_job(path, job)) entry.jobs.push_back(std::move(job));
     }
     return entry.jobs;
 }
@@ -347,6 +352,46 @@ pc_result launchctl_result(int status) {
 
 }  // namespace
 
+// The "services = { pid status label }" block of `launchctl print <domain>`.
+LoadedServices parse_launchctl_print(const std::string &text) {
+    LoadedServices result;
+    std::istringstream lines(text);
+    std::string line;
+    bool inside = false;
+    while (std::getline(lines, line)) {
+        if (!inside) {
+            inside = line.find("services = {") != std::string::npos;
+            continue;
+        }
+        if (line.find('}') != std::string::npos) break;
+        std::istringstream fields(line);
+        std::string pid, status, label;
+        if (!(fields >> pid >> status >> label)) continue;
+        LoadedService entry;
+        entry.pid = static_cast<int32_t>(std::strtol(pid.c_str(), nullptr, 10));
+        entry.last_exit = static_cast<int32_t>(std::strtol(status.c_str(), nullptr, 10));  // "-" and "(pe)" read 0
+        result[label] = entry;
+    }
+    return result;
+}
+
+// `launchctl print-disabled <domain>`: "label" => disabled|enabled (true|false on older systems).
+std::unordered_map<std::string, bool> parse_launchctl_disabled(const std::string &text) {
+    std::unordered_map<std::string, bool> result;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const auto open = line.find('"');
+        const auto close = open == std::string::npos ? open : line.find('"', open + 1);
+        const auto arrow = line.find("=>");
+        if (close == std::string::npos || arrow == std::string::npos) continue;
+        const std::string value = line.substr(arrow + 2);
+        result[line.substr(open + 1, close - open - 1)] =
+            value.find("disabled") != std::string::npos || value.find("true") != std::string::npos;
+    }
+    return result;
+}
+
 bool valid_service_label(const std::string &label) {
     if (label.empty() || label.size() >= 256 || label[0] == '-') return false;
     for (char c : label)
@@ -373,7 +418,7 @@ std::vector<pc_startup_item> startup_items() {
         {PC_STARTUP_GLOBAL_AGENT, "/Library/LaunchAgents", PC_DOMAIN_USER},
         {PC_STARTUP_DAEMON, "/Library/LaunchDaemons", PC_DOMAIN_SYSTEM},
     };
-    std::unordered_map<int32_t, std::unordered_map<std::string, Loaded>> loaded;
+    std::unordered_map<int32_t, LoadedServices> loaded;
     std::unordered_map<int32_t, std::unordered_map<std::string, bool>> disabled;
     for (const auto &location : locations) {
         const auto jobs = jobs_in(location.directory);
@@ -496,10 +541,13 @@ std::vector<pc_startup_item> managed_startup_items(uint32_t user) {
         std::lock_guard lock(one_at_a_time);
         if (run("/usr/bin/sfltool", {"dumpbtm"}, &dump, 30) != 0 || dump.empty()) return {};
     }
-    return parse_managed_startup_items(dump, user);
+    return parse_managed_startup_items(std::move(dump), user, loaded_services(gui_domain(user)),
+                                       loaded_services("system"));
 }
 
-std::vector<pc_startup_item> parse_managed_startup_items(std::string dump, uint32_t user) {
+std::vector<pc_startup_item> parse_managed_startup_items(std::string dump, uint32_t user,
+                                                         const LoadedServices &user_jobs,
+                                                         const LoadedServices &system_jobs) {
     std::vector<pc_startup_item> result;
     // The dump writes home folders as "/Users/<uid>/…"; put the real home back.
     const std::string redacted = "/Users/" + std::to_string(user) + "/";
@@ -510,8 +558,6 @@ std::vector<pc_startup_item> parse_managed_startup_items(std::string dump, uint3
 
     std::unordered_map<std::string, const BtmRecord *> by_id;
     for (const auto &record : records) by_id.emplace(field(record, "Identifier"), &record);
-    const auto user_jobs = loaded_services(gui_domain(user));
-    const auto system_jobs = loaded_services("system");
 
     std::unordered_set<std::string> seen;
     for (const auto &record : records) {

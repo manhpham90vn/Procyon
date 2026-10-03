@@ -7,8 +7,41 @@
 
 #include <cerrno>
 #include <cstring>
+#include <optional>
 
 namespace procyon {
+namespace {
+
+// Replies to Sample and Details come straight from counters; a stuck helper must never freeze
+// sampling, so they get a short budget.
+constexpr time_t kReplyTimeoutSeconds = 2;
+// Launchd verbs run launchctl synchronously (up to 15 s) and listing every process's files or
+// sockets walks every descriptor on the machine: those replies may legitimately take longer.
+constexpr time_t kSlowReplyTimeoutSeconds = 20;
+
+void set_receive_timeout(int fd, time_t seconds) {
+    const timeval timeout{seconds, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+}
+
+// Lengthens the receive timeout for one request and puts the default back afterwards. Watches the
+// client's descriptor itself: a failed request disconnects (fd -1) before this goes out of scope.
+class SlowReply {
+public:
+    explicit SlowReply(const int &fd) : fd_(fd) {
+        if (fd_ >= 0) set_receive_timeout(fd_, kSlowReplyTimeoutSeconds);
+    }
+    ~SlowReply() {
+        if (fd_ >= 0) set_receive_timeout(fd_, kReplyTimeoutSeconds);
+    }
+    SlowReply(const SlowReply &) = delete;
+    SlowReply &operator=(const SlowReply &) = delete;
+
+private:
+    const int &fd_;
+};
+
+}  // namespace
 
 bool HelperClient::connect(const std::string &socket_path) {
     disconnect();
@@ -20,9 +53,9 @@ bool HelperClient::connect(const std::string &socket_path) {
     fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd_ < 0) return false;
     // A stuck helper must never freeze sampling.
-    timeval timeout{2, 0};
-    setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    set_receive_timeout(fd_, kReplyTimeoutSeconds);
+    const timeval send_timeout{kReplyTimeoutSeconds, 0};
+    setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     int no_sigpipe = 1;
     setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
 
@@ -103,6 +136,7 @@ pc_result HelperClient::launchd(const std::string &label, int32_t action) {
     char payload[helper::kLabelSize] = {};
     if (label.size() >= sizeof(payload)) return PC_ERR_INVALID;
     label.copy(payload, sizeof(payload) - 1);  // payload stays NUL-terminated
+    const SlowReply slow(fd_);
     return simple(helper::Request::Launchd, 0, static_cast<uint32_t>(action), payload, sizeof(payload));
 }
 
@@ -122,6 +156,14 @@ bool HelperClient::startup_items(std::vector<pc_startup_item> &out, bool &ready)
         disconnect();
         return false;
     }
+    for (auto &item : out) {  // never trust a peer's strings to be terminated
+        item.label[sizeof(item.label) - 1] = '\0';
+        item.name[sizeof(item.name) - 1] = '\0';
+        item.program[sizeof(item.program) - 1] = '\0';
+        item.config_path[sizeof(item.config_path) - 1] = '\0';
+        item.app_path[sizeof(item.app_path) - 1] = '\0';
+        item.parent_name[sizeof(item.parent_name) - 1] = '\0';
+    }
     ready = ready_flag != 0;
     return true;
 }
@@ -129,6 +171,7 @@ bool HelperClient::startup_items(std::vector<pc_startup_item> &out, bool &ready)
 bool HelperClient::open_files(int32_t pid, std::vector<platform::OpenFile> &out, bool &complete) {
     out.clear();
     if (!connected()) return false;
+    const std::optional<SlowReply> slow = pid < 0 ? std::make_optional<SlowReply>(fd_) : std::nullopt;
     helper::RequestHeader header;
     header.type = static_cast<uint32_t>(helper::Request::OpenFiles);
     header.pid = pid;
@@ -150,6 +193,7 @@ bool HelperClient::open_files(int32_t pid, std::vector<platform::OpenFile> &out,
 bool HelperClient::connections(int32_t pid, std::vector<pc_connection> &out, bool &complete) {
     out.clear();
     if (!connected()) return false;
+    const std::optional<SlowReply> slow = pid < 0 ? std::make_optional<SlowReply>(fd_) : std::nullopt;
     helper::RequestHeader header;
     header.type = static_cast<uint32_t>(helper::Request::Connections);
     header.pid = pid;

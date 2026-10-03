@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 
 @testable import ProcyonKit
@@ -81,17 +82,24 @@ import Testing
         for row in rows { if let parent = row.parentID { #expect(ids.contains(parent)) } }
     }
 
-    /// Per-process network is all-or-nothing: known for every process with the capability, never without it.
-    @Test func processNetworkFollowsCapability() {
+    /// Per-process network follows the capability: never known without it; with it, known for every
+    /// process sampled twice (a rate needs two readings, so a process's first sample is unknown).
+    @Test func processNetworkFollowsCapability() throws {
         let monitor = Monitor()
+        _ = monitor.refresh()
         _ = monitor.refresh()
         let rows = monitor.buildView(.init(mode: .flat, column: .networkReceive, descending: true, filter: ""))
         let known = Monitor.capabilities.contains(.processNetwork)
         #expect(!rows.isEmpty)
-        for row in rows {
-            #expect((row.networkReceive != nil) == known)
-            #expect((row.networkSend != nil) == known)
+        if !known {
+            for row in rows {
+                #expect(row.networkReceive == nil)
+                #expect(row.networkSend == nil)
+            }
         }
+        let own = try #require(rows.first { $0.pid == getpid() })
+        #expect((own.networkReceive != nil) == known)
+        #expect((own.networkSend != nil) == known)
     }
 }
 
@@ -173,12 +181,16 @@ import Testing
 }
 
 @Suite struct P1MonitorTests {
-    @Test func processGPUFollowsCapability() {
+    @Test func processGPUFollowsCapability() throws {
         let monitor = Monitor()
+        _ = monitor.refresh()
         _ = monitor.refresh()
         let rows = monitor.buildView(.init(mode: .flat, column: .gpu, descending: true, filter: ""))
         let known = Monitor.capabilities.contains(.processGPU)
-        for row in rows { #expect((row.gpu != nil) == known) }
+        if !known { for row in rows { #expect(row.gpu == nil) } }
+        // Our own process has been sampled twice, so its value is known with the capability.
+        let own = try #require(rows.first { $0.pid == getpid() })
+        #expect((own.gpu != nil) == known)
         // Sorted by GPU, descending.
         let values = rows.compactMap(\.gpu)
         #expect(values == values.sorted(by: >))
@@ -314,8 +326,89 @@ import Testing
         #expect(abs((record?.machine.cpu ?? 0) - 0.3) < 1e-9)
         #expect(record?.machine.cpuPeak == 0.4)
         #expect(record?.machine.memory == 0.5)
+        #expect(record?.machine.processesSampled == true)
         let apps = Dictionary(uniqueKeysWithValues: (record?.apps ?? []).map { ($0.appID, $0.cpu) })
         #expect(apps == ["a": 20, "b": 10])
+    }
+
+    @Test func recorderMarksMinutesWithoutProcessData() {
+        var recorder = HistoryRecorder()
+        // Window closed: machine-wide samples only.
+        _ = recorder.add(sample(at: 600, cpu: 0.2), busiest: [])
+        let closed = recorder.add(sample(at: 660, cpu: 0.2), busiest: [])
+        #expect(closed?.machine.processesSampled == false)
+        #expect(closed?.apps.isEmpty == true)
+        // Processes sampled but nothing busy still counts as a sampled minute.
+        var sampled = sample(at: 670, cpu: 0.2)
+        sampled.processCount = 5
+        _ = recorder.add(sampled, busiest: [])
+        #expect(recorder.add(sample(at: 720, cpu: 0.2), busiest: [])?.machine.processesSampled == true)
+    }
+
+    @Test func flushHandsOutThePartialMinuteWithoutEndingIt() {
+        var recorder = HistoryRecorder()
+        #expect(recorder.flush() == nil)
+        _ = recorder.add(sample(at: 600, cpu: 0.2), busiest: [app("a", cpu: 40)])
+        _ = recorder.add(sample(at: 601, cpu: 0.4), busiest: [app("a", cpu: 20)])
+        let partial = recorder.flush()
+        #expect(partial?.machine.minute == 600)
+        #expect(abs((partial?.machine.cpu ?? 0) - 0.3) < 1e-9)
+        #expect(partial?.apps.first?.cpu == 30)
+        // The minute goes on: the final record covers every sample, the flushed ones included.
+        let final = recorder.add(sample(at: 660, cpu: 0.9), busiest: [])
+        #expect(final?.machine.minute == 600)
+        #expect(abs((final?.machine.cpu ?? 0) - 0.3) < 1e-9)
+        #expect(final?.apps.first?.cpu == 30)
+    }
+
+    @Test func appAveragesSkipMinutesWithoutProcessData() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("procyon-history-\(UUID()).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let database = HistoryDatabase(url: url)
+        var a = AppUsage(appID: "a", name: "A")
+        a.cpu = 30
+        await database.write(MinuteRecord(machine: MachineMinute(minute: 6000), apps: [a]))
+        var closed = MachineMinute(minute: 6060)
+        closed.processesSampled = false
+        await database.write(MinuteRecord(machine: closed, apps: []))
+        await database.write(MinuteRecord(machine: MachineMinute(minute: 6120), apps: [a]))
+        // Two sampled minutes at 30, one unsampled minute that doesn't count: 30, not 20.
+        #expect(await database.apps(from: 6000, to: 6180, orderBy: .cpu).first?.cpu == 30)
+        #expect(await database.machine(since: 6000).map(\.processesSampled) == [true, false, true])
+    }
+
+    /// A database from before the `processes_sampled` column treats every minute as sampled.
+    @Test func olderDatabasesAreMigrated() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("procyon-history-\(UUID()).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(url.path, &handle) == SQLITE_OK)
+        let old = """
+            CREATE TABLE machine (
+                minute INTEGER PRIMARY KEY, cpu REAL, cpu_peak REAL, memory REAL, disk_read REAL, disk_write REAL,
+                net_rx REAL, net_tx REAL, gpu REAL, cpu_temp REAL, power REAL);
+            CREATE TABLE apps (
+                minute INTEGER, app_id TEXT, name TEXT, cpu REAL, memory REAL, disk REAL, network REAL, gpu REAL,
+                power REAL, PRIMARY KEY (minute, app_id)) WITHOUT ROWID;
+            INSERT INTO machine VALUES (6000, 0.5, 0.9, 0.5, 0, 0, 0, 0, NULL, NULL, NULL);
+            INSERT INTO machine VALUES (6060, 0.5, 0.9, 0.5, 0, 0, 0, 0, NULL, NULL, NULL);
+            INSERT INTO apps VALUES (6000, 'a', 'A', 40, 0, 0, 0, 0, 0);
+            """
+        #expect(sqlite3_exec(handle, old, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(handle)
+
+        let database = HistoryDatabase(url: url)
+        let minutes = await database.machine(since: 0)
+        #expect(minutes.map(\.minute) == [6000, 6060])
+        #expect(minutes.map(\.processesSampled) == [true, true])
+        #expect(minutes.first?.cpuPeak == 0.9)
+        // Both old minutes count: 40 over 2 minutes.
+        #expect(await database.apps(from: 6000, to: 6120, orderBy: .cpu).first?.cpu == 20)
+        // New rows go into the migrated table.
+        var closed = MachineMinute(minute: 6120)
+        closed.processesSampled = false
+        await database.write(MinuteRecord(machine: closed, apps: []))
+        #expect(await database.machine(since: 6120).first?.processesSampled == false)
     }
 
     @Test func databaseKeepsMinutesAndRanksApps() async {
@@ -358,5 +451,105 @@ import Testing
         #expect(ProcessCatalog.explain(name: "unknown-thing") == nil)
         // A helper falls back to its app's entry.
         #expect(ProcessCatalog.explain(name: "helper", appName: "Docker Desktop") != nil)
+    }
+}
+
+@Suite struct EndTreeTests {
+    /// Ending a group's trees from its outermost members reaches every member and every descendant
+    /// (a shell or node the app spawned, which belongs to another app) exactly once.
+    @Test func groupTreeRootsAreTheMembersWithoutAMemberAncestor() {
+        // launchd(1) > app(10) > [renderer(11) > zsh(20) > node(21), gpu(12)]; other(30) > app helper(31)
+        let parentOf: [Int32: Int32] = [10: 1, 11: 10, 12: 10, 20: 11, 21: 20, 30: 1, 31: 30]
+        #expect(Monitor.treeRoots([10, 11, 12, 31], parentOf: parentOf) == [10, 31])
+        #expect(Monitor.treeRoots([12, 11, 10], parentOf: parentOf) == [10])
+        // Unknown parents (the snapshot moved on) keep the member as a root.
+        #expect(Monitor.treeRoots([99, 11], parentOf: parentOf) == [99, 11])
+        // A pid that is its own parent (the kernel) doesn't loop forever.
+        #expect(Monitor.treeRoots([0], parentOf: [0: 0]) == [0])
+    }
+}
+
+@Suite struct TopAppsTests {
+    private func app(_ id: String, cpu: Double?, disk: Double? = nil) -> ProcessRow {
+        ProcessRow(
+            id: "g:\(id)", kind: .group, pid: 1, parentID: nil, depth: 0, childCount: 0, processCount: 1, name: id,
+            user: "", path: "", appID: id, appName: id, flags: [], cpu: cpu, memory: nil, diskRead: disk, diskWrite: nil,
+            networkReceive: nil, networkSend: nil, threads: nil, startTime: nil, memberPIDs: [1])
+    }
+
+    /// The first sample after sampling resumes reports unknown rates (nil, -1 in the core): those
+    /// apps are left out instead of ranking as zero or, worse, first.
+    @Test func unknownValuesAreLeftOut() {
+        let apps = [app("unknown", cpu: nil), app("busy", cpu: 50), app("idle", cpu: 0), app("medium", cpu: 20)]
+        #expect(MonitorWorker.top(apps, by: \.cpu).map(\.appID) == ["busy", "medium", "idle"])
+        #expect(MonitorWorker.top(apps, by: \.cpu, over: 0).map(\.appID) == ["busy", "medium"])
+        // Totals treat unknown as zero, so only apps above the floor count.
+        let disk = [app("a", cpu: nil, disk: nil), app("b", cpu: nil, disk: 5), app("c", cpu: nil, disk: 7)]
+        #expect(MonitorWorker.top(disk, by: \.diskTotal, over: 0).map(\.appID) == ["c", "b"])
+    }
+
+    @Test func listsAreCappedAtTopCount() {
+        let apps = (0..<30).map { app("\($0)", cpu: Double($0)) }
+        let top = MonitorWorker.top(apps, by: \.cpu)
+        #expect(top.count == SystemStore.topCount)
+        #expect(top.first?.appID == "29")
+    }
+}
+
+extension AlertEvaluatorTests {
+    @Test func resetForgetsHowLongConditionsHeld() {
+        var evaluator = AlertEvaluator()
+        let rules = settings(.cpu, threshold: 90, duration: 30)
+        _ = evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 0)
+        // Paused at 20, resumed at 100: the pause doesn't count toward the 30 s.
+        evaluator.reset()
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 100).isEmpty)
+        #expect(evaluator.evaluate(sample(cpu: 0.95), apps: [], settings: rules, now: 130).count == 1)
+    }
+
+    @Test func resettingOneRuleLeavesTheOthersRunning() {
+        var evaluator = AlertEvaluator()
+        let rules = AlertSettings(rules: [
+            AlertRule(kind: .cpu, isEnabled: true, threshold: 90, duration: 30),
+            AlertRule(kind: .appCPU, isEnabled: true, threshold: 100, duration: 30),
+        ])
+        _ = evaluator.evaluate(sample(cpu: 0.95), apps: [app("a", cpu: 150)], settings: rules, now: 0)
+        // The user edits the per-app rule: its apps start over, the machine rule does not.
+        evaluator.reset(.appCPU)
+        let events = evaluator.evaluate(sample(cpu: 0.95), apps: [app("a", cpu: 150)], settings: rules, now: 30)
+        #expect(events.map(\.kind) == [.cpu])
+        #expect(
+            evaluator.evaluate(sample(cpu: 0.95), apps: [app("a", cpu: 150)], settings: rules, now: 60).map(\.kind) == [.appCPU])
+    }
+}
+
+@Suite(.serialized) @MainActor struct SystemStoreTests {
+    private func makeStore() -> SystemStore {
+        let defaults = UserDefaults(suiteName: "procyon-tests-\(UUID())")!
+        let store = SystemStore(defaults: defaults)
+        store.recordsHistory = false  // keep the real history database out of it
+        return store
+    }
+
+    @Test func startIsIdempotentAndDoesNotSampleWhilePaused() async throws {
+        let store = makeStore()
+        store.isPaused = true
+        store.start()
+        store.start()
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(!store.hasSample)
+        store.isPaused = false
+        for _ in 0..<50 where !store.hasSample { try await Task.sleep(for: .milliseconds(100)) }
+        #expect(store.hasSample)
+        #expect(store.info.logicalCores > 0)
+        store.stop()
+    }
+
+    @Test func storedIntervalIsClamped() {
+        let defaults = UserDefaults(suiteName: "procyon-tests-\(UUID())")!
+        defaults.set(42.0, forKey: "refreshInterval")
+        #expect(SystemStore(defaults: defaults).interval == 5)
+        defaults.set(0.1, forKey: "refreshInterval")
+        #expect(SystemStore(defaults: defaults).interval == 0.5)
     }
 }

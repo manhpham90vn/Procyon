@@ -255,12 +255,14 @@ bool system_info(pc_system_info &out) {
     return true;
 }
 
-bool processes(std::vector<RawProcess> &out) {
-    out.clear();
+namespace {
+
+// The whole process table in one sysctl.
+bool process_table(std::vector<kinfo_proc> &kinfo) {
+    kinfo.clear();
     int mib[3] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL};
     size_t size = 0;
     if (sysctl(mib, 3, nullptr, &size, nullptr, 0) != 0) return false;
-    std::vector<kinfo_proc> kinfo;
     // The process table can grow between the two calls; retry with headroom.
     for (int attempt = 0; attempt < 3; ++attempt) {
         size += size / 4;
@@ -270,6 +272,24 @@ bool processes(std::vector<RawProcess> &out) {
         if (errno != ENOMEM) return false;
     }
     kinfo.resize(size / sizeof(kinfo_proc));
+    return true;
+}
+
+}  // namespace
+
+bool process_parents(std::vector<ProcessParent> &out) {
+    out.clear();
+    std::vector<kinfo_proc> kinfo;
+    if (!process_table(kinfo)) return false;
+    out.reserve(kinfo.size());
+    for (const auto &kp : kinfo) out.push_back({kp.kp_proc.p_pid, kp.kp_eproc.e_ppid});
+    return true;
+}
+
+bool processes(std::vector<RawProcess> &out) {
+    out.clear();
+    std::vector<kinfo_proc> kinfo;
+    if (!process_table(kinfo)) return false;
     out.reserve(kinfo.size());
 
     char path[PROC_PIDPATHINFO_MAXSIZE];
@@ -330,11 +350,17 @@ int64_t start_time(int32_t pid) {
     return info.kp_proc.p_starttime.tv_sec;
 }
 
+// mach_host_self() hands out a new send right on every call; one is enough for the process.
+mach_port_t host_port() {
+    static const mach_port_t port = mach_host_self();
+    return port;
+}
+
 bool cpu_ticks(std::vector<CpuTicks> &out) {
     natural_t count = 0;
     processor_info_array_t info = nullptr;
     mach_msg_type_number_t info_count = 0;
-    if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &count, &info, &info_count) != KERN_SUCCESS)
+    if (host_processor_info(host_port(), PROCESSOR_CPU_LOAD_INFO, &count, &info, &info_count) != KERN_SUCCESS)
         return false;
     out.resize(count);
     for (natural_t i = 0; i < count; ++i) {
@@ -354,8 +380,7 @@ bool memory(Memory &out) {
 
     vm_statistics64_data_t vm{};
     mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm), &count) !=
-        KERN_SUCCESS)
+    if (host_statistics64(host_port(), HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm), &count) != KERN_SUCCESS)
         return false;
     const uint64_t page = vm_kernel_page_size;
 
@@ -382,6 +407,25 @@ bool memory(Memory &out) {
     }
     return true;
 }
+
+namespace {
+
+// Machine-wide traffic is what crosses a physical link. Virtual interfaces carry the same bytes a
+// second time: a VPN tunnel (utun*, ipsec*, any point-to-point link) wraps packets that also leave
+// through en*, a bridge forwards its members' frames, and AirDrop/Continuity links (awdl0, llw0)
+// and the personal hotspot (ap*) are peers of the Wi-Fi radio, not separate uplinks. Counting them
+// would show VPN traffic twice. Loopback never leaves the machine.
+bool counts_toward_machine_traffic(int flags, unsigned index) {
+    if (flags & (IFF_LOOPBACK | IFF_POINTOPOINT)) return false;
+    char name[IF_NAMESIZE] = {};
+    if (!if_indextoname(index, name)) return true;  // unnamed: nothing says it is virtual
+    static const char *const kVirtualPrefixes[] = {"utun", "ipsec", "bridge", "awdl", "llw", "ap"};
+    for (const char *prefix : kVirtualPrefixes)
+        if (std::strncmp(name, prefix, std::strlen(prefix)) == 0) return false;
+    return true;
+}
+
+}  // namespace
 
 bool io_counters(IoCounters &out) {
     out = {};
@@ -416,7 +460,7 @@ bool io_counters(IoCounters &out) {
                 if (header->ifm_msglen == 0) break;
                 if (header->ifm_type == RTM_IFINFO2) {
                     auto info = reinterpret_cast<const if_msghdr2 *>(header);
-                    if (!(info->ifm_flags & IFF_LOOPBACK)) {
+                    if (counts_toward_machine_traffic(info->ifm_flags, info->ifm_index)) {
                         out.net_rx += info->ifm_data.ifi_ibytes;
                         out.net_tx += info->ifm_data.ifi_obytes;
                     }

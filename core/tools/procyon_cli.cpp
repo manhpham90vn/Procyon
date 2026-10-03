@@ -1,7 +1,9 @@
 // procyon-cli: exercises the C ABI without a UI.
 //   procyon-cli [samples] [interval_ms] [filter]
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <string>
@@ -20,6 +22,13 @@ static double cpu_seconds() {
     return usage.ru_utime.tv_sec + usage.ru_stime.tv_sec + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
 }
 
+// Unknown values are -1 in the ABI: print them as "-", never as a number.
+static const char *rate_text(double value, const char *format, char *buffer, size_t capacity) {
+    if (value < 0) return "-";
+    (void)std::snprintf(buffer, capacity, format, value);
+    return buffer;
+}
+
 int main(int argc, char **argv) {
     const int samples = argc > 1 ? std::atoi(argv[1]) : 3;
     const int interval_ms = argc > 2 ? std::atoi(argv[2]) : 1000;
@@ -33,18 +42,43 @@ int main(int argc, char **argv) {
 
     pc_monitor *monitor = pc_monitor_create();
 
-    // PROCYON_HELPER=/path/to/procyon-helper: spawn it (run the CLI with sudo for real root access).
+    // PROCYON_HELPER=/path/to/procyon-helper: spawn it. Run the CLI with sudo for real root access:
+    // the helper then starts as root, and the CLI itself goes back to being the invoking user
+    // (SUDO_UID), the user the helper serves. The helper refuses to serve root.
+    std::string socket_directory, socket_path;
     if (const char *helper = std::getenv("PROCYON_HELPER")) {
-        std::string socket = "/tmp/procyon-cli-" + std::to_string(getpid()) + ".sock";
-        std::string parent = std::to_string(getpid()), uid = std::to_string(getuid());
-        const char *args[] = {helper,         "--socket", socket.c_str(), "--parent",
-                              parent.c_str(), "--uid",    uid.c_str(),    nullptr};
+        uid_t user = getuid();
+        gid_t group = getgid();
+        if (user == 0) {
+            const char *sudo_uid = std::getenv("SUDO_UID");
+            const char *sudo_gid = std::getenv("SUDO_GID");
+            if (sudo_uid && sudo_gid) {
+                user = static_cast<uid_t>(std::atoi(sudo_uid));
+                group = static_cast<gid_t>(std::atoi(sudo_gid));
+            }
+        }
+        // The helper insists on a socket directory owned by the user and writable by nobody else.
+        const char *tmp = std::getenv("TMPDIR");
+        socket_directory = tmp && *tmp ? tmp : "/tmp";
+        if (socket_directory.back() != '/') socket_directory += '/';
+        socket_directory += "procyon-cli-" + std::to_string(getpid());
+        bool ready = mkdir(socket_directory.c_str(), 0700) == 0;
+        if (ready && getuid() == 0 && user != 0) {
+            const int dir = open(socket_directory.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+            ready = dir >= 0 && fchown(dir, user, group) == 0;
+            if (dir >= 0) close(dir);
+        }
+        socket_path = socket_directory + "/helper.sock";
+        std::string parent = std::to_string(getpid()), uid = std::to_string(user);
+        const char *args[] = {helper,         "--socket", socket_path.c_str(), "--parent",
+                              parent.c_str(), "--uid",    uid.c_str(),         nullptr};
         pid_t child = 0;
-        posix_spawn(&child, helper, nullptr, nullptr, const_cast<char *const *>(args), nullptr);
+        if (ready) posix_spawn(&child, helper, nullptr, nullptr, const_cast<char *const *>(args), nullptr);
+        if (getuid() == 0 && user != 0 && (setgid(group) != 0 || setuid(user) != 0)) ready = false;
         bool attached = false;
-        for (int i = 0; i < 50 && !attached; ++i) {
+        for (int i = 0; i < 50 && ready && !attached; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            attached = pc_monitor_attach_helper(monitor, socket.c_str());
+            attached = pc_monitor_attach_helper(monitor, socket_path.c_str());
         }
         std::printf("helper %s\n", attached ? "attached" : "FAILED to attach");
     }
@@ -122,14 +156,22 @@ int main(int argc, char **argv) {
             const pc_row &row = rows[r];
             const char *name = row.process_index >= 0 ? snap->processes[row.process_index].name : row.group_name;
             if (row.depth > 1) continue;
-            std::printf(
-                "%*s%-40s pid %-6d cpu %6.1f%% gpu %5.1f%% mem %8.1f MB  net rx %9.0f tx %9.0f B/s  (%d procs)\n",
-                row.depth * 2, "", name,
-                row.process_index >= 0 ? snap->processes[row.process_index].pid : row.group_pid, row.cpu_percent,
-                row.gpu_percent, row.memory_bytes / 1048576.0, row.net_rx_bps, row.net_tx_bps, row.process_count);
+            char cpu[32], gpu[32], mem[32], rx[32], tx[32];
+            std::printf("%*s%-40s pid %-6d cpu %6s%% gpu %5s%% mem %8s MB  net rx %9s tx %9s B/s  (%d procs)\n",
+                        row.depth * 2, "", name,
+                        row.process_index >= 0 ? snap->processes[row.process_index].pid : row.group_pid,
+                        rate_text(row.cpu_percent, "%.1f", cpu, sizeof(cpu)),
+                        rate_text(row.gpu_percent, "%.1f", gpu, sizeof(gpu)),
+                        rate_text(row.memory_bytes / 1048576.0, "%.1f", mem, sizeof(mem)),
+                        rate_text(row.net_rx_bps, "%.0f", rx, sizeof(rx)),
+                        rate_text(row.net_tx_bps, "%.0f", tx, sizeof(tx)), row.process_count);
         }
     }
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
     std::printf("\ncore overhead: %.2f%% of one core\n", (cpu_seconds() - cpu_start) / wall * 100);
     pc_monitor_destroy(monitor);
+    if (!socket_directory.empty()) {  // the helper exits when its client goes away
+        unlink(socket_path.c_str());
+        rmdir(socket_directory.c_str());
+    }
 }

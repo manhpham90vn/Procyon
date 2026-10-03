@@ -10,6 +10,18 @@
 
 namespace procyon {
 
+// Ticks spent per state between two samples of one core.
+struct TickDelta {
+    uint64_t user = 0, system = 0, idle = 0, nice = 0;
+};
+
+// The kernel's tick counters are 32-bit and wrap: subtract in 32 bits so a wrapped counter still
+// yields the small delta it stands for, then widen for the sums.
+inline TickDelta tick_delta(const platform::CpuTicks &now, const platform::CpuTicks &before) {
+    return {static_cast<uint32_t>(now.user - before.user), static_cast<uint32_t>(now.system - before.system),
+            static_cast<uint32_t>(now.idle - before.idle), static_cast<uint32_t>(now.nice - before.nice)};
+}
+
 struct ProcessCounters {
     uint64_t cpu_time_ns = 0;
     uint64_t disk_read = 0;

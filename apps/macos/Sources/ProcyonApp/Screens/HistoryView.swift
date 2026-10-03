@@ -7,7 +7,7 @@ import SwiftUI
 struct HistoryView: View {
     @Environment(SystemStore.self) private var store
     @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system
-    @State private var range: Range = .hour
+    @State private var range: TimeRange = .hour
     @State private var metric: HistoryMetric = .cpu
     @State private var minutes: [MachineMinute] = []
     @State private var apps: [AppUsage] = []
@@ -16,7 +16,7 @@ struct HistoryView: View {
     @State private var size: Int64 = 0
     @State private var confirmClear = false
 
-    enum Range: Int, CaseIterable, Identifiable {
+    enum TimeRange: Int, CaseIterable, Identifiable {
         case hour = 3600, sixHours = 21600, day = 86400
         var id: Int { rawValue }
         var title: String {
@@ -33,7 +33,7 @@ struct HistoryView: View {
         ScreenScroll {
             PageHeader("History", subtitle: "The last 24 hours, minute by minute") {
                 Picker("Range", selection: $range) {
-                    ForEach(Range.allCases) { Text($0.title).tag($0) }
+                    ForEach(TimeRange.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -107,7 +107,7 @@ struct HistoryView: View {
     private struct AppQuery: Hashable {
         let metric: HistoryMetric
         let minute: Int?
-        let range: Range
+        let range: TimeRange
         let loaded: Int
     }
 
@@ -399,10 +399,7 @@ struct AppIconView: View {
 
     var body: some View {
         if let bundlePath {
-            Image(nsImage: IconCache.icon(for: bundlePath))
-                .resizable()
-                .interpolation(.high)
-                .frame(width: size, height: size)
+            Image(nsImage: IconCache.icon(for: bundlePath, size: size)).frame(width: size, height: size)
         } else {
             RoundedRectangle(cornerRadius: size * 0.25, style: .continuous)
                 .fill(Tokens.Palette.surfaceSunken)

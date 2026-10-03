@@ -105,7 +105,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 | Spec item | Status |
 | --- | --- |
-| History: every resource per app, look back at peaks | Done for 24 hours (the free tier in the spec): one row a minute for the machine (CPU average and peak, memory, disk, network, GPU, temperature, app power) and one per busy app (the union of each tick's top-10 lists), in SQLite under `~/Library/Application Support/Procyon`, older minutes deleted as new ones arrive (a few MB). **History** charts any metric over 1, 6 or 24 hours; clicking the chart or a peak lists the busiest apps of that minute. Per-app rows are only written while processes are sampled (window open, or an app alert on). Recording can be switched off or cleared. |
+| History: every resource per app, look back at peaks | Done for 24 hours (the spec's lower bound; longer retention is open): one row a minute for the machine (CPU average and peak, memory, disk, network, GPU, temperature, app power) and one per busy app (the union of each tick's top-10 lists), in SQLite under `~/Library/Application Support/Procyon`, older minutes deleted as new ones arrive (a few MB). **History** charts any metric over 1, 6 or 24 hours; clicking the chart or a peak lists the busiest apps of that minute. Per-app rows are only written while processes are sampled (window open, or an app alert on). Recording can be switched off or cleared. |
 | Energy tab like Activity Monitor | Done: the **Power** column in Processes and the **Energy** screen (apps now, energy per app since launch, total app power chart) from `ri_energy_nj` (`proc_pid_rusage` v6, no root): measured on Apple Silicon, modelled on Intel. Activity Monitor's 8-hour average comes from History once there is per-app energy for that long. |
 | Deep analysis: files held, ports, connections | Done: **Files & Ports** lists listening ports (and whether they're reachable from the network), connections and open files, with **Who Is Using…** for a file, folder or disk; Get Info has Files and Network tabs. Other users' processes go through the helper. Closing another process's connection isn't possible on macOS (no public API), so it isn't offered. |
 | Sensors: temperatures, fans | CPU, SSD and battery temperatures since P1. Fan speeds: not yet (SMC). |
@@ -133,7 +133,8 @@ protocol serve two modes:
 2. launchd owns `/var/run/dev.procyon.helper.sock` and starts `procyon-helper --daemon` on the first
    connection. The helper exits after a minute without clients.
 3. Each client must be `dev.procyon.app` signed by the helper's own team (checked via its audit token) and run
-   by an administrator. **Remove Administrator Helper** in the ⌘K palette unregisters it.
+   by an administrator. **Settings → Full access** (and the ⌘K palette) can turn full access off for the session or
+   **Remove Administrator Helper**, which unregisters it.
 
 **Ad-hoc builds (development): password prompt per launch.** The plist is only embedded when
 `SIGN_IDENTITY` is a real identity, because `SMAppService` needs one.
@@ -150,6 +151,17 @@ process details, list the OS-managed startup items, send signals, change priorit
 validated labels in the system domain; it refuses pids 0 and 1 and its client.
 
 Test without the UI: `sudo PROCYON_HELPER=$PWD/build/core/procyon-helper build/core/procyon-cli 2`.
+
+**Threat model.** In daemon mode, any administrator who runs the signed Procyon and approved it once in Login Items
+gets, without a password, root-level signal/suspend/renice on every pid above 1, `launchctl kickstart/kill/enable/disable`
+on any system-domain label (including Apple daemons not under SIP) and read access to every process's command line
+and environment. That is about the power of a restricted passwordless `sudo`, gated by the code-signature and
+admin-group checks; it is acceptable because an administrator can `sudo` anyway, but it is why the helper refuses to
+run unsigned and why every new helper verb must stay a fixed, validated action rather than a general command. The
+protected-process policy (`PC_PROC_PROTECTED`: kernel, launchd, Procyon itself) is enforced in the core on the client
+side; the helper only refuses pids 0, 1, itself and its client. Private frameworks (`NetworkStatistics`, IOAccelerator
+registry keys, `sfltool dumpbtm`) are probed at runtime and reported through capability flags; when one disappears in
+a macOS release the feature hides instead of showing wrong numbers.
 
 ### Known limits
 - English only: the UI and every text in it, by design.

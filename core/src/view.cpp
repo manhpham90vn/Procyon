@@ -1,8 +1,9 @@
 #include "view.hpp"
 
 #include <algorithm>
-#include <cctype>
+#include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <string_view>
 #include <unordered_map>
 
@@ -17,22 +18,122 @@ struct Node {
     std::vector<size_t> children;
 };
 
-std::string lowercase(std::string_view text) {
-    std::string out(text);
-    for (char &c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return out;
+// ---- case folding: the filter is UTF-8 and case-insensitive beyond ASCII ----
+
+// Decodes one UTF-8 sequence at `at`; returns its length (1 for a stray byte, reported as-is so it
+// still compares byte for byte).
+size_t decode_utf8(std::string_view text, size_t at, char32_t &out) {
+    const auto byte = [&](size_t i) { return static_cast<unsigned char>(text[i]); };
+    const unsigned char lead = byte(at);
+    size_t length = 0;
+    if (lead < 0x80) {
+        out = lead;
+        return 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+        length = 2;
+        out = lead & 0x1F;
+    } else if ((lead & 0xF0) == 0xE0) {
+        length = 3;
+        out = lead & 0x0F;
+    } else if ((lead & 0xF8) == 0xF0) {
+        length = 4;
+        out = lead & 0x07;
+    } else {
+        out = lead;
+        return 1;
+    }
+    if (at + length > text.size()) {
+        out = lead;
+        return 1;
+    }
+    for (size_t i = 1; i < length; ++i) {
+        const unsigned char next = byte(at + i);
+        if ((next & 0xC0) != 0x80) {
+            out = lead;
+            return 1;
+        }
+        out = (out << 6) | (next & 0x3F);
+    }
+    return length;
 }
 
-bool contains(std::string_view haystack, const std::string &needle_lower) {
-    if (needle_lower.empty()) return true;
-    return lowercase(haystack).find(needle_lower) != std::string::npos;
+void append_utf8(std::string &out, char32_t cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
 }
 
-bool matches(const pc_process &p, const std::string &needle) {
-    if (needle.empty()) return true;
-    return contains(p.name, needle) || contains(p.app_name, needle) || contains(p.user, needle) ||
-           std::to_string(p.pid).find(needle) != std::string::npos;
+// Lowercases one code point. towlower covers whatever the C locale knows; the fallback folds the
+// scripts process and user names are realistically written in (Latin-1, Latin Extended-A, Greek,
+// Cyrillic) when the locale is plain "C", which only knows ASCII.
+char32_t fold(char32_t cp) {
+    if (cp < 0x80) return cp >= 'A' && cp <= 'Z' ? cp + 32 : cp;
+    const auto lowered = static_cast<char32_t>(std::towlower(static_cast<wint_t>(cp)));
+    if (lowered != cp) return lowered;
+    if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return cp + 0x20;  // À-Þ
+    if (cp == 0x178) return 0xFF;                                  // Ÿ -> ÿ
+    if (cp >= 0x100 && cp <= 0x17F && cp != 0x130 && cp != 0x131 && cp != 0x138 && cp != 0x149 && cp != 0x17F) {
+        // Latin Extended-A alternates upper/lower, even/odd, except in Ĺ-Ň (0x139-0x148) and Ź-Ž
+        // (0x179-0x17E) where the pairs are odd/even.
+        const bool odd_upper = (cp >= 0x139 && cp <= 0x148) || (cp >= 0x179 && cp <= 0x17E);
+        return (cp % 2 == 0) != odd_upper ? cp + 1 : cp;
+    }
+    if (cp >= 0x391 && cp <= 0x3A9 && cp != 0x3A2) return cp + 0x20;  // Greek Α-Ω
+    if (cp >= 0x410 && cp <= 0x42F) return cp + 0x20;                 // Cyrillic А-Я
+    if (cp >= 0x400 && cp <= 0x40F) return cp + 0x50;                 // Cyrillic Ѐ-Џ
+    return cp;
 }
+
+void lowercase_into(std::string_view text, std::string &out) {
+    out.clear();
+    for (size_t at = 0; at < text.size();) {
+        char32_t cp = 0;
+        const size_t length = decode_utf8(text, at, cp);
+        if (length == 1 && cp >= 0x80)
+            out += text[at];  // not UTF-8: keep the byte
+        else
+            append_utf8(out, fold(cp));
+        at += length;
+    }
+}
+
+// The lowercased filter plus a reusable buffer, so matching a field allocates nothing in steady state.
+class Matcher {
+public:
+    explicit Matcher(const char *filter) {
+        if (filter) lowercase_into(filter, needle_);
+    }
+    bool empty() const { return needle_.empty(); }
+
+    bool contains(std::string_view haystack) {
+        if (needle_.empty()) return true;
+        lowercase_into(haystack, buffer_);
+        return buffer_.find(needle_) != std::string::npos;
+    }
+
+    bool matches(const pc_process &p) {
+        if (needle_.empty()) return true;
+        char pid[16];
+        (void)std::snprintf(pid, sizeof(pid), "%d", p.pid);
+        return contains(p.name) || contains(p.app_name) || contains(p.user) || std::strstr(pid, needle_.c_str());
+    }
+
+private:
+    std::string needle_;
+    std::string buffer_;
+};
 
 Node process_node(const std::vector<pc_process> &processes, size_t index) {
     const pc_process &p = processes[index];
@@ -115,8 +216,8 @@ void emit(std::vector<Node> &nodes, size_t index, int32_t parent_row, int32_t de
     for (size_t child : node.children) emit(nodes, child, row_index, depth + 1, cmp, rows);
 }
 
-void build_grouped(const std::vector<pc_process> &processes, const std::string &needle, View &view,
-                   std::vector<Node> &nodes, std::vector<size_t> &roots) {
+void build_grouped(const std::vector<pc_process> &processes, Matcher &filter, View &view, std::vector<Node> &nodes,
+                   std::vector<size_t> &roots) {
     std::unordered_map<std::string_view, std::vector<size_t>> groups;
     std::vector<std::string_view> order;
     for (size_t i = 0; i < processes.size(); ++i) {
@@ -129,10 +230,10 @@ void build_grouped(const std::vector<pc_process> &processes, const std::string &
     for (std::string_view id : order) {
         const auto &all = groups[id];
         const pc_process &first = processes[all.front()];
-        const bool group_matches = contains(first.app_name, needle);
+        const bool group_matches = filter.contains(first.app_name);
         std::vector<size_t> members;
         for (size_t i : all)
-            if (group_matches || matches(processes[i], needle)) members.push_back(i);
+            if (group_matches || filter.matches(processes[i])) members.push_back(i);
         if (members.empty()) continue;
 
         if (all.size() == 1) {
@@ -169,6 +270,9 @@ void build_grouped(const std::vector<pc_process> &processes, const std::string &
         group.row.net_rx_bps = group.row.net_tx_bps = group.row.gpu_percent = group.row.power_watts = -1;
         group.row.memory_bytes = -1;
         group.row.threads = -1;
+        // Totals cover every member, not only the ones the filter lets through below: the group
+        // row is the app's real footprint, and a filter narrows what is listed under it, not what
+        // the app uses. process_count follows the same rule.
         for (size_t i : all) {
             const pc_process &p = processes[i];
             accumulate(group.row.cpu_percent, p.cpu_percent);
@@ -193,7 +297,7 @@ void build_grouped(const std::vector<pc_process> &processes, const std::string &
     }
 }
 
-void build_tree(const std::vector<pc_process> &processes, const std::string &needle, std::vector<Node> &nodes,
+void build_tree(const std::vector<pc_process> &processes, Matcher &filter, std::vector<Node> &nodes,
                 std::vector<size_t> &roots) {
     const size_t count = processes.size();
     std::unordered_map<int32_t, size_t> by_pid;
@@ -206,10 +310,10 @@ void build_tree(const std::vector<pc_process> &processes, const std::string &nee
     }
 
     // A node is shown if it matches or has a matching descendant.
-    std::vector<char> included(count, needle.empty());
-    if (!needle.empty()) {
+    std::vector<char> included(count, filter.empty());
+    if (!filter.empty()) {
         for (size_t i = 0; i < count; ++i) {
-            if (!matches(processes[i], needle)) continue;
+            if (!filter.matches(processes[i])) continue;
             long current = static_cast<long>(i);
             for (size_t steps = 0; current >= 0 && !included[current] && steps <= count; ++steps) {
                 included[current] = 1;
@@ -239,18 +343,18 @@ void build_tree(const std::vector<pc_process> &processes, const std::string &nee
 void build_view(const std::vector<pc_process> &processes, const pc_view_query &query, View &view) {
     view.rows.clear();
     view.strings.clear();
-    const std::string needle = query.filter ? lowercase(query.filter) : std::string();
+    Matcher filter(query.filter);
 
     std::vector<Node> nodes;
     std::vector<size_t> roots;
     nodes.reserve(processes.size() + 64);
 
     switch (query.mode) {
-        case PC_VIEW_GROUPED: build_grouped(processes, needle, view, nodes, roots); break;
-        case PC_VIEW_TREE: build_tree(processes, needle, nodes, roots); break;
+        case PC_VIEW_GROUPED: build_grouped(processes, filter, view, nodes, roots); break;
+        case PC_VIEW_TREE: build_tree(processes, filter, nodes, roots); break;
         default:
             for (size_t i = 0; i < processes.size(); ++i) {
-                if (!matches(processes[i], needle)) continue;
+                if (!filter.matches(processes[i])) continue;
                 roots.push_back(nodes.size());
                 nodes.push_back(process_node(processes, i));
             }

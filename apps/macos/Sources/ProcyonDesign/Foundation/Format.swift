@@ -4,16 +4,31 @@ import Foundation
 public enum Format {
     public static let unavailable = "—"
 
+    /// Numbers follow the locale (decimal separator, percent sign placement); no grouping, so a value
+    /// never grows a separator as it crosses 1000.
+    private static func number(fractionDigits: Int) -> FloatingPointFormatStyle<Double> {
+        .number.precision(.fractionLength(fractionDigits)).grouping(.never)
+    }
+
+    private static func percentStyle(fractionDigits: Int) -> FloatingPointFormatStyle<Double>.Percent {
+        .percent.precision(.fractionLength(fractionDigits)).grouping(.never)
+    }
+
     public static func percent(_ fraction: Double?, digits: Int = 0) -> String {
-        guard let fraction, fraction.isFinite else { return unavailable }
-        return String(format: "%.\(digits)f%%", fraction * 100)
+        guard let fraction, fraction.isFinite, fraction >= 0 else { return unavailable }
+        return fraction.formatted(percentStyle(fractionDigits: digits))
+    }
+
+    /// Percent split into number and unit for large typographic layouts; unknown is `—` with no unit.
+    public static func percentParts(_ fraction: Double?, digits: Int = 0) -> (value: String, unit: String) {
+        guard let fraction, fraction.isFinite, fraction >= 0 else { return (unavailable, "") }
+        return ((fraction * 100).formatted(number(fractionDigits: digits)), "%")
     }
 
     /// CPU percent where 100 = one full core.
     public static func cpu(_ percent: Double?) -> String {
-        guard let percent, percent >= 0 else { return unavailable }
-        if percent >= 100 { return String(format: "%.0f%%", percent) }
-        return String(format: "%.1f%%", percent)
+        guard let percent, percent.isFinite, percent >= 0 else { return unavailable }
+        return (percent / 100).formatted(percentStyle(fractionDigits: percent >= 100 ? 0 : 1))
     }
 
     public static func bytes<T: BinaryInteger>(_ value: T?) -> String {
@@ -30,13 +45,13 @@ public enum Format {
             unit += 1
         }
         if unit == 0 { return "\(Int(amount)) B" }
-        return String(format: amount >= 100 ? "%.0f %@" : amount >= 10 ? "%.1f %@" : "%.2f %@", amount, units[unit])
+        let digits = amount >= 100 ? 0 : amount >= 10 ? 1 : 2
+        return "\(amount.formatted(number(fractionDigits: digits))) \(units[unit])"
     }
 
     /// Bytes per second.
     public static func rate(_ value: Double?) -> String {
-        guard let value, value >= 0 else { return unavailable }
-        if value < 1 { return "0 KB/s" }
+        guard let value, value.isFinite, value >= 0 else { return unavailable }
         if value < 1024 { return "\(Int(value)) B/s" }
         return bytes(value) + "/s"
     }
@@ -84,18 +99,19 @@ public enum Format {
     /// Watts with one decimal.
     public static func watts(_ value: Double?) -> String {
         guard let value, value.isFinite else { return unavailable }
-        return String(format: "%.1f W", value)
+        return "\(value.formatted(number(fractionDigits: 1))) W"
     }
 
     /// Power drawn by an app: small values keep two decimals ("0.04 W").
     public static func power(_ watts: Double?) -> String {
         guard let watts, watts.isFinite, watts >= 0 else { return unavailable }
         if watts < 0.005 { return "0 W" }
-        return String(format: watts < 1 ? "%.2f W" : watts < 10 ? "%.1f W" : "%.0f W", watts)
+        let digits = watts < 1 ? 2 : watts < 10 ? 1 : 0
+        return "\(watts.formatted(number(fractionDigits: digits))) W"
     }
 
     public static func interval(_ seconds: Double) -> String {
-        seconds < 1 ? String(format: "%.1fs", seconds) : String(format: "%.0fs", seconds)
+        "\(seconds.formatted(number(fractionDigits: seconds < 1 ? 1 : 0)))s"
     }
 }
 

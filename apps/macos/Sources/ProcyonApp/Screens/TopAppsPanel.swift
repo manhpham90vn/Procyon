@@ -2,9 +2,20 @@ import ProcyonDesign
 import ProcyonKit
 import SwiftUI
 
+/// Switches to Processes with the row revealed and selected; installed once by `RootView`.
+/// Wrapped so the environment value is Equatable: a bare closure would invalidate every
+/// dependent view on each update.
+struct ShowInProcesses: Equatable {
+    let action: (ProcessRow) -> Void
+
+    func callAsFunction(_ row: ProcessRow) { action(row) }
+
+    // Installed once for the window's lifetime, so two values never differ in practice.
+    static func == (lhs: Self, rhs: Self) -> Bool { true }
+}
+
 extension EnvironmentValues {
-    /// Switches to Processes with the row revealed and selected; installed by `RootView`.
-    @Entry var showInProcesses: (ProcessRow) -> Void = { _ in }
+    @Entry var showInProcesses = ShowInProcesses { _ in }
 }
 
 /// The busiest apps for one metric. Clicking an app reveals it in Processes.
@@ -116,20 +127,18 @@ struct TopAppRates: View {
     }
 }
 
-/// Plain row with a soft highlight on hover and press, so it reads as clickable.
+/// Plain row with a soft highlight on press, so it reads as clickable.
 private struct TopAppRowStyle: ButtonStyle {
-    @State private var hovering = false
-
     func makeBody(configuration: Configuration) -> some View {
+        // No onHover here, as in the sidebar: the rows are rebuilt on every sample, and hover
+        // tracking areas rebuilt that often miss the mouse-exit event and leave a stale highlight.
         configuration.label
             .padding(.horizontal, Tokens.Space.sm)
             .padding(.vertical, Tokens.Space.xs + 1)
             .background(
-                Tokens.Palette.textPrimary.opacity(configuration.isPressed ? 0.1 : hovering ? 0.05 : 0),
+                Tokens.Palette.textPrimary.opacity(configuration.isPressed ? 0.1 : 0),
                 in: RoundedRectangle(cornerRadius: Tokens.Radius.sm, style: .continuous)
             )
             .padding(.horizontal, -Tokens.Space.sm)
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: Tokens.Motion.fast), value: hovering)
     }
 }

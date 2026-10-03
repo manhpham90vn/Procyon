@@ -71,10 +71,7 @@ struct ProcessIcon: View {
 
     var body: some View {
         if let bundle = row.bundlePath {
-            Image(nsImage: IconCache.icon(for: bundle))
-                .resizable()
-                .interpolation(.high)
-                .frame(width: size, height: size)
+            Image(nsImage: IconCache.icon(for: bundle, size: size)).frame(width: size, height: size)
         } else {
             RoundedRectangle(cornerRadius: size * 0.25, style: .continuous)
                 .fill(Tokens.Palette.surfaceSunken)

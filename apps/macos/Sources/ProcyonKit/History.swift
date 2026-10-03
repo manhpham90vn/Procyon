@@ -16,6 +16,9 @@ public struct MachineMinute: Sendable, Hashable, Identifiable {
     public var gpu: Double?
     public var cpuTemperature: Double?
     public var appPower: Double?
+    /// Whether per-process data was sampled during the minute (false while only the menu bar was
+    /// showing): minutes without it don't count against apps' averages.
+    public var processesSampled = true
 
     public var id: Int { minute }
     public var date: Date { Date(timeIntervalSince1970: TimeInterval(minute)) }
@@ -92,7 +95,8 @@ public struct HistoryRecorder: Sendable {
             powerSamples += 1
         }
 
-        guard !busiest.isEmpty else { return finished }
+        // A sample with processes but no busy app still counts: every app used nothing then.
+        guard sample.processCount > 0 || !busiest.isEmpty else { return finished }
         appSamples += 1
         var seen = Set<String>()
         for row in busiest where row.depth == 0 && seen.insert(row.appID).inserted {
@@ -108,6 +112,10 @@ public struct HistoryRecorder: Sendable {
         return finished
     }
 
+    /// The minute in progress so far (averaged over its samples), to write when sampling stops or the
+    /// app quits: a later sample of the same minute replaces it. nil before the first sample.
+    public func flush() -> MinuteRecord? { record() }
+
     private mutating func reset(_ minute: Int) {
         self.minute = minute
         machine = MachineMinute(minute: minute)
@@ -122,6 +130,7 @@ public struct HistoryRecorder: Sendable {
     private func record() -> MinuteRecord? {
         guard samples > 0 else { return nil }
         var m = machine
+        m.processesSampled = appSamples > 0
         let n = Double(samples)
         m.cpu /= n
         m.memory /= n
@@ -183,12 +192,30 @@ public actor HistoryDatabase {
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS machine (
                 minute INTEGER PRIMARY KEY, cpu REAL, cpu_peak REAL, memory REAL, disk_read REAL, disk_write REAL,
-                net_rx REAL, net_tx REAL, gpu REAL, cpu_temp REAL, power REAL);
+                net_rx REAL, net_tx REAL, gpu REAL, cpu_temp REAL, power REAL, processes_sampled INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS apps (
                 minute INTEGER, app_id TEXT, name TEXT, cpu REAL, memory REAL, disk REAL, network REAL, gpu REAL,
                 power REAL, PRIMARY KEY (minute, app_id)) WITHOUT ROWID;
             """)
+        migrate()
         return handle
+    }
+
+    /// Brings a database written by an older version up to the current schema.
+    private func migrate() {
+        // v2: whether processes were sampled; before, every minute was treated as if they were.
+        if !columns(of: "machine").contains("processes_sampled") {
+            execute("ALTER TABLE machine ADD COLUMN processes_sampled INTEGER NOT NULL DEFAULT 1")
+        }
+    }
+
+    private func columns(of table: String) -> Set<String> {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var names = Set<String>()
+        while sqlite3_step(statement) == SQLITE_ROW { names.insert(text(statement, 1)) }
+        return names
     }
 
     @discardableResult
@@ -207,7 +234,13 @@ public actor HistoryDatabase {
         guard open() != nil else { return }
         execute("BEGIN")
         let m = record.machine
-        if let s = prepare("INSERT OR REPLACE INTO machine VALUES (?,?,?,?,?,?,?,?,?,?,?)") {
+        if let s = prepare(
+            """
+            INSERT OR REPLACE INTO machine
+                (minute, cpu, cpu_peak, memory, disk_read, disk_write, net_rx, net_tx, gpu, cpu_temp, power, processes_sampled)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """)
+        {
             sqlite3_bind_int64(s, 1, Int64(m.minute))
             for (index, value) in [
                 m.cpu, m.cpuPeak, m.memory, m.diskRead, m.diskWrite, m.networkReceive, m.networkSend,
@@ -217,6 +250,7 @@ public actor HistoryDatabase {
             for (index, value) in [m.gpu, m.cpuTemperature, m.appPower].enumerated() {
                 if let value { sqlite3_bind_double(s, Int32(index + 9), value) } else { sqlite3_bind_null(s, Int32(index + 9)) }
             }
+            sqlite3_bind_int64(s, 12, m.processesSampled ? 1 : 0)
             sqlite3_step(s)
             sqlite3_finalize(s)
         }
@@ -243,7 +277,13 @@ public actor HistoryDatabase {
 
     /// Minutes from `start` (unix seconds) on, oldest first.
     public func machine(since start: Int) -> [MachineMinute] {
-        guard let s = prepare("SELECT * FROM machine WHERE minute >= ? ORDER BY minute") else { return [] }
+        guard
+            let s = prepare(
+                """
+                SELECT minute, cpu, cpu_peak, memory, disk_read, disk_write, net_rx, net_tx, gpu, cpu_temp, power,
+                    processes_sampled FROM machine WHERE minute >= ? ORDER BY minute
+                """)
+        else { return [] }
         defer { sqlite3_finalize(s) }
         sqlite3_bind_int64(s, 1, Int64(start))
         var result: [MachineMinute] = []
@@ -259,16 +299,18 @@ public actor HistoryDatabase {
             m.gpu = optional(s, 8)
             m.cpuTemperature = optional(s, 9)
             m.appPower = optional(s, 10)
+            m.processesSampled = sqlite3_column_int64(s, 11) != 0
             result.append(m)
         }
         return result
     }
 
-    /// Each app's average over the recorded minutes in `start ..< end` (a minute it wasn't busy
-    /// counts as zero), biggest first by `order`.
+    /// Each app's average over the minutes in `start ..< end` during which processes were sampled (a
+    /// sampled minute it wasn't busy counts as zero; minutes without process data don't count), biggest
+    /// first by `order`.
     public func apps(from start: Int, to end: Int, orderBy order: AppUsageOrder, limit: Int = 10) -> [AppUsage] {
         var minutes = 1
-        if let count = prepare("SELECT COUNT(*) FROM machine WHERE minute >= ? AND minute < ?") {
+        if let count = prepare("SELECT COUNT(*) FROM machine WHERE minute >= ? AND minute < ? AND processes_sampled != 0") {
             sqlite3_bind_int64(count, 1, Int64(start))
             sqlite3_bind_int64(count, 2, Int64(end))
             if sqlite3_step(count) == SQLITE_ROW { minutes = max(Int(sqlite3_column_int64(count, 0)), 1) }

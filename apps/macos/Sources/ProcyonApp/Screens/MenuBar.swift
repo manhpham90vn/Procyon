@@ -60,6 +60,7 @@ struct MenuBarLabel: View {
             Image(systemName: "gauge.with.dots.needle.33percent")
         } else if let image = Self.render(columns) {
             Image(nsImage: image)
+                .accessibilityLabel(columns.map(\.spoken).joined(separator: ", "))
         }
     }
 
@@ -70,6 +71,19 @@ struct MenuBarLabel: View {
         /// item never changes size: a status item resizing every sample (network rates, mostly)
         /// swallowed clicks and the panel did not open.
         var widest = "100%"
+        /// What a screen reader says for the column, e.g. "Memory 62%" (the abbreviation spelled out).
+        var spoken: String
+
+        init(top: String, bottom: String, widest: String = "100%", spokenName: String? = nil) {
+            self.init(top: top, bottom: bottom, widest: widest, spoken: "\(spokenName ?? top) \(bottom)")
+        }
+
+        init(top: String, bottom: String, widest: String = "100%", spoken: String) {
+            self.top = top
+            self.bottom = bottom
+            self.widest = widest
+            self.spoken = spoken
+        }
     }
 
     private var columns: [Column] {
@@ -78,20 +92,24 @@ struct MenuBarLabel: View {
         guard store.hasSample else { return [] }
         var columns: [Column] = []
         if cpu { columns.append(Column(top: "CPU", bottom: Format.percent(s.cpuUsage))) }
-        if memory { columns.append(Column(top: "MEM", bottom: Format.percent(s.memoryFraction))) }
+        if memory { columns.append(Column(top: "MEM", bottom: Format.percent(s.memoryFraction), spokenName: "Memory")) }
         if network {
             columns.append(
                 Column(
                     top: "↓\(Self.compact(s.networkReceiveRate))", bottom: "↑\(Self.compact(s.networkSendRate))",
-                    widest: "↓888M"))
+                    widest: "↓888M",
+                    spoken: "Network down \(Format.rate(s.networkReceiveRate)), up \(Format.rate(s.networkSendRate))"))
         }
         if gpu, caps.contains(.gpu) { columns.append(Column(top: "GPU", bottom: Format.percent(s.gpuUsage))) }
         if temperature, caps.contains(.temperature) {
             columns.append(
                 Column(
-                    top: "TEMP", bottom: Format.temperature(s.cpuTemperature, unit: temperatureUnit), widest: "188°F"))
+                    top: "TEMP", bottom: Format.temperature(s.cpuTemperature, unit: temperatureUnit), widest: "188°F",
+                    spokenName: "Temperature"))
         }
-        if battery, let level = store.battery?.level { columns.append(Column(top: "BAT", bottom: Format.percent(level))) }
+        if battery, let level = store.battery?.level {
+            columns.append(Column(top: "BAT", bottom: Format.percent(level), spokenName: "Battery"))
+        }
         return columns
     }
 

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "procyon/procyon.h"
@@ -35,8 +36,16 @@ struct RawProcess {
     std::string path;
 };
 
+// Per-core scheduler ticks as the kernel counts them: 32-bit, and they wrap (about once a year per
+// counter at 100 Hz). Deltas are taken modulo 2^32, see tick_delta in monitor.hpp.
 struct CpuTicks {
-    uint64_t user = 0, system = 0, idle = 0, nice = 0;
+    uint32_t user = 0, system = 0, idle = 0, nice = 0;
+};
+
+// Parent link of a live process: the cheap part of the process table, without any counters.
+struct ProcessParent {
+    int32_t pid = 0;
+    int32_t ppid = 0;
 };
 
 struct Memory {
@@ -96,6 +105,8 @@ struct PowerAssertion {
 uint32_t capabilities();
 bool system_info(pc_system_info &out);
 bool processes(std::vector<RawProcess> &out);
+// Every live process's pid and ppid, read fresh. Cheap enough to call before walking a tree.
+bool process_parents(std::vector<ProcessParent> &out);
 // Fills cpu/memory/disk/thread counters for one process; false when privileges are missing.
 bool read_counters(int32_t pid, RawProcess &out);
 int64_t start_time(int32_t pid);  // -1 when the process doesn't exist
@@ -135,6 +146,10 @@ void temperatures(double &cpu, double &disk);
 // (another user's, without privileges); what could be read is still returned.
 bool open_files(int32_t pid, std::vector<OpenFile> &out);
 bool connections(int32_t pid, std::vector<pc_connection> &out);
+// Whether a failed descriptor listing (`bytes` <= 0, `error` the errno) means the process has
+// descriptors we may not see, which makes a listing incomplete. A process that is gone, a zombie,
+// or one with nothing open simply has nothing to list. Exposed for tests.
+bool handles_denied(int bytes, int error);
 
 bool battery(pc_battery &out);
 std::vector<PowerAssertion> power_assertions();
@@ -145,8 +160,23 @@ std::vector<pc_startup_item> startup_items();
 // Open at Login and app background items of `user` (plus machine-wide ones). macOS shares the list
 // only with administrators: the helper calls this as root for the app's user.
 std::vector<pc_startup_item> managed_startup_items(uint32_t user);
-// The parsing half, on `sfltool dumpbtm` output (exposed for tests).
-std::vector<pc_startup_item> parse_managed_startup_items(std::string dump, uint32_t user);
+
+// One job of `launchctl print <domain>`: its pid (0 when not running) and last exit status.
+struct LoadedService {
+    int32_t pid = 0;
+    int32_t last_exit = 0;
+};
+using LoadedServices = std::unordered_map<std::string, LoadedService>;
+// Pure parsers of the launchctl listings, exposed for tests: the "services = { pid status label }"
+// block of `launchctl print <domain>`, and `launchctl print-disabled <domain>` as label -> disabled.
+LoadedServices parse_launchctl_print(const std::string &text);
+std::unordered_map<std::string, bool> parse_launchctl_disabled(const std::string &text);
+// The parsing half of managed_startup_items, on `sfltool dumpbtm` output; `user_jobs` and
+// `system_jobs` are the loaded services of the user's gui domain and of the system domain, used
+// for the running pids. Spawns nothing (exposed for tests).
+std::vector<pc_startup_item> parse_managed_startup_items(std::string dump, uint32_t user,
+                                                         const LoadedServices &user_jobs,
+                                                         const LoadedServices &system_jobs);
 // Runs the OS tool for one action in the given domain as the current user. The monitor routes
 // system-domain requests through the helper, which calls this as root.
 pc_result service_control(int32_t domain, const std::string &label, int32_t action);

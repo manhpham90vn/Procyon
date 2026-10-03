@@ -12,7 +12,8 @@ struct GPUView: View {
         let gpu = s.gpus.first
         ScreenScroll {
             PageHeader("GPU", subtitle: subtitle(gpu), style: style) {
-                ValueText(Format.percent(s.gpuUsage).dropLast().description, unit: "%", font: Tokens.Typography.display)
+                let usage = Format.percentParts(s.gpuUsage)
+                ValueText(usage.value, unit: usage.unit, font: Tokens.Typography.display)
             }
 
             Panel("Utilization", symbol: "waveform.path.ecg", tint: style.start) {

@@ -17,9 +17,9 @@ struct OverviewView: View {
                 Button {
                     page = .cpu
                 } label: {
+                    let cpu = Format.percentParts(sample.cpuUsage)
                     MetricCard(
-                        title: "CPU", style: Metric.cpu.style,
-                        value: Format.percent(sample.cpuUsage).dropLast().description, unit: "%",
+                        title: "CPU", style: Metric.cpu.style, value: cpu.value, unit: cpu.unit,
                         caption: "User \(Format.percent(sample.cpuUser)) · System \(Format.percent(sample.cpuSystem))",
                         series: [ChartSeries(id: "cpu", samples: store.history.cpu.samples, color: Metric.cpu.style.start)],
                         maxValue: 1)
@@ -38,9 +38,9 @@ struct OverviewView: View {
                     Button {
                         page = .gpu
                     } label: {
+                        let gpu = Format.percentParts(sample.gpuUsage)
                         MetricCard(
-                            title: "GPU", style: Metric.gpu.style,
-                            value: Format.percent(sample.gpuUsage).dropLast().description, unit: "%",
+                            title: "GPU", style: Metric.gpu.style, value: gpu.value, unit: gpu.unit,
                             caption: sample.gpus.first.map { gpu in
                                 "\(gpu.name) · \(Format.bytes(gpu.memoryUsed)) in use"
                             } ?? "",

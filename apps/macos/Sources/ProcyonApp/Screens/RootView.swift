@@ -36,10 +36,13 @@ struct RootView: View {
             .pageBackground()
             .transition(.opacity)
             .animation(.easeOut(duration: Tokens.Motion.fast), value: page)
-            .environment(\.showInProcesses) { row in
-                store.showInProcesses(row)
-                page = .processes
-            }
+            .environment(
+                \.showInProcesses,
+                ShowInProcesses { row in
+                    store.showInProcesses(row)
+                    page = .processes
+                }
+            )
         }
         .overlay {
             if showsPalette {

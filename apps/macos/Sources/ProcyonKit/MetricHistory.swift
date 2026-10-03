@@ -67,8 +67,9 @@ public struct HistoryBank: Sendable, Hashable {
         diskWrite.append(sample.diskWriteRate, at: t)
         networkReceive.append(sample.networkReceiveRate, at: t)
         networkSend.append(sample.networkSendRate, at: t)
+        // Unknown utilization leaves a gap in the chart rather than a false zero (as HistoryRecorder does).
+        if let usage = sample.gpuUsage { gpu.append(usage, at: t) }
         if !sample.gpus.isEmpty {
-            gpu.append(sample.gpuUsage ?? 0, at: t)
             gpuMemory.append(Double(sample.gpus.compactMap(\.memoryUsed).reduce(0, +)), at: t)
         }
         if let temperature = sample.cpuTemperature { cpuTemperature.append(temperature, at: t) }

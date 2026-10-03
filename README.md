@@ -151,7 +151,9 @@ you to allow Procyon's helper in **System Settings → General → Login Items**
 need an administrator account.
 
 Full access lets Procyon show every process, act on other users' processes, raise priority, and manage
-system services. To remove the helper, run **Remove Administrator Helper** from the ⌘K palette.
+system services. To take it back, open **Settings → Full access**: **Turn Off Full Access** disconnects for now and
+keeps the helper approved, **Remove Administrator Helper** also unregisters it from Login Items. Both are in the ⌘K
+palette too.
 
 ### Menu bar
 
@@ -173,7 +175,7 @@ moment. You can turn recording off or clear it in Settings. It uses a few MB in
 
 ## Uninstall
 
-1. If you unlocked full access, run **Remove Administrator Helper** from the ⌘K palette.
+1. If you unlocked full access, open **Settings → Full access** and click **Remove Administrator Helper**.
 2. Quit Procyon and move it from Applications to the Trash, or run `brew uninstall --cask procyon`.
 3. Optionally, delete its history: `~/Library/Application Support/Procyon`
    (`brew uninstall --cask --zap procyon` removes it along with the settings).

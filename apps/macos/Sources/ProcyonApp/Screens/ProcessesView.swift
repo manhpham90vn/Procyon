@@ -3,11 +3,40 @@ import ProcyonDesign
 import ProcyonKit
 import SwiftUI
 
+/// Processes screen state that outlives the screen, so leaving the page and coming back keeps the
+/// selection and the expanded rows, and a ⌘F pressed on another page reaches the search field.
+@MainActor
+@Observable
+final class ProcessesUIState {
+    var selection: ProcessRow.ID?
+    /// Rows whose expansion differs from the current mode's default.
+    var toggled: Set<ProcessRow.ID> = []
+    /// The view mode `toggled` belongs to.
+    private(set) var toggledMode: ViewMode?
+    /// Set by Find Process (⌘F); the Processes screen focuses its search field and clears it.
+    var wantsSearchFocus = false
+
+    /// A new view mode starts from its own expansion defaults.
+    func syncExpansion(to mode: ViewMode) {
+        guard toggledMode != mode else { return }
+        toggledMode = mode
+        toggled = []
+    }
+}
+
+extension ProcessRow {
+    /// Whether the row itself matches the search (an app group by its name; a process by name, pid or
+    /// user), as opposed to being listed for context as a member or an ancestor of a match.
+    func matches(search text: String) -> Bool {
+        if name.localizedCaseInsensitiveContains(text) { return true }
+        guard kind == .process else { return false }
+        return String(pid).contains(text) || user.localizedCaseInsensitiveContains(text)
+    }
+}
+
 struct ProcessesView: View {
     @Environment(SystemStore.self) private var store
-    @State private var selection: ProcessRow.ID?
-    /// Rows whose expansion differs from the current mode's default.
-    @State private var toggled: Set<ProcessRow.ID> = []
+    @Environment(ProcessesUIState.self) private var ui
     @Environment(ProcessActionCenter.self) private var actionCenter
     @FocusState private var searchFocused: Bool
     @State private var tableController = ProcessTableController()
@@ -23,8 +52,13 @@ struct ProcessesView: View {
     }
 
     private var selectedRow: ProcessRow? {
-        guard let selection else { return nil }
+        guard let selection = ui.selection else { return nil }
         return store.rows.first { $0.id == selection }
+    }
+
+    /// Rows that match the search themselves, not the members and ancestors shown with them.
+    private var matchCount: Int {
+        store.rows.count { $0.matches(search: store.filter) }
     }
 
     var body: some View {
@@ -50,7 +84,8 @@ struct ProcessesView: View {
                 SearchField(text: $store.filter, prompt: "Search by name, PID or user", focus: $searchFocused)
                     .frame(maxWidth: 340)
                 if !store.filter.isEmpty {
-                    Text("\(store.rows.count) matches")
+                    let matches = matchCount
+                    Text(matches == 1 ? "1 match" : "\(matches) matches")
                         .font(Tokens.Typography.label)
                         .foregroundStyle(Tokens.Palette.textTertiary)
                 }
@@ -96,21 +131,30 @@ struct ProcessesView: View {
         .padding(.horizontal, Tokens.Space.xxl)
         .padding(.top, Tokens.Space.lg)
         .padding(.bottom, Tokens.Space.xl)
+        .onAppear { ui.syncExpansion(to: store.viewMode) }
         .onChange(of: store.viewMode) {
-            toggled = []
+            ui.syncExpansion(to: store.viewMode)
             // The selected app stays selected and moves to the top in the new view.
             if let row = selectedRow { store.pinnedAppID = row.appID }
             reselectPinned = store.pinnedAppID != nil
         }
-        .onChange(of: selection) { unpinIfElsewhere() }
+        .onChange(of: ui.selection) { unpinIfElsewhere() }
+        // ⌘F from any page: the request waits in `ui` until this screen is there to take it.
+        .onChange(of: ui.wantsSearchFocus, initial: true) {
+            guard ui.wantsSearchFocus else { return }
+            ui.wantsSearchFocus = false
+            // Let the field appear before focusing it.
+            DispatchQueue.main.async { searchFocused = true }
+        }
         .focusedSceneValue(\.processActions, actions)
     }
 
     private var hasNetwork: Bool { store.capabilities.contains(.processNetwork) }
 
     private var table: some View {
-        ProcessTable(
-            rows: visibleRows, selection: $selection, sortColumn: store.sortColumn, sortDescending: store.sortDescending,
+        @Bindable var ui = ui
+        return ProcessTable(
+            rows: visibleRows, selection: $ui.selection, sortColumn: store.sortColumn, sortDescending: store.sortDescending,
             hasNetwork: hasNetwork, hasGPU: store.capabilities.contains(.processGPU),
             hasPower: store.capabilities.contains(.processEnergy),
             memoryTotal: Double(max(store.sample.memoryTotal, 1)), controller: tableController,
@@ -142,12 +186,12 @@ struct ProcessesView: View {
     // MARK: - Expansion
 
     private func isExpanded(_ row: ProcessRow) -> Bool {
-        store.viewMode.expandsByDefault != toggled.contains(row.id)
+        store.viewMode.expandsByDefault != ui.toggled.contains(row.id)
     }
 
     private func toggle(_ row: ProcessRow) {
         withAnimation(.snappy(duration: Tokens.Motion.fast)) {
-            if toggled.contains(row.id) { toggled.remove(row.id) } else { toggled.insert(row.id) }
+            if ui.toggled.contains(row.id) { ui.toggled.remove(row.id) } else { ui.toggled.insert(row.id) }
         }
     }
 
@@ -164,7 +208,7 @@ struct ProcessesView: View {
         store.focusedRow = nil
         store.pinnedAppID = target.appID
         if target.hasChildren, !isExpanded(target) { toggle(target) }
-        selection = target.id
+        ui.selection = target.id
         // After the expanded rows reach the table.
         Task { tableController.reveal(target.id) }
     }
@@ -178,7 +222,7 @@ struct ProcessesView: View {
 
     /// Choosing a row outside the pinned app lets the pin go.
     private func unpinIfElsewhere() {
-        guard !reselectPinned, let app = store.pinnedAppID, let selection else { return }
+        guard !reselectPinned, let app = store.pinnedAppID, let selection = ui.selection else { return }
         if !store.rows.pinning(appID: app).pinned.contains(where: { $0.id == selection }) { store.pinnedAppID = nil }
     }
 
@@ -191,7 +235,7 @@ struct ProcessesView: View {
         reselectPinned = false
         guard let first = store.rows.pinning(appID: app).pinned.first else { return }
         if store.viewMode == .grouped, first.hasChildren, !isExpanded(first) { toggle(first) }
-        selection = first.id
+        ui.selection = first.id
     }
 
     private var allExpanded: Bool {
@@ -201,27 +245,16 @@ struct ProcessesView: View {
     private func setAll(expanded: Bool) {
         let parents = store.rows.filter(\.hasChildren).map(\.id)
         withAnimation(.snappy(duration: Tokens.Motion.fast)) {
-            toggled = expanded == store.viewMode.expandsByDefault ? [] : Set(parents)
+            ui.toggled = expanded == store.viewMode.expandsByDefault ? [] : Set(parents)
         }
     }
 
     // MARK: - Actions
 
     private var actions: ProcessActions {
-        let row = selectedRow
-        let editable = row.flatMap { $0.isProtected ? nil : $0 }
-        return ProcessActions(
-            focusSearch: { searchFocused = true },
-            endTask: editable.map { row in { actionCenter.request(.end, row) } },
-            forceQuit: editable.map { row in { actionCenter.request(.forceQuit, row) } },
-            endTree: editable.flatMap { row in
-                row.kind == .process && row.hasChildren ? { actionCenter.request(.endTree, row) } : nil
-            },
-            suspendOrResume: store.capabilities.contains(.suspend)
-                ? editable.map { row in { actionCenter.request(row.isSuspended ? .resume : .suspend, row) } } : nil,
-            isSuspended: row?.isSuspended ?? false,
-            getInfo: row.map { row in { actionCenter.inspect(row) } }
-        )
+        ProcessActions(
+            row: selectedRow, canSuspend: store.capabilities.contains(.suspend), searchFocused: searchFocused,
+            center: actionCenter)
     }
 }
 

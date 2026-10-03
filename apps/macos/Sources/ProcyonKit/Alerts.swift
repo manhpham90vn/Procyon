@@ -149,6 +149,17 @@ public struct AlertEvaluator: Sendable {
         return events
     }
 
+    /// Forgets how long every condition has held: after a pause, the time it was not watched must
+    /// not count toward a rule's duration.
+    public mutating func reset() { since = [:] }
+
+    /// Forgets how long `kind`'s conditions have held (for every app, for a per-app rule): a changed
+    /// threshold or duration starts the clock over instead of firing at once.
+    public mutating func reset(_ kind: AlertRule.Kind) {
+        let prefix = "\(kind.rawValue):"
+        since = since.filter { $0.key != kind.rawValue && !$0.key.hasPrefix(prefix) }
+    }
+
     private func exceeds(_ rule: AlertRule, _ value: Double) -> Bool {
         rule.kind == .memoryPressure ? value >= 1 : value >= rule.threshold
     }

@@ -3,13 +3,21 @@ import Observation
 
 /// Owns the core monitor; all calls into C happen on this actor, off the main thread.
 actor MonitorWorker {
-    private let monitor = Monitor()
+    /// Created on first use, on this actor: `pc_monitor_create` primes every counter (a full
+    /// refresh), which must not hold up the main thread at launch.
+    private lazy var monitor = Monitor()
     private let capabilities = Monitor.capabilities
     private var hasProcessNetwork: Bool { capabilities.contains(.processNetwork) }
     private var samplesProcesses = true
     /// Energy each app used while processes were sampled, by app id.
     private var energy: [String: AppEnergy] = [:]
+    /// When each app in `energy` last drew power.
+    private var energySeen: [String: TimeInterval] = [:]
     private var lastTimestamp: TimeInterval?
+    private var lastEnergyPrune: TimeInterval = 0
+    /// An app unseen this long is dropped from `energy`; more than `energyCap` apps drops the smallest.
+    static let energyRetention: TimeInterval = 24 * 3600
+    static let energyCap = 1000
 
     struct Tick: Sendable {
         var sample: SystemSample
@@ -25,6 +33,8 @@ actor MonitorWorker {
         var helperConnected: Bool
     }
 
+    func systemInfo() -> SystemInfo { Monitor.systemInfo() }
+
     /// `processes` false: only machine-wide metrics (no window open, the menu bar still updates).
     func tick(query: Monitor.Query, processes: Bool, battery: Bool) -> Tick {
         if processes != samplesProcesses {
@@ -36,14 +46,22 @@ actor MonitorWorker {
         if battery && capabilities.contains(.battery) { tick.battery = Monitor.battery() }
         guard processes else { return tick }
         tick.rows = monitor.buildView(query)
-        tick.topCPU = top(.cpu)
-        tick.topMemory = top(.memory)
-        tick.topDisk = topDisk()
-        tick.topNetwork = topNetwork()
-        tick.topGPU = capabilities.contains(.processGPU) ? top(.gpu).filter { ($0.gpu ?? 0) > 0 } : []
+        // Every "top apps" list and the energy tally come from one by-app view (each view regroups
+        // and sorts every process in the core): the user's own rows when they are that view already.
+        let apps: [ProcessRow]
+        if query.mode == .grouped, query.filter.isEmpty, query.limit == 0 {
+            apps = tick.rows.filter { $0.depth == 0 }
+        } else {
+            apps = monitor.buildView(.init(mode: .grouped, column: .cpu, descending: true, filter: "", topLevelOnly: true))
+        }
+        tick.topCPU = Self.top(apps, by: \.cpu)
+        tick.topMemory = Self.top(apps, by: \.memory)
+        tick.topDisk = Self.top(apps, by: \.diskTotal, over: 0)
+        tick.topNetwork = hasProcessNetwork ? Self.top(apps, by: \.networkTotal, over: 0) : []
+        tick.topGPU = capabilities.contains(.processGPU) ? Self.top(apps, by: \.gpu, over: 0) : []
         if capabilities.contains(.processEnergy) {
-            tick.topPower = top(.power).filter { ($0.power ?? 0) > 0.005 }
-            tick.topEnergy = accumulateEnergy(at: sample.timestamp)
+            tick.topPower = Self.top(apps, by: \.power, over: 0.005)
+            tick.topEnergy = accumulateEnergy(apps, at: sample.timestamp)
         }
         return tick
     }
@@ -66,16 +84,12 @@ actor MonitorWorker {
 
     func volumes() -> [Volume] { monitor.volumes() }
 
-    func end(pids: [Int32], force: Bool) -> ActionResult {
-        var outcome = ActionResult.ok
-        for pid in pids {
-            let result = monitor.end(pid: pid, force: force)
-            if result != .ok, result != .notFound { outcome = result }
-        }
-        return outcome
-    }
+    func end(pids: [Int32], force: Bool) -> ActionResult { each(pids) { monitor.end(pid: $0, force: force) } }
 
     func endTree(pid: Int32) -> ActionResult { monitor.endTree(pid: pid) }
+
+    /// Ends every process in `pids` with all its descendants (whatever app those belong to).
+    func endTree(pids: [Int32]) -> ActionResult { monitor.endTree(pids: pids) }
 
     /// Applies `action` to every pid and reports the first real failure.
     func each(_ pids: [Int32], _ action: (Int32) -> ActionResult) -> ActionResult {
@@ -98,53 +112,67 @@ actor MonitorWorker {
     func control(_ service: Service, _ action: ServiceAction) -> ActionResult { monitor.control(service, action) }
     func startupItems() -> [StartupItem] { monitor.startupItems() }
     func openFiles(pid: Int32?) -> HandleList<OpenFile> { monitor.openFiles(pid: pid) }
-    func processRow(pid: Int32) -> ProcessRow? {
-        monitor.buildView(.init(mode: .flat, column: .pid, descending: false, filter: "")).first { $0.pid == pid }
-    }
+    func processRow(pid: Int32) -> ProcessRow? { monitor.processRow(pid: pid) }
     func connections(pid: Int32?) -> HandleList<NetworkConnection> { monitor.connections(pid: pid) }
     func pids(forApps paths: Set<String>) -> [String: Int32] { monitor.pids(forApps: paths) }
     func managedStartupItems() -> (items: [StartupItem], ready: Bool)? { monitor.managedStartupItems() }
     func setEnabled(_ item: StartupItem, _ enabled: Bool) -> ActionResult { monitor.setEnabled(item, enabled) }
 
-    private func top(_ column: ProcessColumn) -> [ProcessRow] {
-        monitor.buildView(.init(mode: .grouped, column: column, descending: true, filter: "", limit: SystemStore.topCount))
-            .filter { $0.depth == 0 }
+    /// The `SystemStore.topCount` apps with the biggest known `value`, biggest first; apps whose value
+    /// is unknown (a first sample after sampling resumed) or not above `floor` are left out.
+    static func top<Value: Comparable>(
+        _ apps: [ProcessRow], by value: KeyPath<ProcessRow, Value?>, over floor: Value? = nil
+    ) -> [ProcessRow] {
+        let known: [(row: ProcessRow, value: Value)] = apps.compactMap { row in
+            guard let value = row[keyPath: value], floor.map({ value > $0 }) ?? true else { return nil }
+            return (row, value)
+        }
+        return known.sorted { $0.value > $1.value }.prefix(SystemStore.topCount).map(\.row)
+    }
+
+    static func top<Value: Comparable>(
+        _ apps: [ProcessRow], by value: KeyPath<ProcessRow, Value>, over floor: Value? = nil
+    ) -> [ProcessRow] {
+        let kept = floor.map { floor in apps.filter { $0[keyPath: value] > floor } } ?? apps
+        return Array(kept.sorted { $0[keyPath: value] > $1[keyPath: value] }.prefix(SystemStore.topCount))
     }
 
     /// Adds each app's power over the time since the last sample; returns the biggest consumers.
-    private func accumulateEnergy(at time: TimeInterval) -> [AppEnergy] {
+    private func accumulateEnergy(_ apps: [ProcessRow], at time: TimeInterval) -> [AppEnergy] {
         defer { lastTimestamp = time }
         // A gap (paused, window closed) isn't attributed to anyone.
         guard let last = lastTimestamp, case let elapsed = time - last, elapsed > 0, elapsed < 10 else {
             return topEnergy()
         }
-        let apps = monitor.buildView(.init(mode: .grouped, column: .power, descending: true, filter: ""))
-        for row in apps where row.depth == 0 {
+        for row in apps {
             guard let watts = row.power, watts > 0 else { continue }
             energy[row.appID, default: AppEnergy(row: row)].add(row, joules: watts * elapsed)
+            energySeen[row.appID] = time
+        }
+        if time - lastEnergyPrune >= 60 {
+            lastEnergyPrune = time
+            pruneEnergy(now: time)
         }
         return topEnergy()
     }
 
+    /// Forgets apps that haven't drawn power for `energyRetention`, then the smallest consumers
+    /// beyond `energyCap`, so the tally doesn't grow with every app ever launched.
+    private func pruneEnergy(now: TimeInterval) {
+        for (app, seen) in energySeen where now - seen >= Self.energyRetention {
+            energy[app] = nil
+            energySeen[app] = nil
+        }
+        guard energy.count > Self.energyCap else { return }
+        let excess = energy.values.sorted { $0.joules < $1.joules }.prefix(energy.count - Self.energyCap)
+        for app in excess {
+            energy[app.id] = nil
+            energySeen[app.id] = nil
+        }
+    }
+
     private func topEnergy() -> [AppEnergy] {
         Array(energy.values.sorted { $0.joules > $1.joules }.prefix(SystemStore.topCount))
-    }
-
-    /// Busiest apps by read plus write; the core sorts by one direction, so merge both.
-    private func topDisk() -> [ProcessRow] {
-        merged(top(.diskRead) + top(.diskWrite), by: \.diskTotal)
-    }
-
-    /// Busiest apps by download plus upload.
-    private func topNetwork() -> [ProcessRow] {
-        guard hasProcessNetwork else { return [] }
-        return merged(top(.networkReceive) + top(.networkSend), by: \.networkTotal)
-    }
-
-    private func merged(_ rows: [ProcessRow], by total: KeyPath<ProcessRow, Double>) -> [ProcessRow] {
-        var seen = Set<String>()
-        let active = rows.filter { $0[keyPath: total] > 0 && seen.insert($0.id).inserted }
-        return Array(active.sorted { $0[keyPath: total] > $1[keyPath: total] }.prefix(SystemStore.topCount))
     }
 }
 
@@ -156,7 +184,9 @@ public final class SystemStore {
     /// Length of the "top apps" lists.
     public nonisolated static let topCount = 10
 
-    public let info: SystemInfo
+    /// Static machine facts. Read off the main thread once sampling starts: empty strings and zero
+    /// counts (and an `uptime` of zero) until then, which takes a few milliseconds after `start()`.
+    public private(set) var info = SystemInfo()
     public let capabilities: Capabilities
 
     public private(set) var sample = SystemSample()
@@ -182,6 +212,10 @@ public final class SystemStore {
         didSet {
             guard alertSettings != oldValue else { return }
             alertSettings.save(defaults)
+            // An edited rule starts its clock over, so a lowered threshold doesn't fire at once.
+            for rule in alertSettings.rules where oldValue.rules.first(where: { $0.kind == rule.kind }) != rule {
+                alertEvaluator.reset(rule.kind)
+            }
             needsProcesses("alerts", alertSettings.watchesApps)
         }
     }
@@ -236,8 +270,14 @@ public final class SystemStore {
             if interval != oldValue { restart() }
         }
     }
+    /// Pausing stops every update, alerts included (the spec's pause pauses the whole app; a paused
+    /// Procyon watches nothing). The time paused doesn't count toward any alert's duration.
     public var isPaused = false {
-        didSet { if isPaused != oldValue { restart() } }
+        didSet {
+            guard isPaused != oldValue else { return }
+            if isPaused { alertEvaluator.reset() }
+            restart()
+        }
     }
     /// Off while nothing on screen needs per-process data (only the menu bar label is showing):
     /// sampling then reads machine-wide metrics only, which is several times cheaper.
@@ -250,16 +290,28 @@ public final class SystemStore {
         let wanted = !processConsumers.isEmpty
         guard wanted != samplesProcesses else { return }
         samplesProcesses = wanted
-        if wanted, !isPaused { Task { await refreshNow() } }
+        guard wanted, started, !isPaused else { return }
+        Task {
+            await refreshNow()
+            // The first sample after sampling resumes has no previous counters, so its rates are
+            // unknown ("—"): take another soon rather than after a whole interval.
+            try? await Task.sleep(for: .milliseconds(500))
+            guard samplesProcesses, !isPaused else { return }
+            await refreshNow()
+        }
     }
 
     /// Off while another screen switches the view temporarily, so the saved default stays.
     private var persistsViewMode = true
     private let worker = MonitorWorker()
     private let defaults: UserDefaults
+    private var started = false
     private var loop: Task<Void, Never>?
     private var rebuildTask: Task<Void, Never>?
+    /// The latest write of a partial minute (see `flushHistory`), so `shutdown` can wait for it.
+    private var historyWrite: Task<Void, Never>?
     private var ticks = 0
+    private var lastApprovalCheck: TimeInterval = -.infinity
 
     private enum Keys {
         static let interval = "refreshInterval"
@@ -270,10 +322,9 @@ public final class SystemStore {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        info = Monitor.systemInfo()
         capabilities = Monitor.capabilities
         let storedInterval = defaults.double(forKey: Keys.interval)
-        interval = storedInterval > 0 ? storedInterval : 1
+        interval = min(max(storedInterval > 0 ? storedInterval : 1, 0.5), 5)
         viewMode = (defaults.object(forKey: Keys.viewMode) as? Int).flatMap(ViewMode.init(rawValue:)) ?? .grouped
         sortColumn = .cpu
         sortDescending = true
@@ -282,17 +333,58 @@ public final class SystemStore {
         if alertSettings.watchesApps { processConsumers.insert("alerts") }
     }
 
-    public var uptime: TimeInterval { Date().timeIntervalSince(info.bootTime) }
+    /// Zero until `info` has been read.
+    public var uptime: TimeInterval { info.logicalCores > 0 ? Date().timeIntervalSince(info.bootTime) : 0 }
 
+    /// Starts sampling (every screen calls it as it appears; only the first call does anything).
+    /// While paused, nothing is sampled until the user resumes.
     public func start() {
-        guard loop == nil else { return }
+        guard !started else { return }
+        started = true
+        Task { info = await worker.systemInfo() }
         restart()
         resumeFullAccess()
     }
 
+    /// Stops sampling and writes the minute of history in progress (`start()` starts again).
     public func stop() {
         loop?.cancel()
         loop = nil
+        started = false
+        flushHistory()
+    }
+
+    /// Stops sampling and waits for the history on disk to be complete: call before the process
+    /// exits, e.g. `await store.shutdown()` from a task that `NSApplicationDelegate` waits for
+    /// (`applicationShouldTerminate` returning `.terminateLater`, then `reply(toApplicationShouldTerminate:)`).
+    public func shutdown() async {
+        stop()
+        await historyWrite?.value
+    }
+
+    /// `shutdown()` for a synchronous caller such as `applicationWillTerminate`: blocks the main
+    /// thread until the history is written, at most `timeout` seconds (a write takes milliseconds).
+    public func shutdown(waitingUpTo timeout: TimeInterval) {
+        stop()
+        guard let write = historyWrite else { return }
+        let done = DispatchSemaphore(value: 0)
+        // Detached: a task inheriting this actor would wait for the main thread, which is blocked here.
+        Task.detached {
+            await write.value
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + timeout)
+    }
+
+    /// Writes the minute in progress so no history is lost when sampling stops or the app quits; a
+    /// later sample of the same minute replaces it.
+    private func flushHistory() {
+        guard recordsHistory, let record = historyRecorder.flush() else { return }
+        let previous = historyWrite
+        historyWrite = Task.detached { [historyDatabase] in
+            await previous?.value
+            await historyDatabase.write(record)
+        }
     }
 
     /// Re-sorts or re-filters the current snapshot without sampling again.
@@ -360,6 +452,15 @@ public final class SystemStore {
 
     /// Opens System Settings where the user allows the background helper.
     public func openHelperApproval() { HelperDaemon.openApproval() }
+
+    /// Re-reads whether the background helper is still registered: the user can remove it in
+    /// System Settings → Login Items while Procyon runs. Settings calls this when it appears.
+    public func refreshHelperRegistration() {
+        guard usesBackgroundHelper else { return }
+        let state = HelperDaemon.state
+        backgroundHelperRegistered = state != .notRegistered
+        if state == .notRegistered, fullAccess == .needsApproval { fullAccess = .off }
+    }
 
     private func enableBackgroundHelper() async {
         fullAccess = .starting
@@ -495,10 +596,12 @@ public final class SystemStore {
         return result
     }
 
+    /// Force-kills the process (or every process of an app group) and all its descendants, including
+    /// children that belong to other apps (a shell or node an app spawned).
     public func endTree(_ row: ProcessRow) async -> ActionResult {
         let result: ActionResult
         if row.kind == .group {
-            result = await worker.end(pids: row.memberPIDs, force: true)
+            result = await worker.endTree(pids: row.memberPIDs)
         } else {
             result = await worker.endTree(pid: row.pid)
         }
@@ -514,7 +617,8 @@ public final class SystemStore {
 
     private func restart() {
         loop?.cancel()
-        guard !isPaused else {
+        // Not started yet (a setting changed before the first screen appeared), or paused: no loop.
+        guard started, !isPaused else {
             loop = nil
             return
         }
@@ -537,9 +641,9 @@ public final class SystemStore {
         if let battery = tick.battery { self.battery = battery }
         hasSample = true
         if processes {
-            rows = tick.rows
-            // The filter or sort changed while sampling: rebuild against the new query.
-            if requested != query { rebuild() }
+            // The filter or sort changed while sampling: these rows answer the old query, so leave
+            // them out and rebuild against the new one.
+            if requested == query { rows = tick.rows } else { rebuild() }
             topCPU = tick.topCPU
             topMemory = tick.topMemory
             topDisk = tick.topDisk
@@ -552,13 +656,15 @@ public final class SystemStore {
         if recordsHistory {
             let busiest =
                 processes ? tick.topCPU + tick.topMemory + tick.topDisk + tick.topNetwork + tick.topGPU + tick.topPower : []
-            if let record = historyRecorder.add(tick.sample, busiest: busiest) {
-                Task { [historyDatabase] in await historyDatabase.write(record) }
-            }
+            if let record = historyRecorder.add(tick.sample, busiest: busiest) { await historyDatabase.write(record) }
         }
         if fullAccess.isOn && !tick.helperConnected { await reconnectHelper() }
-        // The user may allow the helper in System Settings at any moment.
-        if fullAccess == .needsApproval, ticks % 2 == 0, HelperDaemon.state == .enabled { await attachBackgroundHelper() }
+        // The user may allow the helper in System Settings at any moment; asking launchd costs an XPC
+        // round trip, so look every few seconds, not every tick.
+        if fullAccess == .needsApproval, tick.sample.timestamp - lastApprovalCheck >= 5 {
+            lastApprovalCheck = tick.sample.timestamp
+            if HelperDaemon.state == .enabled { await attachBackgroundHelper() }
+        }
         if processes, ticks % 10 == 0 { volumes = await worker.volumes() }
         ticks += 1
     }

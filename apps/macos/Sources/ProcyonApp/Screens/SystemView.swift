@@ -89,7 +89,7 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var store = store
         VStack(alignment: .leading, spacing: Tokens.Space.lg) {
-            PageHeader("Settings", subtitle: "Updates, menu bar, appearance and processes")
+            PageHeader("Settings", subtitle: "Updates, menu bar, alerts, appearance, processes and full access")
                 .padding(.horizontal, Tokens.Space.xxl)
             form
         }
@@ -104,6 +104,7 @@ struct SettingsView: View {
                     ForEach(SystemStore.refreshIntervals, id: \.self) { Text("Every \(Format.interval($0))").tag($0) }
                 }
             }
+            FullAccessSection()
             Section("Menu bar") {
                 Toggle("Keep running in the menu bar when the window is closed", isOn: $menuBarEnabled)
                 if menuBarEnabled {
@@ -161,6 +162,90 @@ private struct MenuBarModuleToggle: View {
 }
 
 /// Notifications when the machine or an app stays over a threshold.
+/// Shows what the administrator helper is allowed to do and takes that permission back: turn full
+/// access off for now, or remove the helper from Login Items so it has to be approved again.
+private struct FullAccessSection: View {
+    @Environment(SystemStore.self) private var store
+    @State private var confirmingRemoval = false
+
+    var body: some View {
+        Section("Full access") {
+            LabeledContent("Status") { status }
+            Text(
+                "Full access runs the Procyon helper as an administrator. It lets Processes read and manage system processes, Files & Ports list every process's files and connections, and Startup and Services switch system-wide launch daemons. Without it, those rows show a lock."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            switch store.fullAccess {
+            case .on:
+                Button("Turn Off Full Access") { store.disableFullAccess() }
+                    .help(turnOffHelp)
+            case .starting:
+                Button("Turn Off Full Access") {}.disabled(true)
+            case .needsApproval:
+                Button("Open System Settings") { store.openHelperApproval() }
+                    .help("Allow Procyon in System Settings → General → Login Items")
+            case .off, .failed:
+                Button("Unlock Full Access") { Task { await store.enableFullAccess() } }
+                    .help(
+                        store.usesBackgroundHelper
+                            ? "Registers the helper as a background item; macOS asks you to allow it once"
+                            : "Asks for an administrator password and starts the helper for this session")
+            }
+
+            if store.usesBackgroundHelper && store.backgroundHelperRegistered {
+                Button("Remove Administrator Helper…", role: .destructive) { confirmingRemoval = true }
+                    .help("Unregisters the helper from Login Items; unlocking again asks for approval")
+                    .confirmationDialog(
+                        "Remove the administrator helper?", isPresented: $confirmingRemoval, titleVisibility: .visible
+                    ) {
+                        Button("Remove Helper", role: .destructive) {
+                            Task { await store.removeBackgroundHelper() }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text(
+                            "Procyon loses its administrator rights right away and the helper is removed from System Settings → Login Items. Processes, Startup, Services and Files & Ports go back to showing a lock on system items until you unlock full access again, which asks for your approval once more."
+                        )
+                    }
+                Text(
+                    "Turning full access off keeps the helper approved in Login Items, so you can turn it back on without being asked. Removing the helper takes that approval back."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear { store.refreshHelperRegistration() }
+    }
+
+    @ViewBuilder private var status: some View {
+        switch store.fullAccess {
+        case .on:
+            Badge("On", tone: .success, symbol: "lock.open.fill")
+        case .starting:
+            Badge("Starting…", tone: .accent, symbol: "hourglass")
+        case .needsApproval:
+            Badge("Waiting for approval", tone: .warning, symbol: "lock.shield")
+        case .off:
+            Badge(
+                store.usesBackgroundHelper && store.backgroundHelperRegistered ? "Off, helper approved" : "Off",
+                tone: .neutral, symbol: "lock.fill")
+        case .failed(let message):
+            VStack(alignment: .trailing, spacing: Tokens.Space.xs) {
+                Badge("Stopped", tone: .danger, symbol: "exclamationmark.triangle.fill")
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var turnOffHelp: String {
+        store.usesBackgroundHelper
+            ? "Disconnects from the helper; it stays approved in Login Items"
+            : "Disconnects from the helper, which then quits; unlocking again asks for a password"
+    }
+}
+
 private struct AlertsSection: View {
     @Environment(SystemStore.self) private var store
     @AppStorage(TemperatureUnit.storageKey) private var temperatureUnit: TemperatureUnit = .system

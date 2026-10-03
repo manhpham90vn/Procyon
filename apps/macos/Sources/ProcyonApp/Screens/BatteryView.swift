@@ -27,8 +27,8 @@ struct BatteryView: View {
         ScreenScroll {
             if let battery = store.battery {
                 PageHeader("Battery", subtitle: battery.stateTitle, style: style) {
-                    ValueText(
-                        Format.percent(battery.level).dropLast().description, unit: "%", font: Tokens.Typography.display)
+                    let level = Format.percentParts(battery.level)
+                    ValueText(level.value, unit: level.unit, font: Tokens.Typography.display)
                 }
 
                 HStack(alignment: .top, spacing: Tokens.Space.lg) {
