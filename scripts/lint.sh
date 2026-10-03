@@ -25,7 +25,8 @@ if [ "${SKIP_TIDY:-0}" != 1 ]; then
     cmake -S core -B build/core -DCMAKE_BUILD_TYPE=Debug >/dev/null
     sources=()
     for file in "${CPP_FILES[@]}"; do
-        case "$file" in core/tools/*) ;; *.cpp) sources+=("$file") ;; esac
+        # Windows-only sources are not in the macOS compile database.
+        case "$file" in core/tools/*|core/src/platform/windows*|apps/*) ;; *.cpp) sources+=("$file") ;; esac
     done
     "$CLANG_TIDY" -p build/core --quiet --extra-arg=-isysroot"$(xcrun --show-sdk-path)" "${sources[@]}"
 fi

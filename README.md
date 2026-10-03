@@ -1,7 +1,10 @@
 # Procyon
 
-A lightweight, open-source task manager for macOS. See what is using your CPU, memory, disk, network,
-GPU and battery, find out what a process is, and stop the ones you don't need.
+A lightweight, open-source task manager for macOS and Windows. See what is using your CPU, memory, disk,
+network, GPU and battery, find out what a process is, and stop the ones you don't need.
+
+The macOS app is complete (P2 in the [spec](docs/procyon-spec.md)); the Windows app is new and covers the
+basics plus startup, services, files and ports (status in [docs/development.md](docs/development.md#windows)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
@@ -93,10 +96,24 @@ Procyon is light on resources: sampling uses about 0.5% of one core.
 
 ## Requirements
 
-- macOS 14 Sonoma or later
-- Apple Silicon or Intel (the release is a universal app)
+- macOS 14 Sonoma or later, Apple Silicon or Intel (the release is a universal app)
+- Windows 10 version 1809 or later, or Windows 11, 64-bit
 
 ## Install
+
+### Windows
+
+1. Download the latest `Procyon-x.y.z-windows-x64.zip` from the [Releases page](https://github.com/manhpham90vn/Procyon/releases/latest).
+2. Unzip it anywhere and run `Procyon.exe`. There is no installer and nothing to register; settings live in
+   `HKEY_CURRENT_USER\Software\Procyon`.
+3. To check the download, compare it with the `.sha256` file from the same release:
+
+```powershell
+(Get-FileHash .\Procyon-x.y.z-windows-x64.zip).Hash
+```
+
+The Windows build is not code-signed yet, so SmartScreen may ask once (More info → Run anyway) and Smart App
+Control, where it is on, refuses unsigned apps altogether.
 
 ### Homebrew
 
@@ -137,6 +154,11 @@ Pick a screen in the sidebar, or use the keyboard:
 | `⇧⌘P` | Pause or resume updates |
 | `⌘,` | Settings |
 
+On Windows, `Ctrl` stands in for `⌘`: `Ctrl+1`…`Ctrl+9` for the screens, `Ctrl+K` for the palette, `Ctrl+F`
+to find, `Ctrl+I` for Get Info, `Delete` or `Ctrl+Backspace` for End Task, `Shift+Delete` or
+`Ctrl+Alt+Backspace` for Force Quit, `Ctrl+Shift+Alt+Backspace` for End Process Tree, `Ctrl+Shift+P` to pause
+and `Ctrl+,` for Settings.
+
 ### Ending a process
 
 Select a process in **Processes** and press `⌘⌫` (or use the **Process** menu or the ⌘K palette). Procyon asks for confirmation before
@@ -154,6 +176,11 @@ Full access lets Procyon show every process, act on other users' processes, rais
 system services. To take it back, open **Settings → Full access**: **Turn Off Full Access** disconnects for now and
 keeps the helper approved, **Remove Administrator Helper** also unregisters it from Login Items. Both are in the ⌘K
 palette too.
+
+On Windows there is no helper: **Unlock Full Access** (the banner on Processes, Startup or Services, Settings, or
+the `Ctrl+K` palette) restarts Procyon as administrator through the usual User Account Control prompt. Without it,
+Procyon still lists every process with its CPU, memory and disk use, but other users' command lines and open
+files stay hidden, their processes can't be ended, and services and machine-wide startup entries can't be changed.
 
 ### Menu bar
 
@@ -175,19 +202,30 @@ moment. You can turn recording off or clear it in Settings. It uses a few MB in
 
 ## Uninstall
 
+On macOS:
+
 1. If you unlocked full access, open **Settings → Full access** and click **Remove Administrator Helper**.
 2. Quit Procyon and move it from Applications to the Trash, or run `brew uninstall --cask procyon`.
 3. Optionally, delete its history: `~/Library/Application Support/Procyon`
    (`brew uninstall --cask --zap procyon` removes it along with the settings).
 
+On Windows, quit Procyon (right-click its tray icon → Quit), delete the folder you unzipped it into, and
+optionally delete the settings key `HKEY_CURRENT_USER\Software\Procyon`.
+
 ## Known limitations
 
-- macOS only for now. The core is cross-platform C++, and Windows and Linux front ends are planned.
+- The core is cross-platform C++; a Linux front end is planned.
 - The interface is English only.
 - Not available on macOS: CPU affinity, GPU encode/decode usage, fan speeds, and closing another process's
   network connection.
+- Not yet on Windows: per-process network, per-app energy, History, alerts, Task Scheduler startup entries,
+  apps preventing sleep, and the menu bar style widget (the tray icon shows one metric in its tooltip).
+  Temperatures come from the ACPI thermal zones (the motherboard sensors the firmware publishes, not the CPU die, which needs a kernel driver) and the system drive, which not every PC exposes.
+  GPU temperature is read for NVIDIA cards only (AMD and Intel: not yet).
 
 ## Building from source
+
+### macOS
 
 You need Xcode 27 on macOS 14 or later.
 
@@ -202,6 +240,22 @@ make help     # all targets
 Builds from source are ad-hoc signed. Full access then works through a password prompt each launch
 instead of the one-time approval.
 
+### Windows
+
+You need Visual Studio 2022 with the **Desktop development with C++** workload and GNU Make
+(`winget install ezwinports.make`). The same `make` targets work as on macOS, from cmd, PowerShell or Git Bash:
+
+```bat
+git clone https://github.com/manhpham90vn/Procyon.git
+cd Procyon
+make tools    rem once: fetches CMake, Ninja and clang-format into build\tools (skip if Visual Studio's CMake component is installed)
+make run      rem build dist\windows\Procyon.exe and open it
+make test     rem run the core tests
+make help     rem all targets
+```
+
+Builds from source are unsigned: Smart App Control, where it is on, won't run them.
+
 ## Contributing
 
 Bug reports, ideas and pull requests are welcome on
@@ -213,4 +267,6 @@ The repo layout, CI and release process, how the privileged helper works, and fe
 
 ## License
 
-Procyon is released under the [MIT License](LICENSE).
+Procyon is released under the [MIT License](LICENSE). The Windows app embeds the
+[Inter](https://github.com/rsms/inter) typeface, licensed under the
+[SIL Open Font License 1.1](apps/windows/res/fonts/LICENSE-Inter.txt).

@@ -1,10 +1,24 @@
 // Core checks that need no UI and change nothing on the machine: the helper wire format, input
 // validation, the view builder, the launchctl parsers, and the refusals that keep protected
 // processes and system services safe.
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+
+#include <windows.h>
+
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include <cerrno>
 #include <cstdio>
@@ -30,6 +44,17 @@ void check(bool condition, const char *what) {
         ++failures;
     }
 }
+
+#if defined(_WIN32)
+int32_t own_pid() { return static_cast<int32_t>(GetCurrentProcessId()); }
+// A pid that exists and is not ours: the System process.
+int32_t other_pid() { return 4; }
+int32_t init_pid() { return 4; }  // the protected init equivalent
+#else
+int32_t own_pid() { return getpid(); }
+int32_t other_pid() { return getppid(); }
+int32_t init_pid() { return 1; }
+#endif
 
 void details_round_trip() {
     platform::Details in;
@@ -81,29 +106,41 @@ void files_round_trip() {
 
 // This process's own descriptors are always readable: a file it opened and a socket it listens on.
 void own_handles() {
-    const std::string path = "/tmp/procyon-core-test-" + std::to_string(getpid());
-    FILE *file = std::fopen(path.c_str(), "w");
+#if defined(_WIN32)
+    WSADATA wsa{};
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    char temp_dir[MAX_PATH] = {};
+    GetTempPathA(MAX_PATH, temp_dir);
+    const std::string path = std::string(temp_dir) + "procyon-core-test-" + std::to_string(own_pid());
+    const std::string needle = "procyon-core-test-" + std::to_string(own_pid());
+    const SOCKET listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    const bool have_listener = listener != INVALID_SOCKET;
+#else
+    const std::string path = "/tmp/procyon-core-test-" + std::to_string(own_pid());
+    const std::string needle = path.substr(5);
     const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    const bool have_listener = listener >= 0;
+#endif
+    FILE *file = std::fopen(path.c_str(), "w");
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     socklen_t length = sizeof(address);
-    const bool listening = listener >= 0 && ::bind(listener, reinterpret_cast<sockaddr *>(&address), length) == 0 &&
+    const bool listening = have_listener && ::bind(listener, reinterpret_cast<sockaddr *>(&address), length) == 0 &&
                            ::listen(listener, 1) == 0 &&
                            ::getsockname(listener, reinterpret_cast<sockaddr *>(&address), &length) == 0;
 
     pc_monitor *monitor = pc_monitor_create();
     const pc_open_file *files = nullptr;
     bool complete = false;
-    const int32_t file_count = pc_monitor_open_files(monitor, getpid(), &files, &complete);
+    const int32_t file_count = pc_monitor_open_files(monitor, own_pid(), &files, &complete);
     bool found = false;
     for (int32_t i = 0; i < file_count; ++i)
-        found |=
-            files[i].kind == PC_FILE_REGULAR && std::string(files[i].path).find(path.substr(5)) != std::string::npos;
+        found |= files[i].kind == PC_FILE_REGULAR && std::string(files[i].path).find(needle) != std::string::npos;
     check(complete && found, "own open file listed");
 
     const pc_connection *connections = nullptr;
-    const int32_t connection_count = pc_monitor_connections(monitor, getpid(), &connections, &complete);
+    const int32_t connection_count = pc_monitor_connections(monitor, own_pid(), &connections, &complete);
     bool listed = false;
     for (int32_t i = 0; i < connection_count; ++i)
         listed |= connections[i].protocol == PC_PROTOCOL_TCP && connections[i].state == PC_TCP_LISTEN &&
@@ -112,7 +149,11 @@ void own_handles() {
     check(listening && complete && listed, "own listening socket listed");
     pc_monitor_destroy(monitor);
 
-    if (listener >= 0) ::close(listener);
+#if defined(_WIN32)
+    if (have_listener) closesocket(listener);
+#else
+    if (have_listener) ::close(listener);
+#endif
     if (file) (void)std::fclose(file);
     (void)std::remove(path.c_str());
 }
@@ -121,12 +162,20 @@ void validation() {
     check(platform::valid_service_label("com.example.agent_1-beta"), "plain label accepted");
     check(!platform::valid_service_label(""), "empty label rejected");
     check(!platform::valid_service_label("-k"), "option-like label rejected");
-    check(!platform::valid_service_label("a b"), "label with space rejected");
     check(!platform::valid_service_label("system/com.apple.x"), "label with slash rejected");
     check(!platform::valid_service_label(std::string(300, 'a')), "long label rejected");
     check(platform::valid_signal(15) && !platform::valid_signal(0) && !platform::valid_signal(1000), "signal range");
+#if defined(_WIN32)
+    // Windows service names may contain spaces ("Bonjour Service"); nothing is passed to a shell.
+    check(platform::valid_service_label("Bonjour Service"), "service name with space accepted");
+    check(!platform::valid_service_label("a\\b"), "label with backslash rejected");
+    check(platform::valid_service_label("run:hkcu:OneDrive"), "startup label accepted");
+#else
+    check(!platform::valid_service_label("a b"), "label with space rejected");
+#endif
 }
 
+#if !defined(_WIN32)
 // The helper parses as root on behalf of the app's user: the user's records must be chosen by the
 // uid it is given, not by the process's own.
 void managed_startup_parsing() {
@@ -214,6 +263,7 @@ void launchctl_parsing() {
               overrides.count("com.example.legacy_on") && !overrides.at("com.example.legacy_on"),
           "older true/false form");
 }
+#endif  // !_WIN32
 
 // The kernel's per-core tick counters are 32-bit: a wrap must read as the small delta it is.
 void tick_wrap() {
@@ -229,11 +279,19 @@ void tick_wrap() {
 
 // A listing is incomplete only when descriptors exist that we may not see.
 void handle_denial() {
+#if defined(_WIN32)
+    check(platform::handles_denied(0, ERROR_ACCESS_DENIED) && platform::handles_denied(-1, ERROR_ACCESS_DENIED),
+          "refused reads are denials");
+    check(!platform::handles_denied(0, ERROR_INVALID_PARAMETER), "a process that is gone has nothing to list");
+    check(!platform::handles_denied(0, 0), "an empty handle table has nothing to list");
+    check(!platform::handles_denied(48, ERROR_ACCESS_DENIED), "a successful read is never a denial");
+#else
     check(platform::handles_denied(0, EPERM) && platform::handles_denied(-1, EACCES), "refused reads are denials");
     check(!platform::handles_denied(0, ESRCH), "a process that is gone or a zombie has nothing to list");
     check(!platform::handles_denied(0, 0), "an empty descriptor table has nothing to list");
     check(!platform::handles_denied(48, EPERM), "a successful read is never a denial");
     check(!platform::handles_denied(0, EINVAL), "other failures hide nothing");
+#endif
 }
 
 // ---- view builder ----
@@ -381,26 +439,47 @@ void view_sorting_and_limit() {
 
 void refusals() {
     pc_monitor *monitor = pc_monitor_create();
-    check(pc_process_signal(monitor, 1, 15) == PC_ERR_PROTECTED, "launchd refuses signals");
-    check(pc_process_signal(monitor, getpid(), 15) == PC_ERR_PROTECTED, "self refuses signals");
-    check(pc_process_signal(monitor, getppid(), 0) == PC_ERR_INVALID, "signal 0 rejected");
+    const bool signals = (pc_capabilities() & PC_CAP_SIGNALS) != 0;
+    check(pc_process_signal(monitor, init_pid(), 15) == (signals ? PC_ERR_PROTECTED : PC_ERR_UNSUPPORTED),
+          "init refuses signals");
+    check(pc_process_signal(monitor, own_pid(), 15) == (signals ? PC_ERR_PROTECTED : PC_ERR_UNSUPPORTED),
+          "self refuses signals");
+    if (signals) check(pc_process_signal(monitor, other_pid(), 0) == PC_ERR_INVALID, "signal 0 rejected");
     check(pc_process_suspend(monitor, 0) == PC_ERR_PROTECTED, "kernel can't be suspended");
-    check(pc_process_set_priority(monitor, 1, 5) == PC_ERR_PROTECTED, "launchd priority unchanged");
-    check(pc_process_set_affinity(monitor, getppid(), 0) == PC_ERR_INVALID ||
-              pc_process_set_affinity(monitor, getppid(), 0) == PC_ERR_UNSUPPORTED,
+    check(pc_process_set_priority(monitor, init_pid(), 5) == PC_ERR_PROTECTED, "init priority unchanged");
+    // An unprotected process of ours or another user: protection is checked before the mask.
+    int32_t victim = other_pid();
+#if defined(_WIN32)
+    for (const pc_process *p = pc_monitor_snapshot(monitor)->processes,
+                          *end = p + pc_monitor_snapshot(monitor)->process_count;
+         p < end; ++p)
+        if (!(p->flags & PC_PROC_PROTECTED) && p->pid != own_pid()) victim = p->pid;
+#endif
+    check(pc_process_set_affinity(monitor, victim, 0) == PC_ERR_INVALID ||
+              pc_process_set_affinity(monitor, victim, 0) == PC_ERR_UNSUPPORTED,
           "empty affinity rejected");
+#if !defined(_WIN32)
     // System-domain changes need the helper; without it nothing runs.
     check(pc_service_control(monitor, PC_DOMAIN_SYSTEM, "com.example.none", PC_SERVICE_STOP) == PC_ERR_PERMISSION,
           "system service needs helper");
     check(pc_service_control(monitor, PC_DOMAIN_USER, "bad label", PC_SERVICE_STOP) == PC_ERR_INVALID,
           "bad service label rejected");
-    check(pc_service_control(monitor, PC_DOMAIN_USER, "com.example.none", 99) == PC_ERR_INVALID, "bad action rejected");
     check(pc_startup_set_enabled(monitor, PC_STARTUP_DAEMON, "com.example.none", false) == PC_ERR_PERMISSION,
           "daemon needs helper");
+#else
+    // No helper: the OS answers, and a service that doesn't exist is reported as such.
+    check(pc_service_control(monitor, PC_DOMAIN_SYSTEM, "ProcyonNoSuchService", PC_SERVICE_STOP) == PC_ERR_NOT_FOUND,
+          "unknown service not found");
+    check(pc_service_control(monitor, PC_DOMAIN_USER, "bad/label", PC_SERVICE_STOP) == PC_ERR_INVALID,
+          "bad service label rejected");
+    check(pc_startup_set_enabled(monitor, PC_STARTUP_USER_AGENT, "run:nowhere:Thing", false) == PC_ERR_INVALID,
+          "startup label without a known source rejected");
+#endif
+    check(pc_service_control(monitor, PC_DOMAIN_USER, "com.example.none", 99) == PC_ERR_INVALID, "bad action rejected");
     check(pc_startup_set_enabled(monitor, 7, "com.example.none", false) == PC_ERR_INVALID, "bad scope rejected");
 
     const pc_process_details *details = nullptr;
-    check(pc_process_details_get(monitor, getpid(), &details) == PC_OK && details, "own details readable");
+    check(pc_process_details_get(monitor, own_pid(), &details) == PC_OK && details, "own details readable");
     check(details && details->arguments_known && details->argument_count >= 1, "own arguments readable");
     check(details && details->threads_known && details->thread_count >= 1, "own threads readable");
     check(pc_process_details_get(monitor, -5, &details) == PC_ERR_NOT_FOUND, "unknown pid not found");
@@ -415,8 +494,10 @@ int main() {
         files_round_trip();
         own_handles();
         validation();
+#if !defined(_WIN32)
         managed_startup_parsing();
         launchctl_parsing();
+#endif
         tick_wrap();
         handle_denial();
         view_grouping();

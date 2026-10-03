@@ -1,5 +1,43 @@
 #include "helper_client.hpp"
 
+#if defined(_WIN32)
+// No helper on Windows: the UI relaunches itself elevated for full access, so the core acts with
+// the rights it has. The client never connects; every call reports "no helper".
+namespace procyon {
+
+bool HelperClient::connect(const std::string &) { return false; }
+void HelperClient::disconnect() { fd_ = -1; }
+bool HelperClient::sample(const std::vector<int32_t> &, std::vector<helper::Counters> &out) {
+    out.clear();
+    return false;
+}
+pc_result HelperClient::signal(int32_t, int32_t) { return PC_ERR_PERMISSION; }
+pc_result HelperClient::set_priority(int32_t, int32_t) { return PC_ERR_PERMISSION; }
+bool HelperClient::details(int32_t, platform::Details &) { return false; }
+pc_result HelperClient::launchd(const std::string &, int32_t) { return PC_ERR_PERMISSION; }
+bool HelperClient::startup_items(std::vector<pc_startup_item> &out, bool &ready) {
+    out.clear();
+    ready = false;
+    return false;
+}
+bool HelperClient::open_files(int32_t, std::vector<platform::OpenFile> &out, bool &complete) {
+    out.clear();
+    complete = false;
+    return false;
+}
+bool HelperClient::connections(int32_t, std::vector<pc_connection> &out, bool &complete) {
+    out.clear();
+    complete = false;
+    return false;
+}
+bool HelperClient::send_all(const void *, size_t) { return false; }
+bool HelperClient::receive_all(void *, size_t) { return false; }
+pc_result HelperClient::simple(helper::Request, int32_t, uint32_t, const void *, size_t) { return PC_ERR_PERMISSION; }
+
+}  // namespace procyon
+
+#else
+
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -259,3 +297,5 @@ bool HelperClient::receive_all(void *data, size_t size) {
 }
 
 }  // namespace procyon
+
+#endif  // !_WIN32

@@ -1,0 +1,8 @@
+// Configured by apps/windows/CMakeLists.txt from the VERSION file. Do not edit version.h.
+#pragma once
+
+#define PROCYON_VERSION_MAJOR @PROCYON_VERSION_MAJOR@
+#define PROCYON_VERSION_MINOR @PROCYON_VERSION_MINOR@
+#define PROCYON_VERSION_PATCH @PROCYON_VERSION_PATCH@
+#define PROCYON_VERSION_STRING "@PROCYON_VERSION@"
+#define PROCYON_BUILD_COMMIT "@PROCYON_COMMIT@"

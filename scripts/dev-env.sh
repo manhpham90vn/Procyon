@@ -17,6 +17,7 @@ CLANG_TIDY="$(find_tool clang-tidy)"
 SWIFT_PATHS=(Package.swift apps scripts/make-icon.swift scripts/bench-probe.swift)
 CPP_FILES=()
 while IFS= read -r file; do CPP_FILES+=("$file"); done < <(
-    find core -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' \) | sort
+    find core apps/windows/src -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' \) |
+        grep -v 'Tokens.generated.h' | sort
 )
 SHELL_FILES=(scripts/*.sh)

@@ -1,10 +1,17 @@
 // procyon-cli: exercises the C ABI without a UI.
 //   procyon-cli [samples] [interval_ms] [filter]
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include <string>
 
@@ -16,11 +23,26 @@
 
 #include "procyon/procyon.h"
 
+#if defined(_WIN32)
+static double cpu_seconds() {
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user);
+    const auto value = [](const FILETIME &ft) {
+        return ((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 1e7;
+    };
+    return value(kernel) + value(user);
+}
+
+static int own_pid() { return static_cast<int>(GetCurrentProcessId()); }
+#else
 static double cpu_seconds() {
     rusage usage{};
     getrusage(RUSAGE_SELF, &usage);
     return usage.ru_utime.tv_sec + usage.ru_stime.tv_sec + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
 }
+
+static int own_pid() { return getpid(); }
+#endif
 
 // Unknown values are -1 in the ABI: print them as "-", never as a number.
 static const char *rate_text(double value, const char *format, char *buffer, size_t capacity) {
@@ -46,6 +68,7 @@ int main(int argc, char **argv) {
     // the helper then starts as root, and the CLI itself goes back to being the invoking user
     // (SUDO_UID), the user the helper serves. The helper refuses to serve root.
     std::string socket_directory, socket_path;
+#if !defined(_WIN32)
     if (const char *helper = std::getenv("PROCYON_HELPER")) {
         uid_t user = getuid();
         gid_t group = getgid();
@@ -82,6 +105,7 @@ int main(int argc, char **argv) {
         }
         std::printf("helper %s\n", attached ? "attached" : "FAILED to attach");
     }
+#endif
     const pc_volume *volumes = nullptr;
     for (int i = 0, n = pc_monitor_volumes(monitor, &volumes); i < n; ++i)
         std::printf("volume %s at %s: %.1f / %.1f GB free\n", volumes[i].name, volumes[i].mount_point,
@@ -120,7 +144,7 @@ int main(int argc, char **argv) {
                     managed[i].enabled ? "enabled " : "disabled", managed[i].pid, managed[i].app_path,
                     managed[i].parent_name);
     const pc_process_details *details = nullptr;
-    if (pc_process_details_get(monitor, getpid(), &details) == PC_OK)
+    if (pc_process_details_get(monitor, own_pid(), &details) == PC_OK)
         std::printf("self: %d args, %d env, %d threads, cwd %s, nice %d\n", details->argument_count,
                     details->environment_count, details->thread_count, details->cwd, details->nice);
 
@@ -136,8 +160,12 @@ int main(int argc, char **argv) {
             snap->memory_total / 1073741824.0, snap->memory_pressure, snap->swap_used / 1073741824.0,
             snap->disk_read_bps, snap->disk_write_bps, snap->net_rx_bps, snap->net_tx_bps, snap->process_count,
             snap->thread_count, snap->restricted_count, snap->helper_state);
-        if (snap->cpu_temperature >= 0)
-            std::printf("cpu temperature %.1f °C · ssd %.1f °C\n", snap->cpu_temperature, snap->disk_temperature);
+        if (snap->cpu_temperature >= 0 || snap->disk_temperature >= 0) {
+            char cpu_text[32], disk_text[32];
+            std::printf("cpu temperature %s °C · ssd %s °C\n",
+                        rate_text(snap->cpu_temperature, "%.1f", cpu_text, sizeof(cpu_text)),
+                        rate_text(snap->disk_temperature, "%.1f", disk_text, sizeof(disk_text)));
+        }
         for (int g = 0; g < snap->gpu_count; ++g) {
             const pc_gpu &gpu = snap->gpus[g];
             double per_process = 0;
@@ -170,8 +198,10 @@ int main(int argc, char **argv) {
     const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
     std::printf("\ncore overhead: %.2f%% of one core\n", (cpu_seconds() - cpu_start) / wall * 100);
     pc_monitor_destroy(monitor);
+#if !defined(_WIN32)
     if (!socket_directory.empty()) {  // the helper exits when its client goes away
         unlink(socket_path.c_str());
         rmdir(socket_directory.c_str());
     }
+#endif
 }

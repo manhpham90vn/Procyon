@@ -109,7 +109,8 @@ bool processes(std::vector<RawProcess> &out);
 bool process_parents(std::vector<ProcessParent> &out);
 // Fills cpu/memory/disk/thread counters for one process; false when privileges are missing.
 bool read_counters(int32_t pid, RawProcess &out);
-int64_t start_time(int32_t pid);  // -1 when the process doesn't exist
+// -1 when the process doesn't exist, 0 when it exists but its start time can't be read.
+int64_t start_time(int32_t pid);
 // Per-process network: whether the source works on this machine, and fills
 // has_net_io/net_rx/net_tx. Totals may lag by one refresh; never blocks.
 bool process_network_available();
@@ -124,6 +125,12 @@ std::string user_name(uint32_t uid);
 AppIdentity app_identity(const RawProcess &process);
 bool is_system_process(const RawProcess &process);
 int32_t self_pid();
+// Pids that must never be ended or changed, whatever the user asks: the kernel and init
+// (launchd, pid 0 and 1; the idle process and System, pid 0 and 4, on Windows).
+bool protected_pid(int32_t pid);
+// Whether privileged actions go through procyon-helper (macOS) or the process runs with the
+// rights it has (Windows: the UI relaunches itself elevated for full access).
+bool helper_supported();
 
 // Sends a termination request (force = false) or kill (force = true).
 pc_result signal_process(int32_t pid, bool force);

@@ -35,6 +35,8 @@ jobs:
   release:
     runs-on: xcode-27
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     env:
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -108,3 +110,30 @@ jobs:
       - name: Clean up keychain
         if: always() && env.MACOS_CERTIFICATE_P12 != ''
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+
+  # Windows: a zip with Procyon.exe, attached to the release the macOS job created.
+  windows:
+    name: Windows package
+    needs: release
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: cmd
+        run: call scripts\build-windows.cmd release
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = "${{ needs.release.outputs.version }}"
+          Compress-Archive -Path dist\windows\Procyon.exe, LICENSE, README.md -DestinationPath "dist\Procyon-$v-windows-x64.zip" -Force
+          $hash = (Get-FileHash "dist\Procyon-$v-windows-x64.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  Procyon-$v-windows-x64.zip" | Out-File -Encoding ascii "dist\Procyon-$v-windows-x64.sha256"
+      - name: Upload to the release
+        shell: pwsh
+        run: |
+          $v = "${{ needs.release.outputs.version }}"
+          $tag = "${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.release.outputs.version) }}"
+          gh release upload $tag "dist\Procyon-$v-windows-x64.zip" "dist\Procyon-$v-windows-x64.sha256" --clobber

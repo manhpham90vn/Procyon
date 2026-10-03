@@ -75,3 +75,22 @@ jobs:
           path: dist/bench.json
           if-no-files-found: ignore
           retention-days: 30
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, core tests, smoke run
+        # windows-latest ships Visual Studio 2022 with CMake and Ninja on PATH.
+        shell: cmd
+        run: |
+          call scripts\build-windows.cmd release
+          if errorlevel 1 exit /b 1
+          build\windows\procyon-cli.exe 1 300
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Procyon-windows-${{ github.sha }}
+          path: dist\windows\Procyon.exe
+          retention-days: 7

@@ -14,6 +14,20 @@
 
 using namespace procyon;
 
+// Windows has no POSIX signals: the portable layer keeps the BSD numbers (what macOS uses) and the
+// Windows adapter maps them to TerminateProcess and NtSuspendProcess/NtResumeProcess.
+#if defined(_WIN32)
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+#ifndef SIGSTOP
+#define SIGSTOP 17
+#endif
+#ifndef SIGCONT
+#define SIGCONT 19
+#endif
+#endif
+
 namespace {
 
 double steady_seconds() {
@@ -92,7 +106,7 @@ pc_result signal_with_fallback(pc_monitor *monitor, int32_t pid, bool force) {
 
 // Kernel, init/launchd and Procyon itself never take signals or priority changes.
 bool is_protected(const pc_monitor *monitor, int32_t pid) {
-    if (pid <= 1 || pid == platform::self_pid()) return true;
+    if (platform::protected_pid(pid) || pid == platform::self_pid()) return true;
     if (monitor) {
         for (const auto &p : monitor->processes)
             if (p.pid == pid) return (p.flags & PC_PROC_PROTECTED) != 0;
@@ -291,7 +305,7 @@ const pc_snapshot *pc_monitor_refresh(pc_monitor *monitor) {
             ++restricted;
         }
         if (platform::is_system_process(r)) p.flags |= PC_PROC_SYSTEM;
-        if (r.pid <= 1 || r.pid == self) p.flags |= PC_PROC_PROTECTED;
+        if (platform::protected_pid(r.pid) || r.pid == self) p.flags |= PC_PROC_PROTECTED;
 
         const auto app = platform::app_identity(r);
         if (app.id.rfind("exe:", 0) != 0) p.flags |= PC_PROC_APP_BUNDLE;
@@ -332,7 +346,7 @@ pc_result pc_process_end(pc_monitor *monitor, int32_t pid, bool force) {
 
 pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid) {
     if (!monitor) return PC_ERR_FAILED;
-    if (pid <= 1 || pid == platform::self_pid()) return PC_ERR_PROTECTED;
+    if (platform::protected_pid(pid) || pid == platform::self_pid()) return PC_ERR_PROTECTED;
 
     // The snapshot's process list is stale by up to a refresh and empty when process sampling is
     // off (menu bar only): read the parent links fresh, so a child spawned since is ended too.
@@ -361,7 +375,7 @@ pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid) {
     pc_result result = PC_OK;
     for (int32_t target : order) {
         // Kernel, launchd and Procyon itself stay, whatever the tree says.
-        if (target <= 1 || target == self) continue;
+        if (platform::protected_pid(target) || target == self) continue;
         pc_result r = signal_with_fallback(monitor, target, true);
         if (target == pid)
             result = r;
@@ -549,6 +563,8 @@ static pc_result control(pc_monitor *monitor, int32_t domain, const char *label,
     if (!monitor || !label || !platform::valid_service_label(label)) return PC_ERR_INVALID;
     if (domain == PC_DOMAIN_USER) return platform::service_control(domain, label, action);
     if (domain != PC_DOMAIN_SYSTEM) return PC_ERR_INVALID;
+    // Without a helper the OS decides: the process either has the rights (elevated) or is refused.
+    if (!platform::helper_supported()) return platform::service_control(domain, label, action);
     if (!monitor->helper.connected()) return PC_ERR_PERMISSION;
     const pc_result result = monitor->helper.launchd(label, action);
     if (!monitor->helper.connected()) monitor->helper_state = PC_HELPER_LOST;

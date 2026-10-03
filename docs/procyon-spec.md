@@ -18,7 +18,8 @@ A GUI task manager for Windows, macOS and Linux, as deep as the Windows Task Man
 | IT / managing a few machines | See several machines at once, alerts | After v1 |
 
 Status (Oct 3, 2026): the macOS app implements P0, P1 and most of P2 (`docs/development.md` tracks each item);
-Windows and Linux are not started.
+the Windows app covers P0 plus startup, services, GPU, battery and Files & Ports (status in `docs/development.md`);
+Linux is not started.
 
 **Design principles:**
 
@@ -183,7 +184,7 @@ No dates set yet; each phase only starts once it passes the gate before it.
 
 **Open questions:**
 
-- [ ] Which of Windows and Linux comes second?
+- [x] Windows came second (Oct 3, 2026): Win32 + Direct2D over the shared core, elevation through UAC instead of a helper.
 - [ ] GTK: use the C API (GTK4) directly, or gtkmm?
 - [ ] Fan speeds on macOS need the SMC; worth the private-API risk?
 

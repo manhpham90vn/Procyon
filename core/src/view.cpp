@@ -10,6 +10,10 @@
 namespace procyon {
 namespace {
 
+#if defined(_WIN32)
+#define strcasecmp _stricmp
+#endif
+
 struct Node {
     pc_row row{};
     const char *name = "";

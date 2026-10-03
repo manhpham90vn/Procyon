@@ -554,6 +554,10 @@ bool is_system_process(const RawProcess &process) {
 
 int32_t self_pid() { return getpid(); }
 
+bool protected_pid(int32_t pid) { return pid <= 1; }  // kernel_task and launchd
+
+bool helper_supported() { return true; }
+
 pc_result signal_process(int32_t pid, bool force) { return send_signal(pid, force ? SIGKILL : SIGTERM); }
 
 bool valid_signal(int32_t signal) { return signal > 0 && signal < NSIG; }

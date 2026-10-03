@@ -1,4 +1,4 @@
-# Developing Procyon
+Core counts aren't published. Temperature: NVIDIA through NVML (`nvml.dll`, installed by the driver, answers any user, matched to the DXGI adapter by product name); AMD (ADLX) and Intel (IGCL) not yet. |# Developing Procyon
 
 Notes for contributors: repo layout, build commands, CI/CD, feature status against the spec and how the privileged helper works. For installing and using the app, see the [README](../README.md).
 
@@ -15,7 +15,14 @@ core/                       C++20 core with a stable C ABI (shared by every UI)
   src/platform/macos_power.cpp    battery, sleep assertions, temperature sensors (IOHID, dlsym'd)
   src/platform/macos_launchd.cpp  services and startup items (launchd jobs via /bin/launchctl)
   src/platform/macos_handles.cpp  open files and TCP/UDP sockets per process (libproc, like lsof)
+  src/platform/windows.cpp        Windows adapter (NtQuerySystemInformation, PDH-free counters, PEB reads)
+  src/platform/windows_services.cpp  services (SCM) and startup items (Run keys, Startup folders, StartupApproved)
+  src/platform/windows_handles.cpp   open files (system handle table) and TCP/UDP sockets (IP helper)
+  src/platform/windows_gpu.cpp       GPUs (DXGI) and usage per adapter and process ("GPU Engine" counters)
+  src/platform/windows_power.cpp     battery (battery class driver), ACPI and drive temperatures
+  src/platform/windows_internal.hpp  shared native declarations and helpers for the Windows files
   src/helper_server.cpp       privileged helper (procyon-helper), src/helper_client.cpp its client
+                              (a stub on Windows: the app relaunches itself elevated instead)
   helper/main.c               procyon-helper entry point
   tools/procyon_cli.cpp       headless prototype and overhead measurement
   tests/core_tests.cpp        helper wire format, validation and refusal checks (ctest)
@@ -28,12 +35,25 @@ apps/macos/Sources/
   ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Energy,
                             Startup, Services, History, Files & Ports, Battery, System; ⌘K palette;
                             menu bar widget
+apps/windows/
+  CMakeLists.txt            Procyon.exe (Win32 + Direct2D/DirectWrite, no other dependencies)
+  src/ui.hpp, render.cpp    theme, formatting, and the renderer that draws design/components.md
+  src/store.*               sampler thread around pc_monitor, snapshot copies, 60 s histories
+  src/widgets.*             search field, scrolling, virtual table
+  src/pages.hpp, page_*.cpp screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Battery,
+                            Startup, Services, Files & Ports, System, Settings
+  src/overlays.*            Ctrl+K palette and Get Info
+  src/window.cpp            main window: sidebar, routing, tray icon, dialogs, elevation, settings
+  src/Tokens.generated.h    generated from design/tokens.json
+  res/                      icon (from the shared PNG), manifest, accelerators, version resource
+  res/fonts/                InterVariable.ttf (SIL OFL 1.1), embedded as an RCDATA resource
 data/
   process-catalog.json      plain-language explanations of common processes
 scripts/
-  gen-tokens.py             tokens.json → Tokens.generated.swift
+  gen-tokens.py             tokens.json → Tokens.generated.swift and Tokens.generated.h
   build-macos-app.sh        builds dist/Procyon.app
-  make-icon.swift           renders the app icon
+  build-windows.cmd         builds build\windows (core, CLI, tests, app) and dist\windows\Procyon.exe
+  make-icon.swift           renders the app icon; make-icon-windows.ps1 converts it to Procyon.ico
 ```
 
 ## Build and run (macOS 14+, Xcode 27)
@@ -46,6 +66,29 @@ make help         # everything else
 ```
 
 Open a specific screen at launch: `dist/Procyon.app/Contents/MacOS/Procyon -initialPage processes`.
+
+## Build and run (Windows 10 1809+ / 11, Visual Studio 2022)
+
+The Makefile has the same targets on both platforms; on Windows it runs its recipes through `cmd.exe`, so
+`make` works from cmd, PowerShell and Git Bash alike. GNU Make comes from `winget install ezwinports.make`.
+
+```bat
+make tools        rem once: CMake, Ninja and clang-format into build\tools (not needed with VS's CMake component)
+make run          rem release build, dist\windows\Procyon.exe, open it
+make test         rem release build + core tests (make core is the same)
+make build        rem debug build into build\windows-debug
+make lint         rem clang-format --dry-run, generated files and python checks (the last two need python)
+make format       rem clang-format in place
+make ci           rem lint + test + app, what the Windows CI job runs
+make help         rem everything else
+```
+
+Underneath, `scripts\build-windows.cmd [release|debug] [--no-tests]` finds Visual Studio through `vswhere`, runs
+`vcvars64.bat`, puts `build\tools` first on PATH, then falls back to the CMake and Ninja of the *C++ CMake tools*
+component or PATH. Everything builds from `core/CMakeLists.txt`, which adds `apps/windows` on Windows. Headless:
+`build\windows\procyon-cli.exe 3 1000`; a screen at launch: `dist\windows\Procyon.exe --page processes`.
+`scripts\lint-windows.ps1` and `scripts\format-windows.ps1` are the Windows counterparts of `lint.sh`/`format.sh`
+(no Swift, no clang-tidy, no shellcheck); `scripts\tools-windows.ps1` fetches the pinned tool versions.
 
 ## Development
 
@@ -63,13 +106,16 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
 ### CI/CD (GitHub Actions)
 
 - **`ci.yml`** runs on every push to `main` and every PR: lint, then unit tests, a CMake core build with a
-  `procyon-cli` smoke run, and the .app uploaded as an artifact.
+  `procyon-cli` smoke run, and the .app uploaded as an artifact. A `windows-latest` job runs
+  `scripts\build-windows.cmd` (core tests included), smoke-runs `procyon-cli.exe`, and uploads `Procyon.exe`.
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID
   and notarizes; without them the build is ad-hoc signed. With `HOMEBREW_TAP_TOKEN` (contents write access to
   [manhpham90vn/homebrew-tap](https://github.com/manhpham90vn/homebrew-tap)), stable releases also update the `procyon`
-  cask there through `scripts/publish-homebrew.sh`, rendered from `packaging/homebrew/procyon.rb`.
+  cask there through `scripts/publish-homebrew.sh`, rendered from `packaging/homebrew/procyon.rb`. A second job
+  then builds `Procyon-x.y.z-windows-x64.zip` (unsigned; Authenticode signing and winget are open) with its
+  SHA-256 and attaches both to the same release.
 
 The `VERSION` file is the single source of the version: `scripts/build-macos-app.sh` writes it (with the build
 number and git commit) into Info.plist, and the app shows it in Settings → About. The release job refuses a tag
@@ -171,3 +217,63 @@ a macOS release the feature hides instead of showing wrong numbers.
 
 ### Known limits
 - English only: the UI and every text in it, by design.
+
+## Windows
+
+The Windows app reuses the core unchanged (the same `pc_monitor` C ABI, views, deltas and refusals) and adds a
+Win32 front end drawn with Direct2D/DirectWrite: no framework, no runtime beyond Windows 10 1809. Text is set in
+Inter (bundled, loaded through an in-memory DirectWrite font set with its weight and optical-size axes per text
+style) because the macOS screens use SF Pro, which may not ship outside Apple platforms; Segoe UI Variable (Text
+below 20, Display from 20) is the fallback when the resource cannot load, Cascadia Mono / Consolas serve
+monospace. The screens,
+components and tokens follow `design/components.md` and `design/tokens.json` (`Tokens.generated.h`), and each screen
+is laid out like its SwiftUI counterpart (`apps/macos/Sources/ProcyonApp/Screens`): the same sidebar (brand, page
+rows with a detail line, metric rows with a 46×22 sparkline, Performance / Manage / Analyze / Machine sections, the
+Live pill and Settings at the bottom), the same `ScreenScroll` paddings, `PageHeader` with a trailing accessory,
+`Panel` captions, `LiveChart`, `StatGrid`, `MetricCard`, `TopAppsPanel`, `ActionBanner`, segmented controls and
+24 pt table rows with heat cells. SF Symbols are replaced by small vector glyphs (`Renderer::Symbol`), app icons
+by a metric tile, and the folder picker stands in for the macOS open panel in **Who Is Using…**.
+
+| Spec item | Status |
+| --- | --- |
+| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done except network. `NtQuerySystemInformation` gives every process's counters without privileges, so nothing is `PC_PROC_RESTRICTED`; the path, user and "critical process" flag come from a limited-rights handle, which an unelevated Procyon cannot open for the OS's own processes (csrss, services, lsass, …): their user shows as unknown ("—") until Full Access. Memory is the private working set, like Task Manager. Per-process network comes from the `Microsoft-Windows-Kernel-Network` ETW provider in a real-time session of Procyon's own (`windows_network.cpp`): starting a session takes administrator rights, so `PC_CAP_PROCESS_NETWORK` and the network columns are on only with Full Access. |
+| Flat / by app / tree views, search, sort, pin | Done (core). Apps are grouped by executable path; the app name is the executable's `FileDescription` ("Google Chrome"), what Task Manager shows. What lives under the Windows directory (svchost, dwm, …) is the OS, not an app: it groups by name, like the daemons of /System on macOS, and is not `PC_PROC_APP_BUNDLE`. **Pin to Top** keeps one app above the sorted rows in every view, as on macOS; a "top apps" row on Overview or a performance screen opens Processes on that app (by-app view, search cleared, the app pinned and selected), like the macOS `showInProcesses`. |
+| End task / force quit / end process tree | Done. End Task posts `WM_CLOSE` to a process's visible windows and terminates a process that has none; Force Quit and End Process Tree terminate. The idle process, `System`, processes flagged critical (`ProcessBreakOnTermination`) and, since that flag needs a handle an unelevated Procyon cannot get, the OS's own smss, csrss, wininit, winlogon, services, lsass, LsaIso, Registry, Memory Compression and Secure System by name are protected. End Process Tree follows the kernel's parent links only where the parent is older than the child: a reused parent pid adopts no strangers (macOS reparents orphans to launchd, so its tree never had this hole). |
+| Live charts, per-core usage, system info | Done. Hybrid cores (P/E) from `GetSystemCpuSetInformation`. |
+| Memory composition, pressure, page file | Done: in use / standby / free from `SystemMemoryListInformation`, non-paged kernel memory as "wired", the Memory Compression process's working set as "compressed" (`PC_CAP_MEMORY_COMPRESSED` only while that process exists), page files from `SystemPagefileInformation`, pressure from the low-memory notification plus the available share. |
+| Disk and network totals, volumes | Done: `IOCTL_DISK_PERFORMANCE` per physical drive, physical interfaces from `GetIfTable2` (virtual adapters skipped, like macOS). |
+| GPU: usage, memory, encode/decode; per-process GPU | Done through the `GPU Engine` and `GPU Adapter Memory` performance counters (what Task Manager reads): utilization is the busiest engine type, 3D/decode/encode separately; per-process GPU time adds up, interval by interval, the time of the process's busiest engine in that interval (so the cumulative figure never runs backwards when the busiest engine changes). NVIDIA temperatures through NVML; core counts aren't published. |
+| Priority, CPU affinity, suspend/resume, signals | Done: priority classes (never realtime), `SetProcessAffinityMask`, `NtSuspendProcess`/`NtResumeProcess`. No POSIX signals (`PC_CAP_SIGNALS` off). |
+| Process details: path, command line, environment, threads | Done: command line through `ProcessCommandLineInformation` (works for every bitness), working directory and environment from the PEB of 64-bit processes, threads from the system process table with names from `GetThreadDescription`. Other users' processes need administrator rights. |
+| Startup apps with impact, enable/disable | Done for the Run keys (user, machine, 32-bit) and both Startup folders, with the enabled state Task Manager keeps under `StartupApproved`; entries are named after their executable's `FileDescription` ("Microsoft Edge"), not the registry value. Task Scheduler tasks with a logon or boot trigger outside `\Microsoft` (the OS's own) are listed too, through the Task Scheduler COM API, with their `Enabled` flag switched from the Startup screen; their label is `task:` plus the task path with `|` for `\`. |
+| Services: start/stop/restart, enable/disable | Done through the Service Control Manager. Disable remembers the start type (Automatic, Manual) under `HKCU\Software\Procyon\ServiceStartTypes` and Enable puts it back (Automatic when nothing was remembered), the way `launchctl enable` restores a job's definition. "Part of the OS" means the binary lives under the Windows directory. |
+| Command palette, tray icon | Done: `Ctrl+K`; closing or minimizing the window keeps Procyon in the notification area (per-process sampling is skipped meanwhile, unless an alert rule watches apps), the tooltip shows the modules switched on in Settings (CPU, memory, network, GPU, like the macOS menu bar modules). Settings is the macOS form (at most 720 wide): Updates, Full access with its status and explanation, Notification area, Alerts (an enabled rule unfolds its threshold and duration), Appearance, Processes (default view), About with links. System has the hero card, Hardware and Software side by side, Kernel and Volumes. |
+| Battery | Done: level and times from `GetSystemPowerStatus`, capacity, cycles, rate and temperature from the battery class driver. Apps preventing sleep are read from `powercfg /requests` (run hidden, 5 s timeout; the kernel's `GetPowerRequestList` has no public layout and answers STATUS_INVALID_PARAMETER on Windows 11 25H2), parsed by section order (Display, System, Away mode, Execution, …) so localized headers don't matter; `[PROCESS]` entries are mapped from their NT path to a running pid, `[DRIVER]` entries carry the device description. powercfg needs administrator rights, so the list is empty without Full Access. |
+| Temperatures | ACPI thermal zones through the `Thermal Zone Information` performance counters (readable by every user; `MSAcpi_ThermalZoneTemperature` over WMI is the fallback, but it refuses non-administrators on most machines). Those are the firmware's zones, not the CPU die: die temperature is only reachable through a signed kernel driver reading MSRs. Many desktop boards publish a zone with a fixed placeholder (27.8 °C is common) and nothing behind it: a zone that has moved is preferred, and when none has, the CPU screen shows the board's reading labelled "Board zone (fixed reading)" rather than hiding the panel. The first physical drive through `IOCTL_STORAGE_QUERY_PROPERTY`: the generic temperature property, then the NVMe SMART / Health Information log page (the inbox NVMe driver rejects the generic property but serves the log page to any user). SATA SMART needs an administrator and is not read. Fans: not yet. |
+| Files & Ports | Done: listening ports, connections and **Who Is Using…** from the system handle table (named pipes are skipped before `NtQueryObject`, which would block on them); working directories are read from each process's PEB alone. IPv4 peers of dual-stack sockets (`::ffff:a.b.c.d` in the IPv6 table) are reported as IPv4, like macOS. Other users' processes need administrator rights. |
+| History | Done: one record a minute (machine averages, the CPU peak, the busiest apps) in `%LOCALAPPDATA%\Procyon\history.bin`, a flat record file compacted now and then (no SQLite on Windows); the History screen shows 1 / 6 / 24 hours per metric with the busiest apps and the peaks, a hovered or pinned minute narrows the apps to that minute. The minute in progress is written when the window closes. |
+| Alerts | Done: the same rules as macOS (machine CPU, memory, critical pressure, temperature where a sensor exists, an app's CPU or memory) with threshold and duration in Settings, a 15-minute cooldown, shown as Windows notifications through the tray icon. Rules that watch apps keep per-process sampling on while Procyon sits in the tray. |
+| Energy, process explanations, plugins | Not started on Windows (energy has no OS counters). |
+
+### Full access (elevation)
+
+There is no helper on Windows: `helper_supported()` is false, `HelperClient` is a stub, and the core acts with the
+rights the process has. **Unlock Full Access** restarts `Procyon.exe` through `ShellExecuteEx("runas")` with
+`--page <current screen>`, so the UAC prompt replaces the macOS helper approval. The protected-process policy
+(`protected_pid`: pids 0 and 4, critical processes, Procyon itself) is enforced in the core as on macOS.
+
+### Measured (i9-14900K, 32 threads, about 235 processes, 1 s updates, release build)
+
+- Core sampling: well under 1% of one core (`procyon-cli`).
+- Whole app with the window open: about 1.5% on dashboard screens, 4–5% on Processes (the table lays out
+  text for every visible cell each tick). Spec target: under 1–2%.
+
+### Checks
+
+`scripts/lint.sh` formats and lints the Windows sources with the core (clang-format), but clang-tidy skips them on
+macOS because they aren't in that compile database; the Windows CI job compiles them with `/W4`. Local builds are
+unsigned, so a machine with Smart App Control on refuses to run them; CI runs the tests on a clean runner.
+
+Two kernel quirks worth keeping in mind: `SystemProcessorPerformanceInformation` wants a buffer of exactly one record
+per processor (a larger one is refused), and the system tick must be computed as `kernel - idle` on the raw 100 ns
+values, because the difference of two separately rounded counters can go backwards and wrap the 32-bit tick delta.
