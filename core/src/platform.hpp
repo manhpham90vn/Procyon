@@ -160,6 +160,11 @@ bool handles_denied(int bytes, int error);
 
 bool battery(pc_battery &out);
 std::vector<PowerAssertion> power_assertions();
+#if defined(_WIN32)
+// The parsing half of power_assertions() on Windows: `report` is the output of `powercfg /requests`.
+// Spawns nothing (exposed for tests).
+std::vector<PowerAssertion> parse_power_requests(const std::string &report);
+#endif
 
 // Services and startup items (launchd, systemd, SCM).
 std::vector<pc_service> services();

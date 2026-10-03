@@ -82,6 +82,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Lint (generated files, clang-format, python)
+        # The same clang-format the macOS job uses, fetched by scripts\tools-windows.ps1; the
+        # runner's Python checks that Tokens.generated.h matches design/tokens.json.
+        shell: pwsh
+        run: |
+          scripts\tools-windows.ps1
+          scripts\lint-windows.ps1
       - name: Build, core tests, smoke run
         # windows-latest ships Visual Studio 2022 with CMake and Ninja on PATH.
         shell: cmd

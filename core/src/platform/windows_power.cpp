@@ -469,7 +469,9 @@ std::string trim(const std::string &text) {
     return text.substr(first, last - first + 1);
 }
 
-// The parsing half: `report` is powercfg's output. Exposed to the tests through the CLI only.
+}  // namespace
+
+// The parsing half of power_assertions(): `report` is powercfg's output. Exposed for the tests.
 std::vector<PowerAssertion> parse_power_requests(const std::string &report) {
     struct Section {
         uint32_t kind;
@@ -483,9 +485,13 @@ std::vector<PowerAssertion> parse_power_requests(const std::string &report) {
         {0, "PerfBoost"},
         {0, "ActiveLockScreen"},
     };
-    std::vector<PowerAssertion> result;
+    struct Parsed {
+        PowerAssertion assertion;
+        std::string holder;  // the executable or device the request belongs to
+    };
+    std::vector<Parsed> parsed;
     int section = -1;
-    int current = -1;  // index into result of the entry collecting reason lines, -1 none
+    int current = -1;  // index into parsed of the entry collecting reason lines, -1 none
     size_t start = 0;
     while (start <= report.size()) {
         size_t end = report.find('\n', start);
@@ -507,49 +513,52 @@ std::vector<PowerAssertion> parse_power_requests(const std::string &report) {
             if (!s.kind) continue;  // boosts and lock-screen holds keep nothing awake
             const std::string tag = line.substr(1, close - 1);
             const std::string rest = trim(line.substr(close + 1));
-            PowerAssertion a;
-            a.kind = s.kind;
-            a.type = s.type;
+            Parsed p;
+            p.assertion.kind = s.kind;
+            p.assertion.type = s.type;
             if (tag == "PROCESS" || tag == "SERVICE") {
                 // "\Device\HarddiskVolume3\...\app.exe", for a service followed by "(name)".
                 std::string path = rest;
                 if (const size_t paren = path.find(" ("); tag == "SERVICE" && paren != std::string::npos)
                     path.resize(paren);
-                a.pid = pid_of_executable(dos_path_of(path));
-                a.reason = tag == "SERVICE" ? "Windows service " + rest.substr(path.size()) : std::string();
+                p.holder = path;
+                p.assertion.pid = pid_of_executable(dos_path_of(path));
+                if (tag == "SERVICE") p.assertion.reason = "Windows service " + rest.substr(path.size());
             } else {
-                a.pid = 0;  // a driver: no process behind it
+                p.assertion.pid = 0;  // a driver: no process behind it
                 std::string description = rest;
                 if (const size_t paren = description.find(" ("); paren != std::string::npos)
                     description.resize(paren);  // drop the device instance id
-                a.reason = description;
+                p.holder = rest;
+                p.assertion.reason = description;
             }
-            result.push_back(std::move(a));
-            current = static_cast<int>(result.size()) - 1;
+            parsed.push_back(std::move(p));
+            current = static_cast<int>(parsed.size()) - 1;
             continue;
         }
         if (current < 0) continue;  // "None." under an empty section
-        PowerAssertion &a = result[static_cast<size_t>(current)];
-        a.reason += (a.reason.empty() ? "" : " · ") + line;
+        std::string &reason = parsed[static_cast<size_t>(current)].assertion.reason;
+        reason += (reason.empty() ? "" : " · ") + line;
     }
-    // One process holding both a display and a system request shows once, with both kinds.
-    std::vector<PowerAssertion> merged;
-    for (PowerAssertion &a : result) {
+    // One holder with both a display and a system request shows once, with both kinds.
+    std::vector<Parsed> merged;
+    for (Parsed &p : parsed) {
         bool joined = false;
-        for (PowerAssertion &m : merged) {
-            if (m.pid == a.pid && m.reason == a.reason && (a.pid != 0 || m.type == a.type)) {
-                m.kind |= a.kind;
-                if (m.type.find(a.type) == std::string::npos) m.type += "+" + a.type;
-                joined = true;
-                break;
-            }
+        for (Parsed &m : merged) {
+            if (m.holder != p.holder || m.assertion.reason != p.assertion.reason) continue;
+            m.assertion.kind |= p.assertion.kind;
+            if (m.assertion.type.find(p.assertion.type) == std::string::npos)
+                m.assertion.type += "+" + p.assertion.type;
+            joined = true;
+            break;
         }
-        if (!joined) merged.push_back(std::move(a));
+        if (!joined) merged.push_back(std::move(p));
     }
-    return merged;
+    std::vector<PowerAssertion> result;
+    result.reserve(merged.size());
+    for (Parsed &m : merged) result.push_back(std::move(m.assertion));
+    return result;
 }
-
-}  // namespace
 
 std::vector<PowerAssertion> power_assertions() {
     if (!is_elevated()) return {};  // powercfg refuses the listing to a standard user

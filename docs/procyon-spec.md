@@ -18,7 +18,7 @@ A GUI task manager for Windows, macOS and Linux, as deep as the Windows Task Man
 | IT / managing a few machines | See several machines at once, alerts | After v1 |
 
 Status (Oct 3, 2026): the macOS app implements P0, P1 and most of P2 (`docs/development.md` tracks each item);
-the Windows app covers P0 plus startup, services, GPU, battery and Files & Ports (status in `docs/development.md`);
+the Windows app covers P0 and P1 plus GPU, battery, Files & Ports, History and alerts, everything but energy (status in `docs/development.md`);
 Linux is not started.
 
 **Design principles:**

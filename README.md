@@ -3,8 +3,9 @@
 A lightweight, open-source task manager for macOS and Windows. See what is using your CPU, memory, disk,
 network, GPU and battery, find out what a process is, and stop the ones you don't need.
 
-The macOS app is complete (P2 in the [spec](docs/procyon-spec.md)); the Windows app is new and covers the
-basics plus startup, services, files and ports (status in [docs/development.md](docs/development.md#windows)).
+The macOS app is complete (P2 in the [spec](docs/procyon-spec.md)); the Windows app is new and covers the same
+screens: processes, performance, GPU, battery, startup, services, History, alerts and Files & Ports (status in
+[docs/development.md](docs/development.md#windows)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
@@ -218,9 +219,10 @@ optionally delete the settings key `HKEY_CURRENT_USER\Software\Procyon`.
 - The interface is English only.
 - Not available on macOS: CPU affinity, GPU encode/decode usage, fan speeds, and closing another process's
   network connection.
-- Not yet on Windows: per-process network, per-app energy, History, alerts, Task Scheduler startup entries,
-  apps preventing sleep, and the menu bar style widget (the tray icon shows one metric in its tooltip).
-  Temperatures come from the ACPI thermal zones (the motherboard sensors the firmware publishes, not the CPU die, which needs a kernel driver) and the system drive, which not every PC exposes.
+- Not yet on Windows: per-app energy (Windows has no energy counters) and the menu bar style widget (the tray
+  icon shows the chosen metrics in its tooltip). Per-process network and the list of apps preventing sleep need
+  Full Access (administrator rights), as Windows itself requires for them.
+  Temperatures come from the ACPI thermal zones (the motherboard sensors the firmware publishes, not the CPU die, which needs a kernel driver; a zone whose reading never moves is labelled as the board's) and the system drive, which not every PC exposes.
   GPU temperature is read for NVIDIA cards only (AMD and Intel: not yet).
 
 ## Building from source

@@ -107,7 +107,9 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
 
 - **`ci.yml`** runs on every push to `main` and every PR: lint, then unit tests, a CMake core build with a
   `procyon-cli` smoke run, and the .app uploaded as an artifact. A `windows-latest` job runs
-  `scripts\build-windows.cmd` (core tests included), smoke-runs `procyon-cli.exe`, and uploads `Procyon.exe`.
+  `scripts\lint-windows.ps1` (after `scripts\tools-windows.ps1` fetched clang-format; the runner's Python checks
+  the generated token header), then `scripts\build-windows.cmd` (core tests included), smoke-runs
+  `procyon-cli.exe`, and uploads `Procyon.exe`.
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID

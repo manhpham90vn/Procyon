@@ -175,6 +175,52 @@ void validation() {
 #endif
 }
 
+#if defined(_WIN32)
+// powercfg's report is parsed by section order (the headers may be localized): one holder with a
+// display and a system request shows once with both kinds, a driver is named after its device, and
+// performance boosts keep nothing awake.
+void power_request_parsing() {
+    const std::string report =
+        "DISPLAY:\r\n"
+        "[PROCESS] \\Device\\HarddiskVolume3\\Apps\\Player.exe\r\n"
+        "Playing a video\r\n"
+        "\r\n"
+        "SYSTEM:\r\n"
+        "[DRIVER] Realtek High Definition Audio (HDAUDIO\\FUNC_01&VEN_10EC&DEV_0897)\r\n"
+        "An audio stream is currently in use.\r\n"
+        "[PROCESS] \\Device\\HarddiskVolume3\\Apps\\Player.exe\r\n"
+        "Playing a video\r\n"
+        "\r\n"
+        "AWAYMODE:\r\n"
+        "None.\r\n"
+        "\r\n"
+        "EXECUTION:\r\n"
+        "None.\r\n"
+        "\r\n"
+        "PERFBOOST:\r\n"
+        "[PROCESS] \\Device\\HarddiskVolume3\\Apps\\Game.exe\r\n"
+        "Boost\r\n"
+        "\r\n"
+        "ACTIVELOCKSCREEN:\r\n"
+        "None.\r\n";
+    const auto requests = platform::parse_power_requests(report);
+    check(requests.size() == 2, "two holders listed, the boost left out");
+    bool player = false, driver = false;
+    for (const auto &r : requests) {
+        if (r.reason == "Playing a video")
+            player = r.kind == (PC_ASSERT_DISPLAY_SLEEP | PC_ASSERT_SYSTEM_SLEEP) &&
+                     r.type == "DisplayRequired+SystemRequired";
+        if (r.pid == 0 && r.type == "SystemRequired")
+            driver = r.kind == PC_ASSERT_SYSTEM_SLEEP &&
+                     r.reason == "Realtek High Definition Audio · An audio stream is currently in use.";
+    }
+    check(player, "display and system requests of one process merged");
+    check(driver, "driver request named after its device, instance id dropped");
+    check(platform::parse_power_requests("").empty() && platform::parse_power_requests("DISPLAY:\nNone.\n").empty(),
+          "empty report, empty list");
+}
+#endif
+
 #if !defined(_WIN32)
 // The helper parses as root on behalf of the app's user: the user's records must be chosen by the
 // uid it is given, not by the process's own.
@@ -494,7 +540,9 @@ int main() {
         files_round_trip();
         own_handles();
         validation();
-#if !defined(_WIN32)
+#if defined(_WIN32)
+        power_request_parsing();
+#else
         managed_startup_parsing();
         launchctl_parsing();
 #endif
