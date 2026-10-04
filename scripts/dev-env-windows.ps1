@@ -20,6 +20,9 @@ function Find-ClangFormat {
 }
 
 function Find-Python {
+    # The embeddable Python scripts\tools-windows.ps1 fetches when the machine has none.
+    $local = Join-Path (Split-Path -Parent $PSScriptRoot) "build\tools\python\python.exe"
+    if (Test-Path $local) { return $local }
     # The Microsoft Store alias answers to `python` but is not an interpreter: check it runs.
     foreach ($name in @("python", "python3", "py")) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
@@ -33,7 +36,7 @@ function Find-Python {
 
 function Get-CppFiles {
     $root = Split-Path -Parent $PSScriptRoot
-    Get-ChildItem -Recurse -File -Path (Join-Path $root "core"), (Join-Path $root "apps\ui\src"), (Join-Path $root "apps\windows\src") -Include *.cpp, *.hpp, *.h, *.c |
+    Get-ChildItem -Recurse -File -Path (Join-Path $root "core"), (Join-Path $root "apps\ui\src"), (Join-Path $root "apps\windows\src"), (Join-Path $root "apps\windows\tools") -Include *.cpp, *.hpp, *.h, *.c |
         Where-Object { $_.Name -ne "Tokens.generated.h" -and $_.Name -ne "icons_data.hpp" } |
         Sort-Object FullName |
         ForEach-Object { $_.FullName }

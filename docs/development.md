@@ -87,10 +87,11 @@ The Makefile has the same targets on both platforms; on Windows it runs its reci
 `make` works from cmd, PowerShell and Git Bash alike. GNU Make comes from `winget install ezwinports.make`.
 
 ```bat
-make tools        rem once: CMake, Ninja and clang-format into build\tools (not needed with VS's CMake component)
+make tools        rem once: CMake, Ninja, clang-format (and python when the machine has none) into build\tools
 make run          rem release build, dist\windows\Procyon.exe, open it
 make test         rem release build + core tests (make core is the same)
 make build        rem debug build into build\windows-debug
+make bench        rem measure every screen and the tray state against the spec's targets (scripts\bench-windows.py)
 make lint         rem clang-format --dry-run, generated files and python checks (the last two need python)
 make format       rem clang-format in place
 make ci           rem lint + test + app, what the Windows CI job runs
@@ -103,6 +104,14 @@ component or PATH. Everything builds from `core/CMakeLists.txt`, which adds `app
 `build\windows\procyon-cli.exe 3 1000`; a screen at launch: `dist\windows\Procyon.exe --page processes`.
 `scripts\lint-windows.ps1` and `scripts\format-windows.ps1` are the Windows counterparts of `lint.sh`/`format.sh`
 (no Swift, no clang-tidy, no shellcheck); `scripts\tools-windows.ps1` fetches the pinned tool versions.
+
+`scripts\bench-windows.py` is the counterpart of `bench-macos.py`: `build\windows\apps\windows\procyon-bench-probe.exe`
+(`apps/windows/tools/bench_probe.cpp`) launches `dist\windows\Procyon.exe --page <page> --no-settings` (the
+defaults, 1 s refresh, nothing read from or written to `HKCU\Software\Procyon`), times the first window, then
+samples CPU time and the private working set (Task Manager's *Memory* column) once a second; `tray` closes the
+window to the tray first. The CLI's numbers are compared with `GetSystemTimes`, `GlobalMemoryStatusEx`,
+`Win32_PageFileUsage` and `EnumProcesses`, and the release zip is rebuilt in a temp folder for its size. Output:
+`dist\bench-windows.json`. Options: `--pages`, `--duration`, `--attempts`, `--known-misses`, `--report-only`.
 
 ## Development
 
@@ -123,7 +132,8 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
   `procyon-cli` smoke run, and the .app uploaded as an artifact. A `windows-latest` job runs
   `scripts\lint-windows.ps1` (after `scripts\tools-windows.ps1` fetched clang-format; the runner's Python checks
   the generated token header), then `scripts\build-windows.cmd` (core tests included), smoke-runs
-  `procyon-cli.exe`, and uploads `Procyon.exe`.
+  `procyon-cli.exe`, uploads `Procyon.exe`, and runs `scripts\bench-windows.py` against the spec's targets
+  (`dist\bench-windows.json` is uploaded).
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID
@@ -288,7 +298,7 @@ in for the macOS open panel in **Who Is Using…**.
 | Process details: path, command line, environment, threads | Done: command line through `ProcessCommandLineInformation` (works for every bitness), working directory and environment from the PEB of 64-bit processes, threads from the system process table with names from `GetThreadDescription`. Other users' processes need administrator rights. |
 | Startup apps with impact, enable/disable | Done for the Run keys (user, machine, 32-bit) and both Startup folders, with the enabled state Task Manager keeps under `StartupApproved`; entries are named after their executable's `FileDescription` ("Microsoft Edge"), not the registry value. Task Scheduler tasks with a logon or boot trigger outside `\Microsoft` (the OS's own) are listed too, through the Task Scheduler COM API, with their `Enabled` flag switched from the Startup screen; their label is `task:` plus the task path with `|` for `\`. |
 | Services: start/stop/restart, enable/disable | Done through the Service Control Manager. Disable remembers the start type (Automatic, Manual) under `HKCU\Software\Procyon\ServiceStartTypes` and Enable puts it back (Automatic when nothing was remembered), the way `launchctl enable` restores a job's definition. "Part of the OS" means the binary lives under the Windows directory. |
-| Command palette, tray icon | Done: `Ctrl+K`; closing or minimizing the window keeps Procyon in the notification area (per-process sampling is skipped meanwhile, unless an alert rule watches apps), the tooltip shows the modules switched on in Settings (CPU, memory, network, GPU, like the macOS menu bar modules). Settings is the macOS form (at most 720 wide): Updates, Full access with its status and explanation, Notification area, Alerts (an enabled rule unfolds its threshold and duration), Appearance, Processes (default view), About with links. System has the hero card, Hardware and Software side by side, Kernel and Volumes. |
+| Command palette, tray icon | Done: `Ctrl+K`; closing or minimizing the window keeps Procyon in the notification area (per-process sampling is skipped meanwhile, unless an alert rule watches apps; the Direct2D/DirectWrite stack and the embedded fonts are released and the working set trimmed, so the private working set in the tray is a few MB, well under the spec's 30 MB, and recreated when the window opens again), the tooltip shows the modules switched on in Settings (CPU, memory, network, GPU, like the macOS menu bar modules). Settings is the macOS form (at most 720 wide): Updates, Full access with its status and explanation, Notification area, Alerts (an enabled rule unfolds its threshold and duration), Appearance, Processes (default view), About with links. System has the hero card, Hardware and Software side by side, Kernel and Volumes. |
 | Battery | Done: level and times from `GetSystemPowerStatus`, capacity, cycles, rate and temperature from the battery class driver. Apps preventing sleep are read from `powercfg /requests` (run hidden, 5 s timeout; the kernel's `GetPowerRequestList` has no public layout and answers STATUS_INVALID_PARAMETER on Windows 11 25H2), parsed by section order (Display, System, Away mode, Execution, …) so localized headers don't matter; `[PROCESS]` entries are mapped from their NT path to a running pid, `[DRIVER]` entries carry the device description. powercfg needs administrator rights, so the list is empty without Full Access. |
 | Temperatures | ACPI thermal zones through the `Thermal Zone Information` performance counters (readable by every user; `MSAcpi_ThermalZoneTemperature` over WMI is the fallback, but it refuses non-administrators on most machines). Those are the firmware's zones, not the CPU die: die temperature is only reachable through a signed kernel driver reading MSRs. Many desktop boards publish a zone with a fixed placeholder (27.8 °C is common) and nothing behind it: a zone that has moved is preferred, and when none has, the CPU screen shows the board's reading labelled "Board zone (fixed reading)" rather than hiding the panel. The first physical drive through `IOCTL_STORAGE_QUERY_PROPERTY`: the generic temperature property, then the NVMe SMART / Health Information log page (the inbox NVMe driver rejects the generic property but serves the log page to any user). SATA SMART needs an administrator and is not read. Fans: not yet. |
 | Files & Ports | Done: listening ports, connections and **Who Is Using…** from the system handle table (named pipes are skipped before `NtQueryObject`, which would block on them); working directories are read from each process's PEB alone. IPv4 peers of dual-stack sockets (`::ffff:a.b.c.d` in the IPv6 table) are reported as IPv4, like macOS. Other users' processes need administrator rights. |

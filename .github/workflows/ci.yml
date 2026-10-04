@@ -79,7 +79,7 @@ jobs:
   windows:
     name: Windows
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Lint (generated files, clang-format, python)
@@ -101,3 +101,14 @@ jobs:
           name: Procyon-windows-${{ github.sha }}
           path: dist\windows\Procyon.exe
           retention-days: 7
+      - name: Performance targets
+        # The Windows counterpart of the macOS step: every screen plus the tray only state, measured
+        # by build\windows\apps\windows\procyon-bench-probe.exe. Fails the build on a missed target.
+        run: python scripts\bench-windows.py --attempts 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-windows-${{ github.sha }}
+          path: dist\bench-windows.json
+          if-no-files-found: ignore
+          retention-days: 30

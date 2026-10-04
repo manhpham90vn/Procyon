@@ -1,15 +1,18 @@
 # Fetches the build tools the Windows build needs but Visual Studio may not provide, into
-# build\tools (ignored by git): CMake, Ninja and clang-format. scripts\build-windows.cmd and the
-# Makefile put that folder on PATH, so nothing has to be installed system-wide.
+# build\tools (ignored by git): CMake, Ninja, clang-format and, when the machine has no Python, the
+# embeddable Python the lint and bench scripts run on. scripts\build-windows.cmd and the Makefile
+# put that folder on PATH, so nothing has to be installed system-wide.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\tools-windows.ps1
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $tools = Join-Path $root "build\tools"
 New-Item -ItemType Directory -Force $tools | Out-Null
+. (Join-Path $PSScriptRoot "dev-env-windows.ps1")
 
 $cmakeVersion = "3.31.6"
 $ninjaVersion = "1.12.1"
+$pythonVersion = "3.12.7"
 # muttleyxd/clang-tools-static-binaries (the old clang-format-static-binaries name redirects, but
 # release downloads under it 404): the release that ships clang-format 19.1.0.
 $clangFormatRelease = "master-796e77c"
@@ -53,6 +56,14 @@ if (-not (Test-Path (Join-Path $tools "clang-format.exe"))) {
         throw "clang-format download does not match its sha512sum"
     }
 }
+if (-not (Find-Python)) {
+    # The embeddable distribution: python.exe and the standard library, nothing registered or on PATH.
+    Write-Host "Python $pythonVersion (embeddable)"
+    $zip = Join-Path $tools "python.zip"
+    Fetch "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip" $zip
+    Expand-Archive -Path $zip -DestinationPath (Join-Path $tools "python") -Force
+    Remove-Item $zip
+}
 
 # Versions, read whole: a native command cut off mid-pipeline is an error in pwsh 7.
 $cmakeOut = @(& (Join-Path $tools "cmake\bin\cmake.exe") --version)
@@ -61,4 +72,6 @@ $ninjaOut = @(& (Join-Path $tools "ninja.exe") --version)
 Write-Host "ninja $($ninjaOut[0])"
 $clangOut = @(& (Join-Path $tools "clang-format.exe") --version)
 Write-Host $clangOut[0]
+$pythonOut = @(& (Find-Python) --version)
+Write-Host $pythonOut[0]
 Write-Host "Tools are in $tools"

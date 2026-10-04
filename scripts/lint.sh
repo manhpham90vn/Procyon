@@ -37,6 +37,6 @@ if command -v shellcheck >/dev/null; then
 fi
 
 step "python"
-python3 -m py_compile scripts/gen-tokens.py scripts/gen-catalog.py scripts/bench-macos.py
+python3 -m py_compile scripts/gen-tokens.py scripts/gen-catalog.py scripts/bench-macos.py scripts/bench-windows.py
 
 printf '\nAll checks passed.\n'

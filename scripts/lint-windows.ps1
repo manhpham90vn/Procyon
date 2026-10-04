@@ -34,7 +34,7 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 
 if ($python) {
     Step "python"
-    & $python -m py_compile scripts/gen-tokens.py scripts/gen-catalog.py scripts/bench-macos.py
+    & $python -m py_compile scripts/gen-tokens.py scripts/gen-catalog.py scripts/bench-macos.py scripts/bench-windows.py
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 

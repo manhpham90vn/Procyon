@@ -85,7 +85,8 @@ std::optional<PageId> page_from_name(const std::wstring &name) {
 
 class MainWindow : public Host {
 public:
-    MainWindow(HINSTANCE instance, std::optional<PageId> initial) : instance_(instance), initial_page_(initial) {}
+    MainWindow(HINSTANCE instance, std::optional<PageId> initial, bool persist)
+        : instance_(instance), initial_page_(initial), persist_(persist) {}
 
     bool create(int show_command) {
         load_settings();
@@ -939,12 +940,19 @@ private:
     }
 
     void hide_to_tray() {
+        if (hidden_) return;
         hidden_ = true;
         ShowWindow(hwnd_, SW_HIDE);
         store_.set_process_sampling(false);
+        // Nothing paints while hidden: let go of the GPU device, Direct2D, DirectWrite and the embedded
+        // fonts (recreated by show_from_tray), then return the pages the heap no longer uses, so the
+        // footprint in the tray is what the sampler touches, not what the window did.
+        canvas_.shutdown();
+        SetProcessWorkingSetSizeEx(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1), 0);
     }
 
     void show_from_tray() {
+        if (hidden_) canvas_.init(hwnd_);  // released by hide_to_tray; the dpi is kept
         hidden_ = false;
         store_.set_process_sampling(true);
         ShowWindow(hwnd_, SW_SHOW);
@@ -972,6 +980,7 @@ private:
     // ---- settings and placement (HKCU\Software\Procyon) ----
 
     void load_settings() {
+        if (!persist_) return;  // --no-settings: defaults, nothing read
         HKEY key = nullptr;
         if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return;
         auto dword = [&](const wchar_t *name, DWORD fallback) {
@@ -998,6 +1007,7 @@ private:
     }
 
     void save_settings() {
+        if (!persist_) return;  // --no-settings: nothing written back
         HKEY key = nullptr;
         if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) !=
             ERROR_SUCCESS)
@@ -1312,6 +1322,7 @@ private:
 
     HINSTANCE instance_;
     std::optional<PageId> initial_page_;
+    bool persist_ = true;  // read and write HKCU\Software\Procyon
     HWND hwnd_ = nullptr;
     float dpi_ = 96;
     D2DCanvas canvas_;
@@ -1354,7 +1365,8 @@ int run_app(HINSTANCE instance, const std::wstring &args, int show_command) {
         initial = page_from_name(name);
     }
 
-    MainWindow window(instance, initial);
+    // --no-settings: the defaults (1 s refresh, close to tray) and no registry writes, for measurements.
+    MainWindow window(instance, initial, args.find(L"--no-settings") == std::wstring::npos);
     g_window = &window;
     if (!window.create(show_command)) return 1;
     HACCEL accelerators = LoadAcceleratorsW(instance, MAKEINTRESOURCEW(IDR_ACCELERATORS));

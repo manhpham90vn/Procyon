@@ -28,8 +28,8 @@ app: ## Release dist\windows\Procyon.exe
 run: app ## Build and open the app
 	start "" dist\windows\Procyon.exe
 
-bench: ## Measure the app against the spec's performance targets (macOS only for now)
-	@echo bench is macOS only for now (scripts/bench-macos.py)
+bench: ## Measure the app against the spec's performance targets (python: make tools fetches one)
+	powershell -NoProfile -ExecutionPolicy Bypass -Command ". scripts\dev-env-windows.ps1; & (Find-Python) scripts\bench-windows.py; exit $$LASTEXITCODE"
 
 screenshots: ## Retake the README screenshots (macOS only for now)
 	@echo screenshots is macOS only for now (scripts/screenshots.swift)

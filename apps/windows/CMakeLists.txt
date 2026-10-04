@@ -21,3 +21,11 @@ target_link_libraries(Procyon PRIVATE procyon_ui d2d1 dwrite d3d11 dxgi dcomp dx
 target_compile_options(Procyon PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /wd4100)
 target_compile_definitions(Procyon PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
 set_target_properties(Procyon PROPERTIES OUTPUT_NAME "Procyon")
+
+# Measurement tool for scripts/bench-windows.py: launches the app, times its first window and
+# samples its CPU and private working set (the counterpart of scripts/bench-probe.swift).
+add_executable(procyon-bench-probe tools/bench_probe.cpp)
+target_include_directories(procyon-bench-probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../ui/src")
+target_link_libraries(procyon-bench-probe PRIVATE ntdll user32)
+target_compile_options(procyon-bench-probe PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus)
+target_compile_definitions(procyon-bench-probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
