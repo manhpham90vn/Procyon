@@ -270,5 +270,7 @@ The repo layout, CI and release process, how the privileged helper works, and fe
 ## License
 
 Procyon is released under the [MIT License](LICENSE). The Windows app embeds the
-[Inter](https://github.com/rsms/inter) typeface, licensed under the
-[SIL Open Font License 1.1](apps/windows/res/fonts/LICENSE-Inter.txt).
+[Inter](https://github.com/rsms/inter) and [Nunito](https://github.com/googlefonts/nunito) typefaces, licensed
+under the [SIL Open Font License 1.1](design/fonts/LICENSE-Inter.txt) ([Nunito](design/fonts/LICENSE-Nunito.txt)),
+and draws its icons from [Lucide](https://lucide.dev), licensed under the
+[ISC License](design/icons/LICENSE-Lucide.txt).

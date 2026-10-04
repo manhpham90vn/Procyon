@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "commands.hpp"
 #include "pages.hpp"
-#include "resource.h"
 #include "widgets.hpp"
 
 namespace procyon::ui {
@@ -222,18 +222,18 @@ public:
             rebuild();
         }
         if (consumed) return true;
-        if (search_.focused && e.vk == VK_RETURN) {
+        if (search_.focused && e.key == Key::Return) {
             search_.focused = false;
             table_.focused = true;
             if (table_.selected < 0 && !visible_.empty()) table_.select(0);
             return true;
         }
-        if (search_.focused && (e.vk == VK_DOWN || e.vk == VK_UP)) {
+        if (search_.focused && (e.key == Key::Down || e.key == Key::Up)) {
             search_.focused = false;
             table_.focused = true;
         }
         if (table_.key(e)) return true;
-        if (e.vk == VK_SPACE && table_.selected >= 0 && !search_.focused) {
+        if (e.key == Key::Space && table_.selected >= 0 && !search_.focused) {
             toggle(table_.selected);
             return true;
         }
@@ -282,7 +282,7 @@ public:
                    ? pid_of(row(table_.selected))
                    : 0;
     }
-    LPCWSTR cursor() const override { return IDC_ARROW; }
+    Cursor cursor() const override { return Cursor::Arrow; }
 
     bool command(Host &host, int id) override {
         host_ = &host;
@@ -461,6 +461,9 @@ private:
                     c.paused = p->state == PC_STATE_STOPPED;
                     if (p->flags & PC_PROC_PROTECTED) c.color = theme.text_secondary();
                 }
+                c.icon = true;
+                c.icon_path = app_icon_path(r, p, s);
+                c.icon_system = p ? (p->flags & PC_PROC_SYSTEM) != 0 : r.is_group() && r.group_id.rfind("exe:", 0) == 0;
                 c.pinned = pinned(r);
                 break;
             case PC_COLUMN_PID:

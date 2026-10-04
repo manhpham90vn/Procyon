@@ -11,7 +11,7 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CATALOG = json.loads((ROOT / "data" / "process-catalog.json").read_text())
+CATALOG = json.loads((ROOT / "data" / "process-catalog.json").read_text(encoding="utf-8"))
 SWIFT_OUT = ROOT / "apps/macos/Sources/ProcyonKit/ProcessCatalog.generated.swift"
 ADVICE = {"keep": ".keep", "restarts": ".restarts", "quit": ".quit"}
 
@@ -45,10 +45,10 @@ def swift() -> str:
 def main() -> None:
     generated = swift()
     if "--check" in sys.argv:
-        if not SWIFT_OUT.exists() or SWIFT_OUT.read_text() != generated:
+        if not SWIFT_OUT.exists() or SWIFT_OUT.read_text(encoding="utf-8") != generated:
             sys.exit("ProcessCatalog.generated.swift is stale: run `python3 scripts/gen-catalog.py`")
         return
-    SWIFT_OUT.write_text(generated)
+    SWIFT_OUT.write_text(generated, encoding="utf-8", newline="\n")
     print(f"wrote {SWIFT_OUT.relative_to(ROOT)}")
 
 

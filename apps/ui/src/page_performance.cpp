@@ -27,7 +27,7 @@ void rate_headline(Renderer &r, const Rect &trailing, double primary, double sec
     const Theme &theme = r.theme();
     const tokens::MetricStyle &style = metric_style(kind);
     float right = trailing.right();
-    const auto entry = [&](const wchar_t *label, double value, D2D1_COLOR_F color) {
+    const auto entry = [&](const wchar_t *label, double value, Color color) {
         const auto parts = fmt::split_unit(fmt::rate(value));
         const float vw = r.measure(parts.first, Font::Metric) + r.measure(parts.second, Font::Headline) + 3;
         const float lw = r.measure(label, Font::Label) + 11;
@@ -160,7 +160,7 @@ private:
         const wchar_t *zone_label = fixed_zone ? L"Board zone (fixed reading)" : L"Hottest ACPI zone";
         if (store.has(PC_CAP_TEMPERATURE) && s.cpu_temperature >= 0) {
             inner = panel(r, stack.next(kPanelChrome + 160), L"Temperature", Renderer::Symbol::Thermo);
-            D2D1_COLOR_F warning = theme.warning();
+            Color warning = theme.warning();
             const bool f = host.settings().fahrenheit;
             const float peak = std::max(h.cpu_temperature.max_recent(), static_cast<float>(s.cpu_temperature));
             live_chart(r, inner,
@@ -260,7 +260,7 @@ private:
                     options.end_dot = true;
                     options.halo = false;
                     options.line_width = 1.25f;
-                    D2D1_COLOR_F color = rgba(s.core_usage[static_cast<size_t>(i)] > 0.85 ? style.end : style.start);
+                    Color color = rgba(s.core_usage[static_cast<size_t>(i)] > 0.85 ? style.end : style.start);
                     options.color_override = &color;
                     r.sparkline(spark, h.cores[static_cast<size_t>(i)].data(), h.cores[static_cast<size_t>(i)].size(),
                                 kHistoryWindow, 1, MetricKind::Cpu, options);
@@ -318,7 +318,7 @@ private:
         struct Part {
             const wchar_t *title;
             uint64_t value;
-            D2D1_COLOR_F color;
+            Color color;
         };
         const std::vector<Part> parts = {
             {L"App", s.memory_app, rgba(style.start)},
@@ -393,7 +393,7 @@ private:
         if (inner.h > 20) {
             Renderer::SparklineOptions options;
             options.halo = false;
-            D2D1_COLOR_F end = rgba(style.end);
+            Color end = rgba(style.end);
             options.color_override = &end;
             r.sparkline(inner, h.swap_used.data(), h.swap_used.size(), kHistoryWindow,
                         nice_max(std::max(1.0f, h.swap_used.max_recent())), MetricKind::Memory, options);
@@ -433,7 +433,7 @@ private:
 
         if (store.has(PC_CAP_TEMPERATURE) && s.disk_temperature >= 0) {
             const bool f = host.settings().fahrenheit;
-            const D2D1_COLOR_F tint = rgba(style.end);
+            const Color tint = rgba(style.end);
             const float peak = std::max(h.disk_temperature.max_recent(), static_cast<float>(s.disk_temperature));
             inner = panel(r, stack.next(kPanelChrome + 160), L"SSD Temperature", Renderer::Symbol::Thermo);
             live_chart(r, inner,
@@ -598,7 +598,7 @@ private:
                 for (const pc_gpu &gpu : s.gpus) hottest = std::max(hottest, gpu.temperature);
                 if (hottest >= 0) {
                     const bool f = host.settings().fahrenheit;
-                    const D2D1_COLOR_F tint = rgba(style.end);
+                    const Color tint = rgba(style.end);
                     const float peak = std::max(h.gpu_temperature.max_recent(), static_cast<float>(hottest));
                     inner = panel(r, stack.next(kPanelChrome + 160), L"Temperature", Renderer::Symbol::Thermo);
                     live_chart(r, inner,

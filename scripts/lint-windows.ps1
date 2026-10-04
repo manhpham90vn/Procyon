@@ -3,6 +3,9 @@
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\lint-windows.ps1
 $ErrorActionPreference = "Stop"
+# Exit codes are checked explicitly below; pwsh 7.4 would otherwise turn every non-zero native
+# exit into a terminating error before the message is printed.
+$PSNativeCommandUseErrorActionPreference = $false
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 . (Join-Path $PSScriptRoot "dev-env-windows.ps1")

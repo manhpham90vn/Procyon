@@ -153,13 +153,13 @@ public:
     }
     void mouse_leave(Host &) override { mouse_x_ = mouse_y_ = -1; }
     void wheel(Host &, const MouseEvent &e) override { scroll_.wheel(e.wheel); }
-    LPCWSTR cursor() const override {
+    Cursor cursor() const override {
         for (const auto &peak : peak_rects_)
-            if (peak.first.contains(mouse_x_, mouse_y_)) return IDC_HAND;
+            if (peak.first.contains(mouse_x_, mouse_y_)) return Cursor::Hand;
         if (whole_range_button_.contains(mouse_x_, mouse_y_) || clear_button_.contains(mouse_x_, mouse_y_) ||
             toggle_rect_.contains(mouse_x_, mouse_y_) || banner_button_.contains(mouse_x_, mouse_y_))
-            return IDC_HAND;
-        return IDC_ARROW;
+            return Cursor::Hand;
+        return Cursor::Arrow;
     }
 
     void mouse_down(Host &host, const MouseEvent &e, bool right) override {
@@ -369,7 +369,7 @@ private:
         Renderer &r = host.renderer();
         const Theme &theme = r.theme();
         const tokens::MetricStyle &style = metric_style(metric.kind);
-        const D2D1_COLOR_F color = rgba(style.start);
+        const Color color = rgba(style.start);
         Rect area = bounds;
         chart_now_ = now_seconds();
         const int64_t range = kRanges[range_];
@@ -391,7 +391,7 @@ private:
         const MachineMinute *shown = focused ? focused : latest;
         Rect legend = area.take_top(18);
         float x = legend.x;
-        auto legend_entry = [&](std::wstring_view label, std::wstring_view value, D2D1_COLOR_F swatch) {
+        auto legend_entry = [&](std::wstring_view label, std::wstring_view value, Color swatch) {
             r.fill_round(Rect{x, legend.cy() - 2, 10, 4}, tokens::radius::pill, swatch);
             x += 10 + tokens::space::xs + 2;
             TextStyle l;
@@ -450,17 +450,6 @@ private:
         const auto y_of = [&](double v) {
             return chart.bottom() - static_cast<float>(std::clamp(v / max, 0.0, 1.0)) * (chart.h - 2) - 1;
         };
-        ID2D1RenderTarget *target = r.target();
-        ComPtr<ID2D1Factory> factory;
-        target->GetFactory(&factory);
-        ComPtr<ID2D1StrokeStyle> round, dashed;
-        factory->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-                                                               D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND),
-                                   nullptr, 0, &round);
-        factory->CreateStrokeStyle(
-            D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-                                        D2D1_LINE_JOIN_ROUND, 10, D2D1_DASH_STYLE_DASH, 0),
-            nullptr, 0, &dashed);
         r.push_clip(chart.inset(-4, -4));
         // One figure per run of consecutive minutes.
         std::vector<std::vector<const MachineMinute *>> runs;
@@ -469,45 +458,31 @@ private:
             if (runs.empty() || m.minute - runs.back().back()->minute > 120) runs.emplace_back();
             runs.back().push_back(&m);
         }
-        ComPtr<ID2D1GradientStopCollection> stops;
-        ComPtr<ID2D1LinearGradientBrush> gradient;
-        D2D1_GRADIENT_STOP stop_values[2] = {{0, with_alpha(color, tokens::chart::fillOpacityTop)},
-                                             {1, with_alpha(color, tokens::chart::fillOpacityBottom)}};
-        if (SUCCEEDED(target->CreateGradientStopCollection(stop_values, 2, &stops)))
-            target->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(chart.x, chart.y),
-                                                    D2D1::Point2F(chart.x, chart.bottom())),
-                stops.Get(), &gradient);
+        const Gradient gradient{{chart.x, chart.y},
+                                {chart.x, chart.bottom()},
+                                with_alpha(color, tokens::chart::fillOpacityTop),
+                                with_alpha(color, tokens::chart::fillOpacityBottom)};
         for (const auto &run : runs) {
             if (run.size() == 1) {
                 r.fill_circle(x_of(run[0]->minute + 30), y_of(value_of(metric_, *run[0])), 2.5f, color);
                 continue;
             }
-            auto path_for = [&](bool closed, bool peak_line) {
-                ComPtr<ID2D1PathGeometry> path;
-                if (FAILED(factory->CreatePathGeometry(&path))) return path;
-                ComPtr<ID2D1GeometrySink> sink;
-                path->Open(&sink);
-                const auto point = [&](const MachineMinute *m) {
-                    return D2D1::Point2F(x_of(m->minute + 30), y_of(peak_line ? m->cpu_peak : value_of(metric_, *m)));
-                };
-                const D2D1_POINT_2F first = point(run.front());
-                sink->BeginFigure(closed ? D2D1::Point2F(first.x, chart.bottom()) : first,
-                                  closed ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
-                if (closed) sink->AddLine(first);
-                for (size_t i = 1; i < run.size(); ++i) sink->AddLine(point(run[i]));
-                if (closed) sink->AddLine(D2D1::Point2F(point(run.back()).x, chart.bottom()));
-                sink->EndFigure(closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
-                sink->Close();
-                return path;
+            const auto points_for = [&](bool peak_line) {
+                std::vector<Point> points;
+                points.reserve(run.size());
+                for (const MachineMinute *m : run)
+                    points.push_back({x_of(m->minute + 30), y_of(peak_line ? m->cpu_peak : value_of(metric_, *m))});
+                return points;
             };
-            if (ComPtr<ID2D1PathGeometry> area_path = path_for(true, false); area_path && gradient)
-                target->FillGeometry(area_path.Get(), gradient.Get());
-            if (ComPtr<ID2D1PathGeometry> line = path_for(false, false))
-                target->DrawGeometry(line.Get(), r.brush(color), 1.5f, round.Get());
+            const std::vector<Point> points = points_for(false);
+            r.fill_path(Path::smooth(points, true, chart.bottom()), gradient);
+            Stroke pen;
+            pen.width = 1.5f;
+            r.stroke_path(Path::smooth(points), color, pen);
             if (metric_ == Metric::Cpu) {
-                if (ComPtr<ID2D1PathGeometry> peak_path = path_for(false, true))
-                    target->DrawGeometry(peak_path.Get(), r.brush(with_alpha(rgba(style.end), 0.6f)), 1, dashed.Get());
+                pen.width = 1;
+                pen.dash = Dash::Dashed;
+                r.stroke_path(Path::smooth(points_for(true)), with_alpha(rgba(style.end), 0.6f), pen);
             }
         }
         // The selected and the hovered minute: a rule and a value bubble.
@@ -577,8 +552,7 @@ private:
             Rect row{inner.x, y, inner.w, kAppRow};
             Rect line = row.inset(0, tokens::space::xs);
             const Rect icon = line.take_left(22 + tokens::space::sm + 2);
-            r.fill_round(Rect{icon.x, icon.y + 1, 22, 22}, tokens::radius::sm, theme.surface_sunken());
-            r.glyph(metric.kind, Rect{icon.x + 5, icon.y + 6, 12, 12}, theme.text_tertiary());
+            r.app_icon(app_icon_path(app.app_id), Rect{icon.x, icon.y + 1, 22, 22}, app.app_id.rfind("exe:", 0) == 0);
             Rect head = line;
             head.h = 20;
             TextStyle headline;

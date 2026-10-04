@@ -78,7 +78,7 @@ struct Column {
 struct Cell {
     std::wstring text;
     std::wstring subtitle;  // second line in caption, tertiary (rows taller than 24 only)
-    std::optional<D2D1_COLOR_F> color;
+    std::optional<Color> color;
     float heat = 0;  // 0..1 tint of the cell background with `heat_kind`
     std::optional<MetricKind> heat_kind;
     bool dim = false;  // restricted / unknown
@@ -92,7 +92,10 @@ struct Cell {
     bool toggle_enabled = true;
     bool lock = false;  // lock symbol after the text (restricted)
     bool paused = false;
-    bool pinned = false;  // pin symbol after the text (the app kept at the top)
+    bool pinned = false;       // pin symbol after the text (the app kept at the top)
+    bool icon = false;         // a 16 pt app icon before the text (first column)
+    bool icon_system = false;  // the stand-in shows a cog instead of a terminal
+    std::wstring icon_path;    // the executable or bundle whose icon to show; empty for the stand-in
 };
 
 class Table {

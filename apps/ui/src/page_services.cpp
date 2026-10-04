@@ -5,8 +5,6 @@
 #include "pages.hpp"
 #include "widgets.hpp"
 
-#include <shellapi.h>
-
 namespace procyon::ui {
 namespace {
 
@@ -139,7 +137,7 @@ public:
             return;
         }
         if (!right && settings_button_.contains(e.x, e.y)) {
-            ShellExecuteW(host.hwnd(), L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL);
+            host.open_url(L"ms-settings:startupapps");
             return;
         }
         if (!banner_button_.empty() && banner_button_.contains(e.x, e.y)) {
@@ -151,7 +149,7 @@ public:
     void double_click(Host &, const MouseEvent &e) override { table_.double_click(e); }
     void wheel(Host &, const MouseEvent &e) override { table_.wheel(e); }
     bool key(Host &, const KeyEvent &e) override {
-        if (e.vk == VK_SPACE && table_.focused && table_.selected >= 0) {
+        if (e.key == Key::Space && table_.focused && table_.selected >= 0) {
             toggle(table_.selected);
             return true;
         }

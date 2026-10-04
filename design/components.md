@@ -1,12 +1,17 @@
 # Procyon UI components
 
 The shared component vocabulary for every Procyon UI. The macOS implementation lives in
-`apps/macos/Sources/ProcyonDesign`. The Windows (Win32) and Linux (GTK) UIs must implement the
-same components with the same anatomy, tokens and behaviour, so the app looks and feels the same everywhere.
+`apps/macos/Sources/ProcyonDesign` and is the reference. The other platforms share one implementation,
+`apps/ui` (`Renderer` in `render.cpp`), drawn through a small `Canvas` interface that each platform
+backs (Direct2D on Windows, Cairo on Linux), so the app looks and feels the same everywhere.
 
 **Source of truth for values:** `design/tokens.json` → `scripts/gen-tokens.py` → platform files
-(`Tokens.generated.swift` today; Win32 header and GTK CSS emitters go in the same script).
+(`Tokens.generated.swift` for macOS, `apps/ui/src/Tokens.generated.h` for the shared UI).
 Never hard-code a color, spacing, radius or font size in a screen.
+
+**Stand-ins outside Apple platforms:** Inter for SF Pro, Nunito for SF Rounded (`design/fonts`), Lucide
+icons for SF Symbols (`apps/ui/src/icons_data.hpp`), and `Path::add_round_rect(…, continuous: true)` for
+`RoundedRectangle(style: .continuous)`.
 
 ## Rules
 

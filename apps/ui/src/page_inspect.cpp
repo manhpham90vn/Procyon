@@ -1,6 +1,5 @@
 // Files & Ports: listening ports, connections, and "Who Is Using…" a file, folder or drive, laid
 // out like the macOS InspectView (segmented tabs in the header, search + options, table card).
-#include <shobjidl.h>
 
 #include <algorithm>
 
@@ -33,33 +32,17 @@ std::wstring lower(std::wstring s) {
     return s;
 }
 
-bool loopback(const std::wstring &address) {
-    return address == L"127.0.0.1" || address == L"::1" || address.rfind(L"127.", 0) == 0;
+// Case-insensitive ordering, like _wcsicmp.
+int wcscasecmp_(const wchar_t *a, const wchar_t *b) {
+    for (;; ++a, ++b) {
+        const wint_t ca = towlower(static_cast<wint_t>(*a)), cb = towlower(static_cast<wint_t>(*b));
+        if (ca != cb) return ca < cb ? -1 : 1;
+        if (ca == 0) return 0;
+    }
 }
 
-// A folder picker; empty when cancelled.
-std::wstring pick_folder(HWND owner) {
-    std::wstring result;
-    IFileOpenDialog *dialog = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
-        return result;
-    DWORD options = 0;
-    dialog->GetOptions(&options);
-    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    dialog->SetTitle(L"Who is using this folder or drive?");
-    if (SUCCEEDED(dialog->Show(owner))) {
-        IShellItem *item = nullptr;
-        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
-            PWSTR path = nullptr;
-            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                result = path;
-                CoTaskMemFree(path);
-            }
-            item->Release();
-        }
-    }
-    dialog->Release();
-    return result;
+bool loopback(const std::wstring &address) {
+    return address == L"127.0.0.1" || address == L"::1" || address.rfind(L"127.", 0) == 0;
 }
 
 class InspectPage : public Page {
@@ -121,8 +104,7 @@ public:
             const Rect box{toolbar.x, toolbar.cy() - 7, 14, 14};
             r.fill_round(box, 3, hide_loopback_ ? theme.accent() : theme.surface_sunken());
             r.stroke_round(box, 3, hide_loopback_ ? theme.accent() : theme.border_strong());
-            if (hide_loopback_)
-                r.symbol(Renderer::Symbol::Check, box.inset(2, 2), D2D1::ColorF(D2D1::ColorF::White), 1.6f);
+            if (hide_loopback_) r.symbol(Renderer::Symbol::Check, box.inset(2, 2), colors::white, 1.6f);
             TextStyle style;
             style.font = Font::Body;
             r.text(L"Hide local-only", Rect{box.right() + tokens::space::xs + 2, toolbar.y, 200, 28}, style,
@@ -199,7 +181,7 @@ public:
             return;
         }
         if (!browse_button_.empty() && browse_button_.contains(e.x, e.y)) {
-            const std::wstring picked = pick_folder(host.hwnd());
+            const std::wstring picked = host.pick_folder(L"Who is using this folder or drive?");
             if (!picked.empty()) {
                 target_ = picked;
                 load_files();
@@ -385,13 +367,13 @@ private:
             int order = 0;
             switch (column) {
                 case ColProtocol:
-                case ColKind: order = _wcsicmp(x.a.c_str(), y.a.c_str()); break;
+                case ColKind: order = wcscasecmp_(x.a.c_str(), y.a.c_str()); break;
                 case ColPort: order = x.sort_key - y.sort_key; break;
                 case ColLocal:
-                case ColPath: order = _wcsicmp(x.b.c_str(), y.b.c_str()); break;
-                case ColRemote: order = _wcsicmp(x.c.c_str(), y.c.c_str()); break;
+                case ColPath: order = wcscasecmp_(x.b.c_str(), y.b.c_str()); break;
+                case ColRemote: order = wcscasecmp_(x.c.c_str(), y.c.c_str()); break;
                 case ColState: order = x.state - y.state; break;
-                default: order = _wcsicmp(x.process.c_str(), y.process.c_str()); break;
+                default: order = wcscasecmp_(x.process.c_str(), y.process.c_str()); break;
             }
             if (order == 0) order = x.pid - y.pid;
             return desc ? order > 0 : order < 0;

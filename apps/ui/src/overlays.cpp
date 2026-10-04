@@ -15,14 +15,14 @@ std::wstring lower(std::wstring s) {
 
 // Scrim behind a floating panel; a click on it closes the overlay.
 void scrim(Renderer &r, const Rect &window) {
-    r.fill(window, with_alpha(D2D1::ColorF(D2D1::ColorF::Black), r.theme().dark ? 0.5f : 0.25f));
+    r.fill(window, with_alpha(colors::black, r.theme().dark ? 0.5f : 0.25f));
 }
 
 void floating_panel(Renderer &r, const Rect &panel) {
     const Theme &theme = r.theme();
     for (int i = 6; i >= 1; --i)
         r.fill_round(panel.offset(0, 6).inset(-i * 2.0f, -i * 2.0f), tokens::radius::xl + i * 2.0f,
-                     with_alpha(D2D1::ColorF(D2D1::ColorF::Black), 0.05f));
+                     with_alpha(colors::black, 0.05f));
     r.fill_round(panel, tokens::radius::xl, theme.surface());
     r.stroke_round(panel, tokens::radius::xl, theme.border_strong());
 }
@@ -68,6 +68,10 @@ public:
             r.badge(kind.x, kind.cy() - 9, kind_label,
                     item.kind == PaletteItem::Kind::App ? Renderer::Tone::Accent : Renderer::Tone::Neutral);
             line.take_left(tokens::space::sm);
+            if (item.kind == PaletteItem::Kind::App) {
+                const Rect icon = line.take_left(20 + tokens::space::sm);
+                r.app_icon(item.icon_path, Rect{icon.x, line.cy() - 10, 20, 20}, item.icon_system);
+            }
             if (!item.shortcut.empty()) {
                 const float w = r.measure(item.shortcut, Font::Caption) + tokens::space::sm;
                 const Rect cap = line.take_right(w).inset(0, 11);
@@ -116,13 +120,13 @@ public:
     }
 
     bool key(Host &host, const KeyEvent &e) override {
-        switch (e.vk) {
-            case VK_ESCAPE: close(); return true;
-            case VK_DOWN:
+        switch (e.key) {
+            case Key::Escape: close(); return true;
+            case Key::Down:
                 selected_ = std::min(static_cast<int>(std::min<size_t>(matches_.size(), 9)) - 1, selected_ + 1);
                 return true;
-            case VK_UP: selected_ = std::max(0, selected_ - 1); return true;
-            case VK_RETURN: run(host, selected_); return true;
+            case Key::Up: selected_ = std::max(0, selected_ - 1); return true;
+            case Key::Return: run(host, selected_); return true;
             default: break;
         }
         bool consumed = false;
@@ -192,10 +196,12 @@ public:
         floating_panel(r, panel_);
         Rect inner = panel_.inset(tokens::space::xl, tokens::space::lg);
 
-        // Header: name, pid, close.
+        // Header: icon, name, pid, close.
         Rect head = inner.take_top(44);
         close_ = head.take_right(28);
         r.symbol(Renderer::Symbol::Close, Rect{close_.cx() - 7, close_.cy() - 7, 14, 14}, theme.text_secondary());
+        const Rect icon = head.take_left(40 + tokens::space::md);
+        r.app_icon(icon_path_, Rect{icon.x, head.y + 2, 40, 40}, (process_.flags & PC_PROC_SYSTEM) != 0);
         TextStyle t;
         t.font = Font::Title;
         t.valign = VAlign::Top;
@@ -263,19 +269,17 @@ public:
     void wheel(Host &, const MouseEvent &e) override { scroll_.wheel(e.wheel, 60); }
 
     bool key(Host &host, const KeyEvent &e) override {
-        switch (e.vk) {
-            case VK_ESCAPE: close(); return true;
-            case VK_NEXT: scroll_.page(1); return true;
-            case VK_PRIOR: scroll_.page(-1); return true;
-            case VK_DOWN: scroll_.wheel(-120, 60); return true;
-            case VK_UP: scroll_.wheel(120, 60); return true;
-            case 'C':
-                if (e.ctrl) {
-                    host.copy_to_clipboard(copy_text());
-                    return true;
-                }
-                return false;
-            case VK_TAB:
+        if (e.ctrl && e.ch == L'C') {
+            host.copy_to_clipboard(copy_text());
+            return true;
+        }
+        switch (e.key) {
+            case Key::Escape: close(); return true;
+            case Key::PageDown: scroll_.page(1); return true;
+            case Key::PageUp: scroll_.page(-1); return true;
+            case Key::Down: scroll_.wheel(-120, 60); return true;
+            case Key::Up: scroll_.wheel(120, 60); return true;
+            case Key::Tab:
                 tab_ = (tab_ + (e.shift ? 3 : 1)) % 4;
                 scroll_.offset = 0;
                 if (tab_ >= 2 && !handles_loaded_) load_handles(host);
@@ -298,6 +302,8 @@ private:
             process_ = *p;
             name_ = process_display_name(*p);
             path_ = fmt::from_utf8(p->path);
+            icon_path_ = app_icon_path(std::string(p->app_id));
+            if (icon_path_.empty()) icon_path_ = path_;
             subtitle_ = L"PID " + std::to_wstring(p->pid);
             if (p->user[0]) subtitle_ += L" · " + fmt::from_utf8(p->user);
             if (p->start_time > 0) subtitle_ += L" · started " + fmt::date_time(p->start_time);
@@ -529,7 +535,7 @@ private:
     int ticks_ = 0;
     int tab_ = 0;
     pc_process process_{};
-    std::wstring name_, subtitle_, path_;
+    std::wstring name_, subtitle_, path_, icon_path_;
     std::optional<DetailsCopy> details_;
     std::vector<OpenFileCopy> files_;
     std::vector<pc_connection> connections_;

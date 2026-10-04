@@ -34,6 +34,8 @@ struct PaletteItem {
     std::wstring subtitle;
     std::wstring shortcut;
     std::function<void()> run;
+    std::wstring icon_path;  // App rows: the app's icon (see Renderer::app_icon)
+    bool icon_system = false;
 };
 
 std::unique_ptr<Overlay> make_command_palette(std::vector<PaletteItem> items);

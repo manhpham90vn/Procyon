@@ -55,8 +55,11 @@ public:
     virtual Store &store() = 0;
     virtual Renderer &renderer() = 0;
     virtual Settings &settings() = 0;
-    virtual HWND hwnd() = 0;
     virtual void repaint() = 0;
+    // Repaints again in about a frame, for an animation that is still running.
+    virtual void request_frame() = 0;
+    // Seconds on a monotonic clock, for animations.
+    virtual double now() = 0;
     virtual void navigate(PageId page) = 0;
     // Modal confirmation; true when the user chose `action`.
     virtual bool confirm(const std::wstring &title, const std::wstring &message, const std::wstring &action,
@@ -74,6 +77,10 @@ public:
     virtual void relaunch_elevated() = 0;
     virtual void copy_to_clipboard(const std::wstring &text) = 0;
     virtual void open_in_explorer(const std::wstring &path) = 0;
+    // Opens a URL (or an OS settings link) in whatever handles it.
+    virtual void open_url(const std::wstring &url) = 0;
+    // A folder picker; empty when cancelled.
+    virtual std::wstring pick_folder(const std::wstring &title) = 0;
     virtual void set_paused(bool paused) = 0;
     virtual bool paused() = 0;
     // Where the mouse is, in page coordinates (-1 when outside the window).
@@ -113,7 +120,7 @@ public:
         (void)pid;
     }
     // Cursor to show for the hovered element.
-    virtual LPCWSTR cursor() const { return IDC_ARROW; }
+    virtual Cursor cursor() const { return Cursor::Arrow; }
 };
 
 std::unique_ptr<Page> make_overview_page();
@@ -148,19 +155,19 @@ struct ChartSeries {
     std::wstring label;
     std::wstring value;
     bool secondary = false;  // drawn with the gradient's end color, no area
-    std::optional<D2D1_COLOR_F> color;
+    std::optional<Color> color;
 };
 void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> &series, float max, MetricKind kind,
                 const std::function<std::wstring(float)> &axis_label);
 // Big number + unit (ValueText); returns the width used.
 float value_text(Renderer &r, const Rect &bounds, std::wstring_view value, std::wstring_view unit, Font font,
-                 D2D1_COLOR_F color, HAlign align = HAlign::Left);
+                 Color color, HAlign align = HAlign::Left);
 // Label / value facts in an adaptive grid (StatGrid). Returns the height used.
 struct Stat {
     std::wstring label;
     std::wstring value;
     std::wstring detail;
-    std::optional<D2D1_COLOR_F> tint;
+    std::optional<Color> tint;
 };
 float stat_grid(Renderer &r, const Rect &bounds, const std::vector<Stat> &stats, float min_column = 140,
                 int fixed_columns = 0);
@@ -185,6 +192,11 @@ Rect button(Renderer &r, float x, float y, std::wstring_view label, bool primary
 Rect end_task_button(Renderer &r, float right, float y, bool enabled, bool hovered);
 void empty_state(Renderer &r, const Rect &bounds, std::wstring_view title, std::wstring_view message);
 std::wstring process_display_name(const pc_process &p);
+// The file whose icon stands for a view row: the app (its grouping key is the executable or
+// bundle path), else the process's own executable; empty when neither is known.
+std::wstring app_icon_path(const Row &row, const pc_process *p, const Snapshot &snapshot);
+// The same for an app id alone (the history's busiest apps).
+std::wstring app_icon_path(const std::string &app_id);
 // The PC's name for headlines: the model without the manufacturer's legal suffix, else the
 // product id, else the host name.
 std::wstring display_model(const pc_system_info &info);

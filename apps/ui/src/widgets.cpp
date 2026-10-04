@@ -1,6 +1,9 @@
 #include "widgets.hpp"
 
 #include <algorithm>
+#include <cwctype>
+
+#include "platform.hpp"
 
 namespace procyon::ui {
 
@@ -67,14 +70,14 @@ bool TextField::key(const KeyEvent &e, bool &consumed) {
     consumed = false;
     if (!focused) return false;
     bool changed = false;
-    switch (e.vk) {
-        case VK_ESCAPE:
+    switch (e.key) {
+        case Key::Escape:
             changed = !text.empty();
             clear();
             focused = false;
             consumed = true;
             break;
-        case VK_BACK:
+        case Key::Back:
             if (caret_ > 0) {
                 if (e.ctrl) {
                     size_t start = caret_;
@@ -90,50 +93,42 @@ bool TextField::key(const KeyEvent &e, bool &consumed) {
             }
             consumed = true;
             break;
-        case VK_DELETE:
+        case Key::Delete:
             if (caret_ < text.size()) {
                 text.erase(caret_, 1);
                 changed = true;
             }
             consumed = true;
             break;
-        case VK_LEFT:
+        case Key::Left:
             if (caret_ > 0) --caret_;
             consumed = true;
             break;
-        case VK_RIGHT:
+        case Key::Right:
             if (caret_ < text.size()) ++caret_;
             consumed = true;
             break;
-        case VK_HOME:
+        case Key::Home:
             caret_ = 0;
             consumed = true;
             break;
-        case VK_END:
+        case Key::End:
             caret_ = text.size();
             consumed = true;
             break;
-        case 'A':
-            if (e.ctrl) consumed = true;  // select-all is a no-op: the field is tiny
-            break;
-        case 'V':
-            if (e.ctrl && OpenClipboard(nullptr)) {
-                if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
-                    if (auto chars = static_cast<const wchar_t *>(GlobalLock(data))) {
-                        std::wstring pasted(chars);
-                        for (wchar_t &c : pasted)
-                            if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
-                        text.insert(caret_, pasted);
-                        caret_ += pasted.size();
-                        changed = true;
-                        GlobalUnlock(data);
-                    }
-                }
-                CloseClipboard();
-                consumed = true;
-            }
-            break;
         default: break;
+    }
+    if (e.ctrl && e.ch == L'A') consumed = true;  // select-all is a no-op: the field is tiny
+    if (e.ctrl && e.ch == L'V') {
+        std::wstring pasted = platform::clipboard_text();
+        for (wchar_t &c : pasted)
+            if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
+        if (!pasted.empty()) {
+            text.insert(caret_, pasted);
+            caret_ += pasted.size();
+            changed = true;
+        }
+        consumed = true;
     }
     return changed;
 }
@@ -284,6 +279,10 @@ void Table::paint(Renderer &r) {
                     inner.x += 4;
                     inner.w -= 4;
                 }
+                if (data.icon) {
+                    const Rect slot = inner.take_left(16 + 6);
+                    r.app_icon(data.icon_path, Rect{slot.x, inner.cy() - 8, 16, 16}, data.icon_system);
+                }
             }
             if (data.toggle) {
                 const float tx = c.align == HAlign::Right ? inner.right() - 36 : inner.x;
@@ -296,7 +295,7 @@ void Table::paint(Renderer &r) {
                 r.badge(x, inner.cy() - 8.5f, data.text, *data.badge);
                 continue;
             }
-            D2D1_COLOR_F color = data.color ? *data.color : theme.text();
+            Color color = data.color ? *data.color : theme.text();
             if (data.dim) color = theme.text_tertiary();
             TextStyle style;
             style.font = data.mono ? Font::Mono : data.bold ? Font::Headline : Font::Body;
@@ -439,23 +438,23 @@ bool Table::key(const KeyEvent &e) {
     if (!focused) return false;
     const int count = row_count ? row_count() : 0;
     const int page_rows = std::max(1, static_cast<int>(body_.h / row_height) - 1);
-    switch (e.vk) {
-        case VK_DOWN: select(std::min(count - 1, selected + 1)); return true;
-        case VK_UP: select(std::max(0, selected - 1)); return true;
-        case VK_HOME: select(count ? 0 : -1); return true;
-        case VK_END: select(count - 1); return true;
-        case VK_NEXT: select(std::min(count - 1, std::max(0, selected) + page_rows)); return true;
-        case VK_PRIOR: select(std::max(0, selected - page_rows)); return true;
-        case VK_RETURN:
+    switch (e.key) {
+        case Key::Down: select(std::min(count - 1, selected + 1)); return true;
+        case Key::Up: select(std::max(0, selected - 1)); return true;
+        case Key::Home: select(count ? 0 : -1); return true;
+        case Key::End: select(count - 1); return true;
+        case Key::PageDown: select(std::min(count - 1, std::max(0, selected) + page_rows)); return true;
+        case Key::PageUp: select(std::max(0, selected - page_rows)); return true;
+        case Key::Return:
             if (selected >= 0 && on_activate) on_activate(selected);
             return true;
-        case VK_RIGHT:
+        case Key::Right:
             if (selected >= 0 && expander && expander(selected) == 1 && on_toggle) on_toggle(selected);
             return true;
-        case VK_LEFT:
+        case Key::Left:
             if (selected >= 0 && expander && expander(selected) == 2 && on_toggle) on_toggle(selected);
             return true;
-        case VK_APPS:
+        case Key::Menu:
             if (selected >= 0 && on_context) {
                 const Rect rr = row_rect(selected);
                 on_context(selected, rr.x + 40, rr.cy());

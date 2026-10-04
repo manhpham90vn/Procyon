@@ -6,8 +6,26 @@
 
 namespace procyon::ui {
 
+std::wstring app_icon_path(const std::string &app_id) {
+    // The core groups apps by their executable (or bundle) path and the OS's own processes as
+    // "exe:<name>", which has no icon file.
+    if (app_id.empty() || app_id.rfind("exe:", 0) == 0) return {};
+    return fmt::from_utf8(app_id);
+}
+
+std::wstring app_icon_path(const Row &row, const pc_process *p, const Snapshot &snapshot) {
+    std::wstring path = app_icon_path(row.is_group() ? row.group_id : p ? std::string(p->app_id) : std::string());
+    if (!path.empty()) return path;
+    if (p && p->path[0]) return fmt::from_utf8(p->path);
+    if (row.is_group())
+        if (const pc_process *lead = snapshot.find(row.group_pid); lead && lead->path[0])
+            return fmt::from_utf8(lead->path);
+    return {};
+}
+
 Rect screen_area(const Rect &bounds) {
-    Rect area = bounds.inset(tokens::space::xxl, tokens::space::lg, tokens::space::xxl, tokens::space::xxl);
+    // The window hands the pages the area below its caption strip, so the top padding is small.
+    Rect area = bounds.inset(tokens::space::xxl, tokens::space::sm, tokens::space::xxl, tokens::space::xxl);
     if (area.w > 1280) area.w = 1280;
     return area;
 }
@@ -59,7 +77,7 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
     Rect legend = area.take_top(18);
     float x = legend.x;
     for (const ChartSeries &s : series) {
-        const D2D1_COLOR_F color = s.color ? *s.color : rgba(s.secondary ? style.end : style.start);
+        const Color color = s.color ? *s.color : rgba(s.secondary ? style.end : style.start);
         r.fill_round(Rect{x, legend.cy() - 2, 10, 4}, tokens::radius::pill, color);
         x += 10 + tokens::space::xs + 2;
         TextStyle label;
@@ -101,7 +119,7 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
         options.end_dot = true;
         options.halo = true;
         options.line_width = lw;
-        D2D1_COLOR_F color = s.color ? *s.color : rgba(s.secondary ? style.end : style.start);
+        Color color = s.color ? *s.color : rgba(s.secondary ? style.end : style.start);
         options.color_override = &color;
         r.sparkline(chart, s.series->data(), s.series->size(), kHistoryWindow, max, kind, options);
     }
@@ -113,7 +131,7 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
 }
 
 float value_text(Renderer &r, const Rect &bounds, std::wstring_view value, std::wstring_view unit, Font font,
-                 D2D1_COLOR_F color, HAlign align) {
+                 Color color, HAlign align) {
     TextStyle big;
     big.font = font;
     big.tabular = true;
@@ -184,7 +202,7 @@ float stat_grid(Renderer &r, const Rect &bounds, const std::vector<Stat> &stats,
 Banner action_banner(Renderer &r, const Rect &bounds, std::wstring_view title, std::wstring_view message,
                      std::wstring_view button_label, Renderer::Tone tone, bool button_hovered) {
     const Theme &theme = r.theme();
-    const D2D1_COLOR_F color = Renderer::tone_color(theme, tone);
+    const Color color = Renderer::tone_color(theme, tone);
     Banner banner;
     banner.bounds = bounds;
     r.fill_round(bounds, tokens::radius::lg, with_alpha(color, 0.07f));
@@ -203,7 +221,7 @@ Banner action_banner(Renderer &r, const Rect &bounds, std::wstring_view title, s
         TextStyle style;
         style.font = Font::Headline;
         style.halign = HAlign::Center;
-        r.text(button_label, rect, style, D2D1::ColorF(D2D1::ColorF::White));
+        r.text(button_label, rect, style, colors::white);
         banner.button = rect;
         inner.take_right(tokens::space::md);
     }
@@ -221,7 +239,7 @@ Banner action_banner(Renderer &r, const Rect &bounds, std::wstring_view title, s
 Banner info_banner(Renderer &r, const Rect &bounds, std::wstring_view message, std::wstring_view button_label,
                    Renderer::Tone tone) {
     const Theme &theme = r.theme();
-    const D2D1_COLOR_F color = Renderer::tone_color(theme, tone);
+    const Color color = Renderer::tone_color(theme, tone);
     Banner banner;
     banner.bounds = bounds;
     r.fill_round(bounds, tokens::radius::md, with_alpha(color, 0.08f));
@@ -248,17 +266,16 @@ Rect button(Renderer &r, float x, float y, std::wstring_view label, bool primary
     const Theme &theme = r.theme();
     const float width = std::max(min_width, r.measure(label, font) + tokens::space::md * 2);
     const Rect b{x, y, width, kControlHeight};
-    D2D1_COLOR_F fill = theme.surface_raised();
-    D2D1_COLOR_F text = theme.text();
+    Color fill = theme.surface_raised();
+    Color text = theme.text();
     if (destructive) {
         fill = theme.danger();
-        text = D2D1::ColorF(D2D1::ColorF::White);
+        text = colors::white;
     } else if (primary) {
         fill = theme.accent();
-        text = D2D1::ColorF(D2D1::ColorF::White);
+        text = colors::white;
     }
-    if (hovered)
-        fill = mix(fill, theme.dark ? D2D1::ColorF(D2D1::ColorF::White) : D2D1::ColorF(D2D1::ColorF::Black), 0.08f);
+    if (hovered) fill = mix(fill, theme.dark ? colors::white : colors::black, 0.08f);
     r.fill_round(b, tokens::radius::sm + 1, fill);
     if (!primary && !destructive) r.stroke_round(b, tokens::radius::sm + 1, theme.border_strong());
     TextStyle style;
@@ -283,7 +300,7 @@ Rect end_task_button(Renderer &r, float right, float y, bool enabled, bool hover
     } else {
         r.fill_round(b, tokens::radius::sm + 1, theme.track());
     }
-    const D2D1_COLOR_F fg = enabled ? D2D1::ColorF(D2D1::ColorF::White) : theme.text_tertiary();
+    const Color fg = enabled ? colors::white : theme.text_tertiary();
     r.fill_circle(b.x + tokens::space::md + 7, b.cy(), 7, with_alpha(fg, enabled ? 0.25f : 0.15f));
     r.symbol(Renderer::Symbol::Close, Rect{b.x + tokens::space::md + 3, b.cy() - 4, 8, 8}, fg, 1.6f);
     TextStyle style;
@@ -353,10 +370,9 @@ std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring
         const Rect rr{inner.x - tokens::space::sm, y, inner.w + tokens::space::sm * 2, kTopAppRowHeight};
         if (rr.contains(mx, my)) r.fill_round(rr, tokens::radius::sm, with_alpha(theme.text(), 0.05f));
         Rect line = rr.inset(tokens::space::sm, tokens::space::xs + 1);
-        // App tile: the metric icon stands in for the app icon macOS shows.
+        // App icon (ProcessIcon at 22).
         const Rect icon = line.take_left(22 + tokens::space::sm + 2);
-        r.fill_round(Rect{icon.x, icon.y + 1, 22, 22}, tokens::radius::sm, theme.surface_sunken());
-        r.glyph(kind, Rect{icon.x + 5, icon.y + 6, 12, 12}, theme.text_tertiary());
+        r.app_icon(app_icon_path(row, p, s), Rect{icon.x, icon.y + 1, 22, 22}, p && (p->flags & PC_PROC_SYSTEM) != 0);
         Rect top = line;
         top.h = 20;
         TextStyle headline;

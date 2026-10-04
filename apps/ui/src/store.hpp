@@ -142,9 +142,9 @@ public:
     Store(const Store &) = delete;
     Store &operator=(const Store &) = delete;
 
-    // The sampler posts `message` to `window` with a Snapshot* in lParam; the window hands it to
-    // receive().
-    bool start(HWND window, UINT message);
+    // The sampler thread calls `deliver` with each new snapshot; it must hand the pointer to the UI
+    // thread (which passes it to receive()) and return true, or return false to drop it.
+    bool start(std::function<bool(Snapshot *)> deliver);
     void stop();
     void receive(Snapshot *snapshot);
 
@@ -216,8 +216,7 @@ private:
     std::atomic<bool> paused_{false};
     std::atomic<bool> refresh_requested_{false};
     std::atomic<double> interval_{1.0};
-    HWND window_ = nullptr;
-    UINT message_ = 0;
+    std::function<bool(Snapshot *)> deliver_;
 
     Snapshot snapshot_;
     History history_;

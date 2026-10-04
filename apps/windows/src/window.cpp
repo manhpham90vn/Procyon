@@ -3,14 +3,18 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <vector>
 
+#include "canvas_d2d.hpp"
 #include "overlays.hpp"
 #include "pages.hpp"
+#include "platform.hpp"
 #include "resource.h"
 #include "version.h"
 
@@ -24,8 +28,18 @@ namespace {
 constexpr UINT WM_APP_SNAPSHOT = WM_APP + 1;
 constexpr UINT WM_APP_TRAY = WM_APP + 2;
 constexpr UINT_PTR kTrayId = 1;
+constexpr UINT_PTR kFrameTimer = 2;  // one more frame for a running animation
+// The window draws its own caption, as the macOS app hides its title bar: a 32-DIP strip that
+// drags the window, with the three Windows 11 caption buttons (46x32) at its right end.
+constexpr float kCaptionHeight = 32;
+constexpr float kCaptionButtonWidth = 46;
 constexpr float kSidebarWidth = 240;
 constexpr DWORD kDwmUseImmersiveDarkMode = 20;
+constexpr DWORD kDwmSystemBackdropType = 38;       // DWMWA_SYSTEMBACKDROP_TYPE (Windows 11 22H2)
+constexpr DWORD kDwmSystemBackdropMainWindow = 2;  // DWMSBT_MAINWINDOW: Mica
+// How much of the sidebar surface sits over the Mica backdrop (the rest shows the desktop tint).
+constexpr float kSidebarOpacityDark = 0.62f;
+constexpr float kSidebarOpacityLight = 0.55f;
 const wchar_t *const kClassName = L"ProcyonMainWindow";
 const wchar_t *const kSettingsKey = L"Software\\Procyon";
 
@@ -85,14 +99,16 @@ public:
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.lpszClassName = kClassName;
         if (!RegisterClassExW(&wc)) return false;
-        hwnd_ = CreateWindowExW(0, kClassName, L"Procyon", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800,
-                                nullptr, nullptr, instance_, this);
+        // No redirection bitmap: the DirectComposition swap chain is all the window shows, and
+        // its transparent pixels reveal the Mica backdrop.
+        hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kClassName, L"Procyon", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                CW_USEDEFAULT, 1280, 800, nullptr, nullptr, instance_, this);
         if (!hwnd_) return false;
         restore_placement(show_command);
         return true;
     }
 
-    HWND hwnd() override { return hwnd_; }
+    HWND hwnd() const { return hwnd_; }
     bool text_input_active() const { return !overlays_.empty() || (current_ && current_->search_focused()); }
 
     // ---- Host ----
@@ -100,6 +116,11 @@ public:
     Renderer &renderer() override { return renderer_; }
     Settings &settings() override { return settings_; }
     void repaint() override { InvalidateRect(hwnd_, nullptr, FALSE); }
+    void request_frame() override { SetTimer(hwnd_, kFrameTimer, 16, nullptr); }
+    double now() override {
+        using namespace std::chrono;
+        return duration<double>(steady_clock::now().time_since_epoch()).count();
+    }
     float mouse_x() override { return overlays_.empty() ? mouse_x_ : -1; }
     float mouse_y() override { return overlays_.empty() ? mouse_y_ : -1; }
 
@@ -229,6 +250,35 @@ public:
         ShellExecuteW(hwnd_, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
     }
 
+    void open_url(const std::wstring &url) override {
+        if (url.empty()) return;
+        ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    std::wstring pick_folder(const std::wstring &title) override {
+        std::wstring result;
+        IFileOpenDialog *dialog = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))))
+            return result;
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        dialog->SetTitle(title.c_str());
+        if (SUCCEEDED(dialog->Show(hwnd_))) {
+            IShellItem *item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                    result = path;
+                    CoTaskMemFree(path);
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
+        return result;
+    }
+
     void set_paused(bool paused) override {
         store_.set_paused(paused);
         update_tray();
@@ -254,8 +304,14 @@ private:
 
     void on_create() {
         dpi_ = static_cast<float>(GetDpiForWindow(hwnd_));
-        renderer_.init(hwnd_);
-        renderer_.set_dpi(dpi_);
+        canvas_.init(hwnd_);
+        canvas_.set_dpi(dpi_);
+        // Mica behind the sidebar, the material the macOS sidebar shows through to the desktop.
+        // Windows 11 22H2 and later answer S_OK; older systems get an opaque sidebar.
+        const MARGINS whole{-1, -1, -1, -1};
+        DwmExtendFrameIntoClientArea(hwnd_, &whole);
+        const DWORD backdrop = kDwmSystemBackdropMainWindow;
+        mica_ = SUCCEEDED(DwmSetWindowAttribute(hwnd_, kDwmSystemBackdropType, &backdrop, sizeof(backdrop)));
         apply_theme();
         pages_.push_back(make_overview_page());
         pages_.push_back(make_processes_page());
@@ -271,7 +327,10 @@ private:
         store_.set_interval(settings_.interval);
         store_.set_records_history(settings_.records_history);
         store_.set_alert_handler([this](const AlertEvent &event) { notify(event); });
-        store_.start(hwnd_, WM_APP_SNAPSHOT);
+        // The sampler thread hands each snapshot over through the message queue.
+        store_.start([this](Snapshot *snapshot) {
+            return PostMessageW(hwnd_, WM_APP_SNAPSHOT, 0, reinterpret_cast<LPARAM>(snapshot)) != FALSE;
+        });
         navigate(initial_page_.value_or(PageId::Overview));
         add_tray();
     }
@@ -318,13 +377,13 @@ private:
         if (store_.has(PC_CAP_CONNECTIONS)) page(PageId::Inspect, L"Files & Ports", Renderer::Symbol::Ports);
         section(L"Machine");
         if (store_.has(PC_CAP_BATTERY)) page(PageId::Battery, L"Battery", Renderer::Symbol::Gauge);
-        page(PageId::System, L"System", Renderer::Symbol::Desktop);
+        page(PageId::System, L"System", Renderer::Symbol::Info);  // info.circle.fill on macOS
     }
 
     // ---- theme, DPI ----
 
     void apply_theme() {
-        theme_.dark = settings_.theme == 2 || (settings_.theme == 0 && system_prefers_dark());
+        theme_.dark = settings_.theme == 2 || (settings_.theme == 0 && platform::system_prefers_dark());
         const BOOL dark = theme_.dark ? TRUE : FALSE;
         DwmSetWindowAttribute(hwnd_, kDwmUseImmersiveDarkMode, &dark, sizeof(dark));
         repaint();
@@ -343,9 +402,31 @@ private:
         return e;
     }
 
+    static Key translate_key(WPARAM vk) {
+        switch (vk) {
+            case VK_ESCAPE: return Key::Escape;
+            case VK_BACK: return Key::Back;
+            case VK_DELETE: return Key::Delete;
+            case VK_RETURN: return Key::Return;
+            case VK_SPACE: return Key::Space;
+            case VK_TAB: return Key::Tab;
+            case VK_LEFT: return Key::Left;
+            case VK_RIGHT: return Key::Right;
+            case VK_UP: return Key::Up;
+            case VK_DOWN: return Key::Down;
+            case VK_HOME: return Key::Home;
+            case VK_END: return Key::End;
+            case VK_PRIOR: return Key::PageUp;
+            case VK_NEXT: return Key::PageDown;
+            case VK_APPS: return Key::Menu;
+            default: return Key::None;
+        }
+    }
+
     KeyEvent key_event(WPARAM vk) const {
         KeyEvent e;
-        e.vk = static_cast<UINT>(vk);
+        e.key = translate_key(vk);
+        if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) e.ch = static_cast<wchar_t>(vk);
         e.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         e.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         e.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
@@ -362,20 +443,112 @@ private:
 
     void paint() {
         // The theme follows Settings, which may have changed since the last frame.
-        const bool dark = settings_.theme == 2 || (settings_.theme == 0 && system_prefers_dark());
+        const bool dark = settings_.theme == 2 || (settings_.theme == 0 && platform::system_prefers_dark());
         if (dark != theme_.dark) apply_theme();
-        if (!renderer_.begin(theme_)) return;
+        renderer_.set_theme(theme_);
+        if (!canvas_.begin(mica_ ? colors::transparent : theme_.background())) return;
         const Rect window = client_rect();
         sidebar_ = Rect{0, 0, kSidebarWidth, window.h};
-        content_ = Rect{kSidebarWidth, 0, window.w - kSidebarWidth, window.h};
+        content_ = Rect{kSidebarWidth, kCaptionHeight, window.w - kSidebarWidth, window.h - kCaptionHeight};
+        // The page and its caption strip are opaque; only the sidebar shows the backdrop.
+        renderer_.fill(Rect{kSidebarWidth, 0, window.w - kSidebarWidth, window.h}, theme_.background());
         paint_sidebar();
         if (current_) {
             renderer_.push_clip(content_);
             current_->paint(*this, content_);
             renderer_.pop_clip();
         }
+        paint_caption(window);
         for (auto &overlay : overlays_) overlay->paint(*this, window);
-        if (!renderer_.end()) repaint();
+        if (!canvas_.end()) repaint();
+    }
+
+    // The caption buttons, Windows 11 style: a flat strip the page shows through, each button
+    // tinted on hover (the close button red), with Lucide glyphs.
+    void paint_caption(const Rect &window) {
+        Renderer &r = renderer_;
+        const Theme &theme = theme_;
+        const bool zoomed = IsZoomed(hwnd_) != FALSE;
+        for (int i = 0; i < 3; ++i) {
+            caption_buttons_[i] =
+                Rect{window.right() - kCaptionButtonWidth * (3 - i), 0, kCaptionButtonWidth, kCaptionHeight};
+        }
+        const Renderer::Symbol glyphs[3] = {Renderer::Symbol::WindowMinimize,
+                                            zoomed ? Renderer::Symbol::WindowRestore : Renderer::Symbol::WindowMaximize,
+                                            Renderer::Symbol::Close};
+        for (int i = 0; i < 3; ++i) {
+            const Rect &b = caption_buttons_[i];
+            const bool hovered = caption_hover_ == i;
+            const bool pressed = hovered && caption_pressed_ == i;
+            Color glyph = theme.text_secondary();
+            if (hovered && i == 2) {
+                r.fill(b, with_alpha(rgba(0xC42B1CFF), pressed ? 0.85f : 1.0f));
+                glyph = colors::white;
+            } else if (hovered) {
+                r.fill(b, with_alpha(theme.text(), pressed ? 0.04f : 0.07f));
+                glyph = theme.text();
+            }
+            r.symbol(glyphs[i], Rect{b.cx() - 5, b.cy() - 5, 10, 10}, glyph, 1.0f);
+        }
+    }
+
+    // Which caption button (0 minimize, 1 maximize, 2 close) is at a client-area point, -1 for none.
+    int caption_button_at(float x, float y) const {
+        for (int i = 0; i < 3; ++i)
+            if (caption_buttons_[i].contains(x, y)) return i;
+        return -1;
+    }
+
+    // The window's own hit test for the strip that replaces the caption: resize edges first, then
+    // the buttons, then anything draggable above the first sidebar row or the page.
+    LRESULT caption_hit_test(LPARAM lparam) {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(hwnd_, &pt);
+        const float x = to_dip(pt.x), y = to_dip(pt.y);
+        const bool zoomed = IsZoomed(hwnd_) != FALSE;
+        if (!zoomed) {
+            const UINT dpi = static_cast<UINT>(dpi_);
+            const int frame =
+                GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            if (pt.y < frame) {
+                if (pt.x < frame) return HTTOPLEFT;
+                if (to_dip(pt.x) > client_rect().w - to_dip(frame)) return HTTOPRIGHT;
+                return HTTOP;
+            }
+        }
+        switch (caption_button_at(x, y)) {
+            case 0: return HTMINBUTTON;
+            case 1: return HTMAXBUTTON;
+            case 2: return HTCLOSE;
+            default: break;
+        }
+        if (!overlays_.empty()) return HTCLIENT;
+        if (sidebar_.contains(x, y)) {
+            // Above the first row: the brand, a drag handle like the macOS sidebar's top.
+            float first_row = sidebar_.h;
+            for (const NavItem &item : nav_)
+                if (item.kind != NavItem::Kind::Section && !item.rect.empty()) {
+                    first_row = item.rect.y;
+                    break;
+                }
+            return y < first_row - tokens::space::sm ? HTCAPTION : HTCLIENT;
+        }
+        return y < kCaptionHeight ? HTCAPTION : HTCLIENT;
+    }
+
+    void set_caption_hover(int button) {
+        if (caption_hover_ == button) return;
+        caption_hover_ = button;
+        repaint();
+    }
+
+    void caption_button_action(int button) {
+        switch (button) {
+            case 0: ShowWindow(hwnd_, SW_MINIMIZE); break;
+            case 1: ShowWindow(hwnd_, IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE); break;
+            case 2: PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
+            default: break;
+        }
     }
 
     // The detail text of a page row, as the macOS sidebar shows it.
@@ -408,7 +581,9 @@ private:
         const Theme &theme = theme_;
         const Snapshot &s = store_.snapshot();
         const History &h = store_.history();
-        r.fill(sidebar_, theme.surface_raised());
+        r.fill(sidebar_,
+               mica_ ? with_alpha(theme.surface_raised(), theme.dark ? kSidebarOpacityDark : kSidebarOpacityLight)
+                     : theme.surface_raised());
         r.line(sidebar_.right() - 0.5f, 0, sidebar_.right() - 0.5f, sidebar_.h, theme.border());
         const float pad = tokens::space::sm + 2;
         Rect area = sidebar_.inset(pad, 0);
@@ -418,12 +593,10 @@ private:
         Rect brand = area.take_top(26);
         {
             const Rect b = brand.inset(tokens::space::sm, 0);
-            for (int i = 3; i >= 1; --i)
-                r.fill_circle(b.x + 11, b.cy(), 11 + i * 2.0f, with_alpha(rgba(tokens::metric::cpu.start), 0.5f / 6));
-            r.fill_gradient_round(Rect{b.x, b.cy() - 11, 22, 22}, 11, rgba(tokens::metric::cpu.start),
-                                  rgba(tokens::metric::memory.start));
-            r.symbol(Renderer::Symbol::Sparkle, Rect{b.x + 5.5f, b.cy() - 5.5f, 11, 11},
-                     D2D1::ColorF(D2D1::ColorF::White));
+            const Rect disc{b.x, b.cy() - 11, 22, 22};
+            r.canvas().shadow(disc, 11, Shadow{with_alpha(rgba(tokens::metric::cpu.start), 0.5f), 6, 0});
+            r.fill_gradient_round(disc, 11, rgba(tokens::metric::cpu.start), rgba(tokens::metric::memory.start));
+            r.symbol(Renderer::Symbol::Sparkle, Rect{b.x + 5.5f, b.cy() - 5.5f, 11, 11}, colors::white);
             TextStyle title;
             title.font = Font::Brand;
             r.text(L"Procyon", Rect{b.x + 22 + tokens::space::sm, b.y, b.w - 30, b.h}, title, theme.text());
@@ -534,6 +707,9 @@ private:
                     break;
                 default: break;
             }
+        } else if (item.page == PageId::Battery) {
+            r.glyph(MetricKind::Battery, Rect{icon.x + 4, icon.cy() - 7, 14, 14}, theme.accent());
+            detail = page_detail(item.page);
         } else {
             r.symbol(item.symbol, Rect{icon.x + 4, icon.cy() - 7, 14, 14}, theme.accent(), 1.6f);
             detail = page_detail(item.page);
@@ -551,7 +727,7 @@ private:
                             max, item.metric, options);
                 if (secondary && secondary->size() > 1) {
                     options.area = false;
-                    D2D1_COLOR_F end = rgba(metric_style(item.metric).end);
+                    Color end = rgba(metric_style(item.metric).end);
                     options.color_override = &end;
                     r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, secondary->data(), secondary->size(),
                                 kHistoryWindow, max, item.metric, options);
@@ -695,9 +871,12 @@ private:
                                                      : L"";
             const int32_t pid = row.is_group() ? row.group_pid : p ? p->pid : 0;
             if (name.empty() || pid <= 0) continue;
-            items.push_back({PaletteItem::Kind::App, name,
+            PaletteItem item{PaletteItem::Kind::App, name,
                              L"CPU " + fmt::cpu(row.cpu_percent) + L" · " + fmt::bytes(row.memory_bytes), L"",
-                             [this, pid] { show_info(pid); }});
+                             [this, pid] { show_info(pid); }};
+            item.icon_path = app_icon_path(row, p, s);
+            item.icon_system = p && (p->flags & PC_PROC_SYSTEM) != 0;
+            items.push_back(std::move(item));
         }
         overlays_.push_back(make_command_palette(std::move(items)));
         repaint();
@@ -874,7 +1053,77 @@ private:
 
     LRESULT proc(UINT message, WPARAM wparam, LPARAM lparam) {
         switch (message) {
-            case WM_CREATE: on_create(); return 0;
+            case WM_CREATE:
+                on_create();
+                // Re-run WM_NCCALCSIZE now that the window exists, so the caption goes away.
+                SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+                return 0;
+            case WM_NCCALCSIZE: {
+                // Keep the resize borders, drop the caption: the client area starts at the top of
+                // the frame. Maximized, the frame hangs off the screen, so the top moves down by it.
+                if (!wparam) break;
+                auto params = reinterpret_cast<NCCALCSIZE_PARAMS *>(lparam);
+                const LONG top = params->rgrc[0].top;
+                DefWindowProcW(hwnd_, message, wparam, lparam);
+                params->rgrc[0].top = top;
+                if (IsZoomed(hwnd_)) {
+                    const UINT dpi = static_cast<UINT>(dpi_);
+                    params->rgrc[0].top +=
+                        GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                }
+                return 0;
+            }
+            case WM_NCHITTEST: {
+                const LRESULT hit = DefWindowProcW(hwnd_, message, wparam, lparam);
+                if (hit != HTCLIENT && hit != HTCAPTION && hit != HTTOP && hit != HTTOPLEFT && hit != HTTOPRIGHT)
+                    return hit;
+                return caption_hit_test(lparam);
+            }
+            case WM_NCMOUSEMOVE: {
+                POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                ScreenToClient(hwnd_, &pt);
+                set_caption_hover(caption_button_at(to_dip(pt.x), to_dip(pt.y)));
+                if (!nc_tracking_) {
+                    TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE | TME_NONCLIENT, hwnd_, 0};
+                    TrackMouseEvent(&track);
+                    nc_tracking_ = true;
+                }
+                break;
+            }
+            case WM_NCMOUSELEAVE:
+                nc_tracking_ = false;
+                set_caption_hover(-1);
+                break;
+            case WM_NCLBUTTONDOWN:
+                if (wparam == HTMINBUTTON || wparam == HTMAXBUTTON || wparam == HTCLOSE) {
+                    caption_pressed_ = wparam == HTMINBUTTON ? 0 : wparam == HTMAXBUTTON ? 1 : 2;
+                    repaint();
+                    return 0;
+                }
+                break;
+            case WM_NCLBUTTONUP: {
+                const int pressed = caption_pressed_;
+                caption_pressed_ = -1;
+                if (pressed >= 0) {
+                    const int hit = wparam == HTMINBUTTON ? 0 : wparam == HTMAXBUTTON ? 1 : wparam == HTCLOSE ? 2 : -1;
+                    if (hit == pressed) caption_button_action(hit);
+                    repaint();
+                    return 0;
+                }
+                break;
+            }
+            case WM_NCRBUTTONUP:
+                if (wparam == HTCAPTION) {
+                    // The system menu where the caption was clicked.
+                    if (HMENU menu = GetSystemMenu(hwnd_, FALSE)) {
+                        const int chosen =
+                            static_cast<int>(TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, GET_X_LPARAM(lparam),
+                                                            GET_Y_LPARAM(lparam), 0, hwnd_, nullptr));
+                        if (chosen) PostMessageW(hwnd_, WM_SYSCOMMAND, static_cast<WPARAM>(chosen), lparam);
+                    }
+                    return 0;
+                }
+                break;
             case WM_ERASEBKGND: return 1;
             case WM_PAINT: {
                 PAINTSTRUCT ps;
@@ -884,12 +1133,19 @@ private:
                 return 0;
             }
             case WM_SIZE:
-                renderer_.resize(LOWORD(lparam), HIWORD(lparam));
+                canvas_.resize(LOWORD(lparam), HIWORD(lparam));
                 repaint();
                 return 0;
+            case WM_TIMER:
+                if (wparam == kFrameTimer) {
+                    KillTimer(hwnd_, kFrameTimer);
+                    repaint();
+                    return 0;
+                }
+                break;
             case WM_DPICHANGED: {
                 dpi_ = static_cast<float>(HIWORD(wparam));
-                renderer_.set_dpi(dpi_);
+                canvas_.set_dpi(dpi_);
                 const RECT *rc = reinterpret_cast<const RECT *>(lparam);
                 SetWindowPos(hwnd_, nullptr, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top,
                              SWP_NOZORDER | SWP_NOACTIVATE);
@@ -922,6 +1178,7 @@ private:
                 }
                 return 0;
             case WM_MOUSEMOVE: {
+                set_caption_hover(-1);
                 if (!tracking_) {
                     TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd_, 0};
                     TrackMouseEvent(&track);
@@ -988,7 +1245,7 @@ private:
                     prune_overlays();
                 } else if (current_) {
                     handled = current_->key(*this, e);
-                    if (!handled && e.vk == VK_ESCAPE) handled = true;
+                    if (!handled && e.key == Key::Escape) handled = true;
                 }
                 repaint();
                 return handled ? 0 : DefWindowProcW(hwnd_, message, wparam, lparam);
@@ -1005,17 +1262,19 @@ private:
             }
             case WM_SETCURSOR:
                 if (LOWORD(lparam) == HTCLIENT) {
-                    LPCWSTR cursor = IDC_ARROW;
+                    Cursor cursor = Cursor::Arrow;
                     if (overlays_.empty() && current_ && content_.contains(mouse_x_, mouse_y_))
                         cursor = current_->cursor();
                     if (overlays_.empty() && sidebar_.contains(mouse_x_, mouse_y_)) {
                         for (const NavItem &item : nav_)
                             if (item.kind != NavItem::Kind::Section && item.rect.contains(mouse_x_, mouse_y_))
-                                cursor = IDC_HAND;
+                                cursor = Cursor::Hand;
                         if (pause_button_.contains(mouse_x_, mouse_y_) || settings_button_.contains(mouse_x_, mouse_y_))
-                            cursor = IDC_HAND;
+                            cursor = Cursor::Hand;
                     }
-                    SetCursor(LoadCursorW(nullptr, cursor));
+                    SetCursor(LoadCursorW(nullptr, cursor == Cursor::Hand    ? IDC_HAND
+                                                   : cursor == Cursor::IBeam ? IDC_IBEAM
+                                                                             : IDC_ARROW));
                     return TRUE;
                 }
                 break;
@@ -1043,7 +1302,7 @@ private:
                 remove_tray();
                 store_.stop();
                 store_.flush_history();  // the minute in progress would otherwise go with the process
-                renderer_.shutdown();
+                canvas_.shutdown();
                 PostQuitMessage(0);
                 return 0;
             default: break;
@@ -1055,7 +1314,8 @@ private:
     std::optional<PageId> initial_page_;
     HWND hwnd_ = nullptr;
     float dpi_ = 96;
-    Renderer renderer_;
+    D2DCanvas canvas_;
+    Renderer renderer_{canvas_};
     Store store_;
     Settings settings_;
     Theme theme_;
@@ -1064,9 +1324,12 @@ private:
     std::vector<std::unique_ptr<Overlay>> overlays_;
     std::vector<NavItem> nav_;
     Rect sidebar_, content_, pause_button_, settings_button_;
+    Rect caption_buttons_[3];
+    int caption_hover_ = -1, caption_pressed_ = -1;
     ScrollState sidebar_scroll_;
     float mouse_x_ = -1, mouse_y_ = -1;
-    bool tracking_ = false;
+    bool tracking_ = false, nc_tracking_ = false;
+    bool mica_ = false;  // the Mica backdrop is on, so the sidebar is translucent
     NOTIFYICONDATAW tray_{};
     bool tray_added_ = false;
     bool hidden_ = false;

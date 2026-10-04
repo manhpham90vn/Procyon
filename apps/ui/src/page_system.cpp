@@ -4,8 +4,6 @@
 #include "pages.hpp"
 #include "version.h"
 
-#include <shellapi.h>  // after windows.h (through ui.hpp)
-
 namespace procyon::ui {
 namespace {
 
@@ -41,7 +39,7 @@ public:
             Rect inner = card.inset(tokens::space::xl, tokens::space::xl);
             const Rect device = inner.take_left(120);
             inner.take_left(tokens::space::xl);
-            const D2D1_COLOR_F start = rgba(tokens::metric::cpu.start);
+            const Color start = rgba(tokens::metric::cpu.start);
             for (int i = 3; i >= 1; --i)
                 r.fill_circle(device.cx(), device.cy(), 34 + i * 6.0f, with_alpha(start, 0.3f / 6));
             r.symbol(Renderer::Symbol::Desktop, Rect{device.cx() - 36, device.cy() - 36, 72, 72}, start, 2.2f);
@@ -425,12 +423,12 @@ public:
         mouse_x_ = e.x;
         mouse_y_ = e.y;
     }
-    LPCWSTR cursor() const override {
+    Cursor cursor() const override {
         for (const Link &l : links_)
-            if (l.rect.contains(mouse_x_, mouse_y_)) return IDC_HAND;
+            if (l.rect.contains(mouse_x_, mouse_y_)) return Cursor::Hand;
         for (const Hit &h : hits_)
-            if (h.rect.contains(mouse_x_, mouse_y_)) return IDC_HAND;
-        return IDC_ARROW;
+            if (h.rect.contains(mouse_x_, mouse_y_)) return Cursor::Hand;
+        return Cursor::Arrow;
     }
 
     void mouse_down(Host &host, const MouseEvent &e, bool right) override {
@@ -438,7 +436,7 @@ public:
         Settings &settings = host.settings();
         for (const Link &l : links_) {
             if (!l.rect.contains(e.x, e.y)) continue;
-            ShellExecuteW(host.hwnd(), L"open", l.url, nullptr, nullptr, SW_SHOWNORMAL);
+            host.open_url(l.url);
             return;
         }
         for (const Hit &h : hits_) {

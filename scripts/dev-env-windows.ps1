@@ -33,8 +33,8 @@ function Find-Python {
 
 function Get-CppFiles {
     $root = Split-Path -Parent $PSScriptRoot
-    Get-ChildItem -Recurse -File -Path (Join-Path $root "core"), (Join-Path $root "apps\windows\src") -Include *.cpp, *.hpp, *.h, *.c |
-        Where-Object { $_.Name -ne "Tokens.generated.h" } |
+    Get-ChildItem -Recurse -File -Path (Join-Path $root "core"), (Join-Path $root "apps\ui\src"), (Join-Path $root "apps\windows\src") -Include *.cpp, *.hpp, *.h, *.c |
+        Where-Object { $_.Name -ne "Tokens.generated.h" -and $_.Name -ne "icons_data.hpp" } |
         Sort-Object FullName |
         ForEach-Object { $_.FullName }
 }

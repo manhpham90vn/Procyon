@@ -5,6 +5,7 @@
 
 IDI_PROCYON ICON "Procyon.ico"
 IDR_FONT_INTER RCDATA "fonts/InterVariable.ttf"
+IDR_FONT_ROUNDED RCDATA "fonts/NunitoVariable.ttf"
 
 IDR_ACCELERATORS ACCELERATORS
 BEGIN

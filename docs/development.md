@@ -35,22 +35,36 @@ apps/macos/Sources/
   ProcyonApp                screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Energy,
                             Startup, Services, History, Files & Ports, Battery, System; ⌘K palette;
                             menu bar widget
-apps/windows/
-  CMakeLists.txt            Procyon.exe (Win32 + Direct2D/DirectWrite, no other dependencies)
-  src/ui.hpp, render.cpp    theme, formatting, and the renderer that draws design/components.md
+apps/ui/                    the shared UI of the non-Apple apps (C++20, no platform headers)
+  CMakeLists.txt            procyon_ui static library, version.h
+  src/ui.hpp                geometry, Color, Theme, Path, the Canvas interface a backend implements,
+                            the Renderer (components of design/components.md over a Canvas), input
+  src/render.cpp            the components: cards with real shadows, continuous (squircle) corners,
+                            smooth sparklines, ring gauges, badges, icons
+  src/icons.*, icons_data.hpp  Lucide icons (ISC) parsed from SVG into paths
+  src/platform.hpp          the OS services the UI needs (dark mode, data folder, settings, clipboard)
   src/store.*               sampler thread around pc_monitor, snapshot copies, 60 s histories
   src/widgets.*             search field, scrolling, virtual table
   src/pages.hpp, page_*.cpp screens: Overview, Processes, CPU, Memory, Disk, Network, GPU, Battery,
-                            Startup, Services, Files & Ports, System, Settings
+                            Startup, Services, History, Files & Ports, System, Settings
   src/overlays.*            Ctrl+K palette and Get Info
-  src/window.cpp            main window: sidebar, routing, tray icon, dialogs, elevation, settings
+  src/history.*, alerts.*   the 24-hour history file and alert rules
+  src/commands.hpp          command ids shared with the Windows accelerator table
   src/Tokens.generated.h    generated from design/tokens.json
+apps/windows/
+  CMakeLists.txt            Procyon.exe (Win32 + Direct2D/DirectWrite, no other dependencies)
+  src/canvas_d2d.*          the Direct2D/DirectWrite Canvas on a DirectComposition swap chain: paths,
+                            gradients, Shadow effect, images, text
+  src/platform_windows.cpp  platform.hpp for Windows (registry, %LOCALAPPDATA%, clipboard, COM, shell icons)
+  src/window.cpp            main window: custom caption, sidebar, routing, tray icon, dialogs,
+                            elevation, settings
   res/                      icon (from the shared PNG), manifest, accelerators, version resource
-  res/fonts/                InterVariable.ttf (SIL OFL 1.1), embedded as an RCDATA resource
+design/fonts/               InterVariable.ttf and NunitoVariable.ttf (SIL OFL 1.1), embedded as RCDATA
+design/icons/               the Lucide license
 data/
   process-catalog.json      plain-language explanations of common processes
 scripts/
-  gen-tokens.py             tokens.json → Tokens.generated.swift and Tokens.generated.h
+  gen-tokens.py             tokens.json → Tokens.generated.swift and apps/ui's Tokens.generated.h
   build-macos-app.sh        builds dist/Procyon.app
   build-windows.cmd         builds build\windows (core, CLI, tests, app) and dist\windows\Procyon.exe
   make-icon.swift           renders the app icon; make-icon-windows.ps1 converts it to Procyon.ico
@@ -222,19 +236,44 @@ a macOS release the feature hides instead of showing wrong numbers.
 
 ## Windows
 
-The Windows app reuses the core unchanged (the same `pc_monitor` C ABI, views, deltas and refusals) and adds a
-Win32 front end drawn with Direct2D/DirectWrite: no framework, no runtime beyond Windows 10 1809. Text is set in
-Inter (bundled, loaded through an in-memory DirectWrite font set with its weight and optical-size axes per text
-style) because the macOS screens use SF Pro, which may not ship outside Apple platforms; Segoe UI Variable (Text
-below 20, Display from 20) is the fallback when the resource cannot load, Cascadia Mono / Consolas serve
-monospace. The screens,
-components and tokens follow `design/components.md` and `design/tokens.json` (`Tokens.generated.h`), and each screen
-is laid out like its SwiftUI counterpart (`apps/macos/Sources/ProcyonApp/Screens`): the same sidebar (brand, page
-rows with a detail line, metric rows with a 46×22 sparkline, Performance / Manage / Analyze / Machine sections, the
-Live pill and Settings at the bottom), the same `ScreenScroll` paddings, `PageHeader` with a trailing accessory,
-`Panel` captions, `LiveChart`, `StatGrid`, `MetricCard`, `TopAppsPanel`, `ActionBanner`, segmented controls and
-24 pt table rows with heat cells. SF Symbols are replaced by small vector glyphs (`Renderer::Symbol`), app icons
-by a metric tile, and the folder picker stands in for the macOS open panel in **Who Is Using…**.
+The Windows app reuses the core unchanged (the same `pc_monitor` C ABI, views, deltas and refusals) and the shared
+UI of `apps/ui`, and adds only what is Windows: a Win32 window (`window.cpp`), a Direct2D/DirectWrite `Canvas`
+(`canvas_d2d.cpp`) and `platform_windows.cpp`. No framework, no runtime beyond Windows 10 1809.
+
+**The shared UI (`apps/ui`).** Every screen, component and widget is written once against the `Canvas`
+interface in `ui.hpp` (rectangles, rounded rectangles, ellipses, lines, vector `Path`s with gradients, Gaussian
+shadows, clips, masks, scale transforms, text) and the small set of OS services in `platform.hpp`. A new
+platform implements those two and a window; the Linux app is a Cairo/Pango `Canvas` and a GTK window. The
+`Renderer` turns `design/components.md` into Canvas calls: cards with a real shadow (`tokens.shadow`),
+continuous corners (the squircle of SwiftUI's `.continuous` style, after Figma's corner smoothing) on every radius
+of 8 or more, sparklines smoothed through midpoints as `Sparkline.swift` does, ring gauges with a halo,
+`MetricIcon` tiles with a coloured shadow, and Lucide icons (`icons_data.hpp`, parsed from their SVG into paths at
+first use) in place of SF Symbols: `cpu`, `memory-stick`, `hard-drive`, `network`, `box`, `battery-full`, `zap`
+for the metrics, and `Renderer::Symbol` for the rest. Pages never see a platform type: colours are `Color`, keys
+are `Key`, cursors are `Cursor`, and the window answers `Host::open_url`, `pick_folder`, `request_frame`.
+
+**Text.** Inter (bundled, loaded through an in-memory DirectWrite font set with its weight and optical-size axes
+per text style) stands in for SF Pro, Nunito for SF Rounded (the `rounded` design of the tokens: display, title,
+metric and stat figures, the wordmark); both ship in `design/fonts` under the OFL. Segoe UI Variable (Text below
+20, Display from 20) is the fallback when a resource cannot load, Cascadia Mono / Consolas serve monospace. Text
+is antialiased in grayscale, like macOS, rather than ClearType, whose colour fringes show on dark surfaces.
+
+**Window.** The canvas draws into a DirectComposition swap chain (premultiplied alpha, `WS_EX_NOREDIRECTIONBITMAP`),
+and the window asks for the Mica backdrop (`DWMWA_SYSTEMBACKDROP_TYPE`, Windows 11 22H2+): the sidebar is painted
+at 55–62% opacity over it, the way the macOS sidebar's material shows the desktop through, while the page stays
+opaque; where Mica is refused the sidebar is opaque. The standard caption is removed (`WM_NCCALCSIZE` keeps the
+resize borders only), as the macOS app hides its title bar: a 32-DIP strip at the top drags the window, the Windows
+11 caption buttons (46×32, Lucide glyphs, red close on hover) are drawn by the app and hit-tested as
+`HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE`, so Snap Layouts still appear on the maximize button; the strip above the
+first sidebar row drags too. App icons come from the shell (`IShellItemImageFactory` at the size they are shown,
+`platform::app_icon`), cached by the `Renderer`; a process without one gets `ProcessIcon`'s tile with a terminal
+or cog glyph. Each screen is laid out like
+its SwiftUI counterpart (`apps/macos/Sources/ProcyonApp/Screens`): the same sidebar (brand, page rows with a detail
+line, metric rows with a 46×22 sparkline, Performance / Manage / Analyze / Machine sections, the Live pill and
+Settings at the bottom), the same `ScreenScroll` paddings, `PageHeader` with a trailing accessory, `Panel`
+captions, `LiveChart`, `StatGrid`, `MetricCard` (which lifts 1% on hover, eased over `motion.normal`),
+`TopAppsPanel`, `ActionBanner`, segmented controls and 24 pt table rows with heat cells. The folder picker stands
+in for the macOS open panel in **Who Is Using…**.
 
 | Spec item | Status |
 | --- | --- |

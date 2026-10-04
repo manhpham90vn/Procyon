@@ -10,7 +10,10 @@ New-Item -ItemType Directory -Force $tools | Out-Null
 
 $cmakeVersion = "3.31.6"
 $ninjaVersion = "1.12.1"
-$clangFormatRelease = "master-f4f85437"  # muttleyxd/clang-format-static-binaries, clang-format 19
+# muttleyxd/clang-tools-static-binaries (the old clang-format-static-binaries name redirects, but
+# release downloads under it 404): the release that ships clang-format 19.1.0.
+$clangFormatRelease = "master-796e77c"
+$clangFormatAsset = "clang-format-19_windows-amd64"
 
 function Fetch([string]$url, [string]$target) {
     Write-Host "  $url"
@@ -36,10 +39,26 @@ if (-not (Test-Path (Join-Path $tools "ninja.exe"))) {
 }
 if (-not (Test-Path (Join-Path $tools "clang-format.exe"))) {
     Write-Host "clang-format ($clangFormatRelease)"
-    Fetch "https://github.com/muttleyxd/clang-format-static-binaries/releases/download/$clangFormatRelease/clang-format-19_windows-amd64.exe" (Join-Path $tools "clang-format.exe")
+    $base = "https://github.com/muttleyxd/clang-tools-static-binaries/releases/download/$clangFormatRelease/$clangFormatAsset"
+    $exe = Join-Path $tools "clang-format.exe"
+    $sum = Join-Path $tools "clang-format.sha512sum"
+    Fetch "$base.exe" $exe
+    Fetch "$base.sha512sum" $sum
+    # The published checksum, so a swapped binary never formats the tree.
+    $expected = ((Get-Content $sum -Raw) -split '\s+')[0].ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA512 $exe).Hash.ToLowerInvariant()
+    Remove-Item $sum
+    if ($expected -ne $actual) {
+        Remove-Item $exe
+        throw "clang-format download does not match its sha512sum"
+    }
 }
 
-& (Join-Path $tools "cmake\bin\cmake.exe") --version | Select-Object -First 1
-"ninja " + (& (Join-Path $tools "ninja.exe") --version)
-& (Join-Path $tools "clang-format.exe") --version
+# Versions, read whole: a native command cut off mid-pipeline is an error in pwsh 7.
+$cmakeOut = @(& (Join-Path $tools "cmake\bin\cmake.exe") --version)
+Write-Host $cmakeOut[0]
+$ninjaOut = @(& (Join-Path $tools "ninja.exe") --version)
+Write-Host "ninja $($ninjaOut[0])"
+$clangOut = @(& (Join-Path $tools "clang-format.exe") --version)
+Write-Host $clangOut[0]
 Write-Host "Tools are in $tools"

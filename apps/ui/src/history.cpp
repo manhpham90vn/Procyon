@@ -1,19 +1,13 @@
 #include "history.hpp"
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-
-#include <shlobj.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+
+#include "platform.hpp"
+#include "ui.hpp"
 
 namespace procyon::ui {
 
@@ -131,19 +125,7 @@ struct Writer {
         u32(static_cast<uint32_t>(s.size()));
         bytes.append(s);
     }
-    void wstr(const std::wstring &s) {
-        std::string utf8;
-        if (!s.empty()) {
-            const int size =
-                WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
-            if (size > 0) {
-                utf8.resize(static_cast<size_t>(size));
-                WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), utf8.data(), size, nullptr,
-                                    nullptr);
-            }
-        }
-        str(utf8);
-    }
+    void wstr(const std::wstring &s) { str(fmt::to_utf8(s)); }
 };
 
 struct Reader {
@@ -177,15 +159,7 @@ struct Reader {
         at += size;
         return value;
     }
-    std::wstring wstr() {
-        const std::string utf8 = str();
-        if (utf8.empty()) return {};
-        const int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-        if (size <= 0) return {};
-        std::wstring value(static_cast<size_t>(size), L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), value.data(), size);
-        return value;
-    }
+    std::wstring wstr() { return fmt::from_utf8(str()); }
 };
 
 void encode(const MinuteRecord &record, Writer &w) {
@@ -245,29 +219,21 @@ bool decode(Reader &r, MinuteRecord &record) {
 }
 
 std::string read_file(const std::wstring &path) {
-    std::ifstream file(path.c_str(), std::ios::binary);
+    std::ifstream file(std::filesystem::path(path), std::ios::binary);
     if (!file) return {};
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 
-void ensure_directory(const std::wstring &path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return;
-    CreateDirectoryW(path.substr(0, slash).c_str(), nullptr);
+void ensure_directory(const std::wstring &path) { platform::create_parent_directories(path); }
+
+bool file_exists(const std::wstring &path) {
+    std::error_code error;
+    return std::filesystem::exists(std::filesystem::path(path), error);
 }
 
 }  // namespace
 
-std::wstring HistoryDatabase::default_path() {
-    PWSTR folder = nullptr;
-    std::wstring base;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &folder)) && folder) {
-        base = folder;
-        CoTaskMemFree(folder);
-    }
-    if (base.empty()) base = L".";
-    return base + L"\\Procyon\\history.bin";
-}
+std::wstring HistoryDatabase::default_path() { return platform::data_file(L"history.bin"); }
 
 HistoryDatabase::HistoryDatabase(std::wstring path) : path_(std::move(path)) {}
 
@@ -311,8 +277,8 @@ void HistoryDatabase::prune(int64_t now) {
 
 bool HistoryDatabase::append(const MinuteRecord &record) {
     ensure_directory(path_);
-    const bool fresh = GetFileAttributesW(path_.c_str()) == INVALID_FILE_ATTRIBUTES;
-    std::ofstream file(path_.c_str(), std::ios::binary | std::ios::app);
+    const bool fresh = !file_exists(path_);
+    std::ofstream file(std::filesystem::path(path_), std::ios::binary | std::ios::app);
     if (!file) return false;
     if (fresh) {
         file.write(kMagic, sizeof(kMagic));
@@ -333,7 +299,7 @@ void HistoryDatabase::rewrite() {
     ensure_directory(path_);
     const std::wstring temp = path_ + L".tmp";
     {
-        std::ofstream file(temp.c_str(), std::ios::binary | std::ios::trunc);
+        std::ofstream file(std::filesystem::path(temp), std::ios::binary | std::ios::trunc);
         if (!file) return;
         file.write(kMagic, sizeof(kMagic));
         const uint32_t version = kVersion;
@@ -347,7 +313,8 @@ void HistoryDatabase::rewrite() {
         }
         if (!file) return;
     }
-    MoveFileExW(temp.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    std::error_code error;
+    std::filesystem::rename(std::filesystem::path(temp), std::filesystem::path(path_), error);  // replaces
 }
 
 void HistoryDatabase::write(const MinuteRecord &record) {
@@ -416,15 +383,16 @@ std::vector<AppUsage> HistoryDatabase::apps(int64_t from, int64_t to, AppOrder o
 }
 
 int64_t HistoryDatabase::size() {
-    WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExW(path_.c_str(), GetFileExInfoStandard, &data)) return 0;
-    return (static_cast<int64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    std::error_code error;
+    const auto size = std::filesystem::file_size(std::filesystem::path(path_), error);
+    return error ? 0 : static_cast<int64_t>(size);
 }
 
 void HistoryDatabase::clear() {
     load();
     minutes_.clear();
-    DeleteFileW(path_.c_str());
+    std::error_code error;
+    std::filesystem::remove(std::filesystem::path(path_), error);
 }
 
 }  // namespace procyon::ui

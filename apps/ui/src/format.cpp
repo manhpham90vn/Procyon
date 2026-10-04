@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <cwchar>
 
 #include "ui.hpp"
 
@@ -13,8 +14,17 @@ namespace {
 
 std::wstring fixed(double value, int digits) {
     wchar_t buffer[64];
-    (void)swprintf_s(buffer, L"%.*f", digits, value);
+    (void)std::swprintf(buffer, 64, L"%.*f", digits, value);
     return buffer;
+}
+
+bool local_time(int64_t unix_seconds, tm &out) {
+    const time_t t = static_cast<time_t>(unix_seconds);
+#ifdef _WIN32
+    return localtime_s(&out, &t) == 0;
+#else
+    return localtime_r(&t, &out) != nullptr;
+#endif
 }
 
 }  // namespace
@@ -94,9 +104,8 @@ std::wstring interval(double seconds) { return fixed(seconds, seconds < 1 ? 1 : 
 
 std::wstring time_of_day(int64_t unix_seconds) {
     if (unix_seconds <= 0) return unavailable;
-    const time_t t = static_cast<time_t>(unix_seconds);
     tm local{};
-    if (localtime_s(&local, &t) != 0) return unavailable;
+    if (!local_time(unix_seconds, local)) return unavailable;
     wchar_t buffer[32];
     (void)wcsftime(buffer, 32, L"%H:%M", &local);
     return buffer;
@@ -104,9 +113,8 @@ std::wstring time_of_day(int64_t unix_seconds) {
 
 std::wstring date_time(int64_t unix_seconds) {
     if (unix_seconds <= 0) return unavailable;
-    const time_t t = static_cast<time_t>(unix_seconds);
     tm local{};
-    if (localtime_s(&local, &t) != 0) return unavailable;
+    if (!local_time(unix_seconds, local)) return unavailable;
     wchar_t buffer[64];
     (void)wcsftime(buffer, 64, L"%b %d, %Y %H:%M", &local);
     return buffer;
@@ -118,22 +126,92 @@ std::pair<std::wstring, std::wstring> split_unit(const std::wstring &text) {
     return {text.substr(0, space), text.substr(space + 1)};
 }
 
+// UTF-8 <-> wide strings without the platform's converter: wchar_t is UTF-16 on Windows and
+// UTF-32 on Linux, so both encodings are handled. Malformed input decodes as U+FFFD.
 std::wstring from_utf8(std::string_view text) {
-    if (text.empty()) return {};
-    const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-    if (size <= 0) return {};
-    std::wstring out(static_cast<size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size);
+    std::wstring out;
+    out.reserve(text.size());
+    size_t i = 0;
+    while (i < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        uint32_t code = 0;
+        size_t length = 0;
+        if (lead < 0x80) {
+            code = lead;
+            length = 1;
+        } else if ((lead & 0xE0) == 0xC0) {
+            code = lead & 0x1F;
+            length = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            code = lead & 0x0F;
+            length = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            code = lead & 0x07;
+            length = 4;
+        } else {
+            code = 0xFFFD;
+            length = 1;
+        }
+        if (i + length > text.size()) {
+            code = 0xFFFD;
+            length = text.size() - i;
+        } else {
+            for (size_t k = 1; k < length; ++k) {
+                const auto byte = static_cast<unsigned char>(text[i + k]);
+                if ((byte & 0xC0) != 0x80) {
+                    code = 0xFFFD;
+                    length = k;
+                    break;
+                }
+                code = (code << 6) | (byte & 0x3F);
+            }
+        }
+        i += std::max<size_t>(length, 1);
+        if (code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) code = 0xFFFD;
+        if constexpr (sizeof(wchar_t) == 2) {
+            if (code >= 0x10000) {
+                code -= 0x10000;
+                out.push_back(static_cast<wchar_t>(0xD800 + (code >> 10)));
+                out.push_back(static_cast<wchar_t>(0xDC00 + (code & 0x3FF)));
+            } else {
+                out.push_back(static_cast<wchar_t>(code));
+            }
+        } else {
+            out.push_back(static_cast<wchar_t>(code));
+        }
+    }
     return out;
 }
 
 std::string to_utf8(std::wstring_view text) {
-    if (text.empty()) return {};
-    const int size =
-        WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    if (size <= 0) return {};
-    std::string out(static_cast<size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        uint32_t code = static_cast<uint32_t>(text[i]) & (sizeof(wchar_t) == 2 ? 0xFFFF : 0xFFFFFFFF);
+        if (sizeof(wchar_t) == 2 && code >= 0xD800 && code <= 0xDBFF && i + 1 < text.size()) {
+            const uint32_t low = static_cast<uint32_t>(text[i + 1]) & 0xFFFF;
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                ++i;
+            }
+        }
+        if (code >= 0xD800 && code <= 0xDFFF) code = 0xFFFD;
+        if (code < 0x80) {
+            out.push_back(static_cast<char>(code));
+        } else if (code < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+        } else if (code < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (code >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+        }
+    }
     return out;
 }
 

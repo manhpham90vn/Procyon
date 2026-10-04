@@ -73,8 +73,9 @@ if(MSVC)
 endif()
 add_test(NAME core COMMAND procyon-core-tests)
 
-# The Win32 app lives next to the core and is built from the same tree.
+# The shared UI (apps/ui) and the Win32 app live next to the core and are built from the same tree.
 option(PROCYON_BUILD_APP "Build the native app for this platform (Windows)" ON)
 if(WIN32 AND PROCYON_BUILD_APP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../apps/windows/CMakeLists.txt")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../apps/ui" apps/ui)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../apps/windows" apps/windows)
 endif()

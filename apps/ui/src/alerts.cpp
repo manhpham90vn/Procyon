@@ -1,28 +1,22 @@
 #include "alerts.hpp"
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 
+#include "platform.hpp"
 #include "procyon/procyon.h"
 
 namespace procyon::ui {
 
 namespace {
 
-const wchar_t *const kAlertsKey = L"Software\\Procyon\\Alerts";
+const wchar_t *const kAlertsGroup = L"Alerts";
 
 std::wstring fixed(double value, int digits) {
     wchar_t buffer[64];
-    (void)swprintf_s(buffer, L"%.*f", digits, value);
+    (void)std::swprintf(buffer, 64, L"%.*f", digits, value);
     return buffer;
 }
 
@@ -158,48 +152,34 @@ bool AlertSettings::watches_apps() const {
 
 AlertSettings AlertSettings::load() {
     AlertSettings settings;  // kinds added after the settings were saved start off
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kAlertsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return settings;
     for (AlertRule &rule : settings.rules) {
         const std::string base = alert_key(rule.kind);
-        auto dword = [&](const char *suffix, DWORD fallback) {
+        auto value = [&](const char *suffix, int64_t fallback) {
             const std::string name = base + "." + suffix;
-            const std::wstring wide(name.begin(), name.end());
-            DWORD value = fallback, size = sizeof(value);
-            if (RegQueryValueExW(key, wide.c_str(), nullptr, nullptr, reinterpret_cast<BYTE *>(&value), &size) !=
-                ERROR_SUCCESS)
-                return fallback;
-            return value;
+            return platform::read_setting(kAlertsGroup, std::wstring(name.begin(), name.end())).value_or(fallback);
         };
-        rule.enabled = dword("enabled", 0) != 0;
-        rule.threshold = std::clamp(static_cast<double>(dword("threshold", static_cast<DWORD>(rule.threshold))),
+        rule.enabled = value("enabled", 0) != 0;
+        rule.threshold = std::clamp(static_cast<double>(value("threshold", std::lround(rule.threshold))),
                                     alert_threshold_min(rule.kind), alert_threshold_max(rule.kind));
-        rule.duration = dword("duration", static_cast<DWORD>(rule.duration));
+        rule.duration = static_cast<double>(value("duration", std::lround(rule.duration)));
         bool known = false;
         for (double d : kDurations) known |= d == rule.duration;
         if (!known) rule.duration = 60;
     }
-    RegCloseKey(key);
     return settings;
 }
 
 void AlertSettings::save() const {
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kAlertsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) !=
-        ERROR_SUCCESS)
-        return;
     for (const AlertRule &rule : rules) {
         const std::string base = alert_key(rule.kind);
-        auto dword = [&](const char *suffix, DWORD value) {
+        auto write = [&](const char *suffix, int64_t value) {
             const std::string name = base + "." + suffix;
-            const std::wstring wide(name.begin(), name.end());
-            RegSetValueExW(key, wide.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE *>(&value), sizeof(value));
+            platform::write_setting(kAlertsGroup, std::wstring(name.begin(), name.end()), value);
         };
-        dword("enabled", rule.enabled ? 1 : 0);
-        dword("threshold", static_cast<DWORD>(std::lround(rule.threshold)));
-        dword("duration", static_cast<DWORD>(std::lround(rule.duration)));
+        write("enabled", rule.enabled ? 1 : 0);
+        write("threshold", std::lround(rule.threshold));
+        write("duration", std::lround(rule.duration));
     }
-    RegCloseKey(key);
 }
 
 // ---- evaluator ----

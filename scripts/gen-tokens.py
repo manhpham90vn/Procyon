@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate platform token files from design/tokens.json.
 
-Emits SwiftUI (macOS) and a C++ header (Windows, Win32 + Direct2D). A GTK CSS emitter belongs
-here too, so every UI reads the same values.
+Emits SwiftUI (macOS) and a C++ header for the shared UI of the other platforms (apps/ui, used by
+the Windows and Linux apps), so every UI reads the same values.
 
     python3 scripts/gen-tokens.py          # write
     python3 scripts/gen-tokens.py --check  # exit 1 if a committed file is stale (CI)
@@ -12,9 +12,9 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TOKENS = json.loads((ROOT / "design" / "tokens.json").read_text())
+TOKENS = json.loads((ROOT / "design" / "tokens.json").read_text(encoding="utf-8"))
 SWIFT_OUT = ROOT / "apps/macos/Sources/ProcyonDesign/Tokens/Tokens.generated.swift"
-WINDOWS_OUT = ROOT / "apps/windows/src/Tokens.generated.h"
+UI_OUT = ROOT / "apps/ui/src/Tokens.generated.h"
 
 # DirectWrite weights for the token names.
 WEIGHTS = {"regular": 400, "medium": 500, "semibold": 600, "bold": 700}
@@ -157,19 +157,19 @@ def windows() -> str:
     return "\n".join(out)
 
 
-OUTPUTS = [(SWIFT_OUT, swift), (WINDOWS_OUT, windows)]
+OUTPUTS = [(SWIFT_OUT, swift), (UI_OUT, windows)]
 
 if __name__ == "__main__":
     stale = False
     for path, emit in OUTPUTS:
         generated = emit()
         if "--check" in sys.argv:
-            if not path.exists() or path.read_text() != generated:
+            if not path.exists() or path.read_text(encoding="utf-8") != generated:
                 print(f"{path.relative_to(ROOT)} is stale: run scripts/gen-tokens.py", file=sys.stderr)
                 stale = True
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(generated)
+        path.write_text(generated, encoding="utf-8", newline="\n")
         print(f"wrote {path.relative_to(ROOT)}")
     if stale:
         sys.exit(1)

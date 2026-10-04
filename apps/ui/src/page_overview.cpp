@@ -1,6 +1,7 @@
 // Overview: the hero card with this PC's gauges, a metric card for every resource, and the
 // busiest apps by CPU and memory (the macOS OverviewView, laid out the same way).
 #include <algorithm>
+#include <cmath>
 
 #include "pages.hpp"
 
@@ -77,13 +78,27 @@ public:
                          nice_max(std::max(h.net_rx.max_recent(), h.net_tx.max_recent()))});
         const int columns = std::max(1, static_cast<int>((area.w + tokens::space::lg) / (200 + tokens::space::lg)));
         const float card_w = (area.w - tokens::space::lg * (columns - 1)) / columns;
+        // Hover lifts a card by 1% (MetricCard's scaleEffect), eased over Motion.normal.
+        const double now = host.now();
+        const float dt = static_cast<float>(std::clamp(now - last_frame_, 0.0, 0.1));
+        last_frame_ = now;
+        card_lift_.resize(specs.size(), 0.0f);
+        bool animating = false;
         for (size_t i = 0; i < specs.size(); ++i) {
             const int col = static_cast<int>(i) % columns;
             if (i > 0 && col == 0) y += kCardHeight + tokens::space::lg;
             const Rect card{area.x + col * (card_w + tokens::space::lg), y, card_w, kCardHeight};
+            const float target = card.contains(host.mouse_x(), host.mouse_y()) ? 1.0f : 0.0f;
+            float &lift = card_lift_[i];
+            lift += (target - lift) * std::min(1.0f, dt * (4 / tokens::motion::normal));
+            if (std::fabs(target - lift) < 0.01f) lift = target;
+            animating |= lift != target;
+            if (lift > 0) r.canvas().push_scale(1 + 0.01f * lift, card.center());
             paint_card(r, card, specs[i]);
+            if (lift > 0) r.canvas().pop_transform();
             cards_.push_back({card, specs[i].page});
         }
+        if (animating) host.request_frame();
         y += kCardHeight + kSectionGap;
 
         // Top apps, side by side.
@@ -132,7 +147,7 @@ public:
     }
 
     void wheel(Host &, const MouseEvent &e) override { scroll_.wheel(e.wheel); }
-    LPCWSTR cursor() const override { return hover_ ? IDC_HAND : IDC_ARROW; }
+    Cursor cursor() const override { return hover_ ? Cursor::Hand : Cursor::Arrow; }
 
 private:
     static std::wstring pressure_title(int32_t pressure) {
@@ -268,7 +283,7 @@ private:
             Renderer::SparklineOptions options;
             options.area = false;
             options.halo = false;
-            D2D1_COLOR_F end = rgba(metric_style(spec.kind).end);
+            Color end = rgba(metric_style(spec.kind).end);
             options.color_override = &end;
             r.sparkline(spark.inset(0, 4), spec.secondary->data(), spec.secondary->size(), kHistoryWindow,
                         spec.series_max, spec.kind, options);
@@ -277,6 +292,8 @@ private:
     }
 
     std::vector<std::pair<Rect, PageId>> cards_;
+    std::vector<float> card_lift_;  // 0…1 hover progress per card
+    double last_frame_ = 0;
     std::vector<TopAppRow> app_rows_;
     std::vector<pc_volume> volumes_;
     ScrollState scroll_;

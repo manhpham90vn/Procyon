@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "platform.hpp"
+
 namespace procyon::ui {
 
 float nice_max(float value) {
@@ -34,10 +36,9 @@ Store::~Store() {
     if (monitor_) pc_monitor_destroy(monitor_);
 }
 
-bool Store::start(HWND window, UINT message) {
+bool Store::start(std::function<bool(Snapshot *)> deliver) {
     if (running_) return true;
-    window_ = window;
-    message_ = message;
+    deliver_ = std::move(deliver);
     running_ = true;
     thread_ = std::thread([this] { run(); });
     return true;
@@ -99,8 +100,7 @@ void Store::refresh_now() {
 }
 
 void Store::run() {
-    // COM for the WMI temperature reads; a mismatch with another apartment is harmless.
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    platform::sampler_thread_begin();
     auto next = std::chrono::steady_clock::now();
     while (running_) {
         {
@@ -118,11 +118,12 @@ void Store::run() {
             const pc_snapshot *snap = pc_monitor_refresh(monitor_);
             if (snap) copy_snapshot(*snap, *snapshot);
         }
-        if (window_ && PostMessageW(window_, message_, 0, reinterpret_cast<LPARAM>(snapshot.get()))) snapshot.release();
+        // The window takes ownership once it accepted the hand-over to its thread.
+        if (deliver_ && deliver_(snapshot.get())) snapshot.release();
         next =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int64_t>(interval_.load() * 1000));
     }
-    CoUninitialize();
+    platform::sampler_thread_end();
 }
 
 void Store::copy_snapshot(const pc_snapshot &from, Snapshot &to) {
