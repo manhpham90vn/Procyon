@@ -92,7 +92,7 @@ jobs:
         run: scripts/package-macos.sh "${{ steps.version.outputs.value }}"
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.version.outputs.value) }}
           name: Procyon ${{ steps.version.outputs.value }}
