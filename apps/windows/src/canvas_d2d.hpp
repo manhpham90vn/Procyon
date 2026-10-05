@@ -84,8 +84,35 @@ private:
     ComPtr<ID2D1LinearGradientBrush> gradient_brush(const Gradient &gradient);
     ComPtr<ID2D1PathGeometry> geometry(const Path &path);
     ID2D1StrokeStyle *stroke_style(const Stroke &stroke);
+    // A laid-out string: the same text in the same style and box is laid out once and drawn
+    // every frame from here. Tables redraw hundreds of unchanged cells a second; laying each out
+    // again (shaping, trimming sign, typography) was most of the Processes screen's CPU.
+    struct LayoutKey {
+        std::wstring text;
+        float width, height, tracking;
+        uint8_t font, halign;
+        bool trim, tabular, wrap, uppercase;
+        bool operator==(const LayoutKey &o) const {
+            return width == o.width && height == o.height && tracking == o.tracking && font == o.font &&
+                   halign == o.halign && trim == o.trim && tabular == o.tabular && wrap == o.wrap &&
+                   uppercase == o.uppercase && text == o.text;
+        }
+    };
+    struct LayoutKeyHash {
+        size_t operator()(const LayoutKey &k) const;
+    };
+    struct CachedLayout {
+        ComPtr<IDWriteTextLayout> layout;
+        DWRITE_TEXT_METRICS metrics{};
+        uint32_t frame = 0;  // the last frame that drew or measured it
+    };
+
     IDWriteTextFormat *format(Font font);
-    ComPtr<IDWriteTextLayout> layout(std::wstring_view value, const TextStyle &style, float width, float height);
+    IDWriteInlineObject *ellipsis(Font font, IDWriteTextFormat *format);
+    // Null when the format could not be created. Valid until the next end().
+    const CachedLayout *layout(std::wstring_view value, const TextStyle &style, float width, float height);
+    ComPtr<IDWriteTextLayout> create_layout(const LayoutKey &key);
+    void prune_layouts();
     void load_fonts();
     ID2D1Effect *shadow_effect(const ShadowKey &key, const Rect &r, float radius, const Shadow &shadow);
 
@@ -105,6 +132,10 @@ private:
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<ID2D1StrokeStyle> dotted_, dashed_, round_, round_dotted_, round_dashed_;
     std::unordered_map<int, ComPtr<IDWriteTextFormat>> formats_;
+    std::unordered_map<int, ComPtr<IDWriteInlineObject>> ellipses_;  // per Font: the trimming sign its layouts share
+    ComPtr<IDWriteTypography> tabular_;                              // tabular figures, shared by every layout
+    std::unordered_map<LayoutKey, CachedLayout, LayoutKeyHash> layouts_;
+    uint32_t frame_ = 0;  // counts begin(); stamps the layouts a frame used
     std::wstring ui_family_, display_family_, mono_family_;
     ComPtr<IDWriteFactory6> dwrite6_;                // variable-font text formats (Windows 10 1809+)
     ComPtr<IDWriteFontCollection2> embedded_fonts_;  // the bundled Inter and Nunito; null when they could not load

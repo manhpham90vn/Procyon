@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cwctype>
 #include <tuple>
 
@@ -110,6 +111,9 @@ void D2DCanvas::load_fonts() {
 
 void D2DCanvas::shutdown() {
     release_device();
+    layouts_.clear();
+    ellipses_.clear();
+    tabular_.Reset();
     formats_.clear();
     dotted_.Reset();
     dashed_.Reset();
@@ -230,6 +234,7 @@ bool D2DCanvas::begin(Color background) {
             return false;
         }
     }
+    ++frame_;
     target_->BeginDraw();
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
     transforms_.clear();
@@ -238,10 +243,24 @@ bool D2DCanvas::begin(Color background) {
     return true;
 }
 
+// A layout no recent frame drew is a value that has changed (a CPU figure, a byte count) or a
+// screen that was left: dropping it right away keeps the cache at about one screen's worth of
+// text, a few hundred entries. Three frames of grace cover a measure_text() before begin().
+void D2DCanvas::prune_layouts() {
+    constexpr uint32_t kGraceFrames = 3;
+    for (auto it = layouts_.begin(); it != layouts_.end();) {
+        if (frame_ - it->second.frame > kGraceFrames)
+            it = layouts_.erase(it);
+        else
+            ++it;
+    }
+}
+
 bool D2DCanvas::end() {
     while (clips_ > 0) pop_clip();
     while (!layers_.empty()) pop_mask();
     while (!transforms_.empty()) pop_transform();
+    prune_layouts();
     HRESULT hr = target_->EndDraw();
     if (SUCCEEDED(hr)) hr = swap_chain_->Present(1, 0);
     if (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -554,55 +573,103 @@ IDWriteTextFormat *D2DCanvas::format(Font font) {
     return created.Get();
 }
 
-ComPtr<IDWriteTextLayout> D2DCanvas::layout(std::wstring_view value, const TextStyle &style, float width,
-                                            float height) {
-    IDWriteTextFormat *fmt_ = format(style.font);
+// The sign depends on the font alone, so one per Font serves every trimmed layout in it.
+IDWriteInlineObject *D2DCanvas::ellipsis(Font font, IDWriteTextFormat *format) {
+    const int key = static_cast<int>(font);
+    auto it = ellipses_.find(key);
+    if (it != ellipses_.end()) return it->second.Get();
+    ComPtr<IDWriteInlineObject> created;
+    if (FAILED(dwrite_->CreateEllipsisTrimmingSign(format, &created))) return nullptr;
+    ellipses_[key] = created;
+    return created.Get();
+}
+
+size_t D2DCanvas::LayoutKeyHash::operator()(const LayoutKey &k) const {
+    auto bits = [](float f) {
+        uint32_t u = 0;
+        std::memcpy(&u, &f, sizeof u);
+        return static_cast<size_t>(u);
+    };
+    size_t h = std::hash<std::wstring>{}(k.text);
+    auto mix = [&h](size_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+    mix(bits(k.width));
+    mix(bits(k.height));
+    mix(bits(k.tracking));
+    mix(static_cast<size_t>(k.font) | static_cast<size_t>(k.halign) << 8 | static_cast<size_t>(k.trim) << 16 |
+        static_cast<size_t>(k.tabular) << 17 | static_cast<size_t>(k.wrap) << 18 |
+        static_cast<size_t>(k.uppercase) << 19);
+    return h;
+}
+
+const D2DCanvas::CachedLayout *D2DCanvas::layout(std::wstring_view value, const TextStyle &style, float width,
+                                                 float height) {
+    LayoutKey key{std::wstring(value),
+                  std::max(width, 1.0f),
+                  std::max(height, 1.0f),
+                  style.tracking,
+                  static_cast<uint8_t>(style.font),
+                  static_cast<uint8_t>(style.halign),
+                  style.trim,
+                  style.tabular,
+                  style.wrap,
+                  style.uppercase};
+    auto it = layouts_.find(key);
+    if (it == layouts_.end()) {
+        ComPtr<IDWriteTextLayout> created = create_layout(key);
+        if (!created) return nullptr;
+        CachedLayout entry;
+        entry.layout = created;
+        created->GetMetrics(&entry.metrics);
+        it = layouts_.emplace(std::move(key), std::move(entry)).first;
+    }
+    it->second.frame = frame_;
+    return &it->second;
+}
+
+ComPtr<IDWriteTextLayout> D2DCanvas::create_layout(const LayoutKey &key) {
+    IDWriteTextFormat *fmt_ = format(static_cast<Font>(key.font));
     if (!fmt_) return nullptr;
-    std::wstring text(value);
-    if (style.uppercase)
+    std::wstring text = key.text;
+    if (key.uppercase)
         for (wchar_t &c : text) c = static_cast<wchar_t>(std::towupper(c));
     ComPtr<IDWriteTextLayout> out;
-    if (FAILED(dwrite_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt_, std::max(width, 1.0f),
-                                         std::max(height, 1.0f), &out)))
+    if (FAILED(dwrite_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt_, key.width, key.height,
+                                         &out)))
         return nullptr;
-    out->SetTextAlignment(style.halign == HAlign::Left     ? DWRITE_TEXT_ALIGNMENT_LEADING
-                          : style.halign == HAlign::Center ? DWRITE_TEXT_ALIGNMENT_CENTER
-                                                           : DWRITE_TEXT_ALIGNMENT_TRAILING);
+    const auto halign = static_cast<HAlign>(key.halign);
+    out->SetTextAlignment(halign == HAlign::Left     ? DWRITE_TEXT_ALIGNMENT_LEADING
+                          : halign == HAlign::Center ? DWRITE_TEXT_ALIGNMENT_CENTER
+                                                     : DWRITE_TEXT_ALIGNMENT_TRAILING);
     out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-    out->SetWordWrapping(style.wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
-    if (style.trim && !style.wrap) {
+    out->SetWordWrapping(key.wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (key.trim && !key.wrap) {
         DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-        ComPtr<IDWriteInlineObject> ellipsis;
-        if (SUCCEEDED(dwrite_->CreateEllipsisTrimmingSign(out.Get(), &ellipsis)))
-            out->SetTrimming(&trimming, ellipsis.Get());
+        if (IDWriteInlineObject *sign = ellipsis(static_cast<Font>(key.font), fmt_)) out->SetTrimming(&trimming, sign);
     }
     const DWRITE_TEXT_RANGE whole{0, static_cast<UINT32>(text.size())};
-    if (style.tabular) {
-        ComPtr<IDWriteTypography> typography;
-        if (SUCCEEDED(dwrite_->CreateTypography(&typography))) {
-            typography->AddFontFeature({DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, 1});
-            out->SetTypography(typography.Get(), whole);
-        }
+    if (key.tabular) {
+        if (!tabular_ && SUCCEEDED(dwrite_->CreateTypography(&tabular_)))
+            tabular_->AddFontFeature({DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, 1});
+        if (tabular_) out->SetTypography(tabular_.Get(), whole);
     }
-    if (style.tracking != 0) {
+    if (key.tracking != 0) {
         ComPtr<IDWriteTextLayout1> layout1;
-        if (SUCCEEDED(out.As(&layout1))) layout1->SetCharacterSpacing(0, style.tracking, 0, whole);
+        if (SUCCEEDED(out.As(&layout1))) layout1->SetCharacterSpacing(0, key.tracking, 0, whole);
     }
     return out;
 }
 
 float D2DCanvas::draw_text(std::wstring_view value, const Rect &r, const TextStyle &style, Color color) {
     if (value.empty() || r.empty()) return 0;
-    ComPtr<IDWriteTextLayout> l = layout(value, style, r.w, style.wrap ? r.h : 10000);
+    const CachedLayout *l = layout(value, style, r.w, style.wrap ? r.h : 10000);
     if (!l) return 0;
-    DWRITE_TEXT_METRICS metrics{};
-    l->GetMetrics(&metrics);
+    const DWRITE_TEXT_METRICS &metrics = l->metrics;
     float y = r.y;
     if (style.valign == VAlign::Center)
         y = r.y + (r.h - metrics.height) / 2;
     else if (style.valign == VAlign::Bottom)
         y = r.bottom() - metrics.height;
-    target_->DrawTextLayout(D2D1::Point2F(r.x, y), l.Get(), brush(color), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    target_->DrawTextLayout(D2D1::Point2F(r.x, y), l->layout.Get(), brush(color), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     return metrics.widthIncludingTrailingWhitespace;
 }
 
@@ -612,21 +679,15 @@ float D2DCanvas::measure_text(std::wstring_view value, Font font, float tracking
     style.font = font;
     style.trim = false;
     style.tracking = tracking;
-    ComPtr<IDWriteTextLayout> l = layout(value, style, 10000, 10000);
-    if (!l) return 0;
-    DWRITE_TEXT_METRICS metrics{};
-    l->GetMetrics(&metrics);
-    return metrics.widthIncludingTrailingWhitespace;
+    const CachedLayout *l = layout(value, style, 10000, 10000);
+    return l ? l->metrics.widthIncludingTrailingWhitespace : 0;
 }
 
 float D2DCanvas::line_height(Font font) {
     TextStyle style;
     style.font = font;
-    ComPtr<IDWriteTextLayout> l = layout(L"Ag", style, 1000, 1000);
-    if (!l) return font_spec(font).size * 1.3f;
-    DWRITE_TEXT_METRICS metrics{};
-    l->GetMetrics(&metrics);
-    return metrics.height;
+    const CachedLayout *l = layout(L"Ag", style, 1000, 1000);
+    return l ? l->metrics.height : font_spec(font).size * 1.3f;
 }
 
 }  // namespace procyon::ui

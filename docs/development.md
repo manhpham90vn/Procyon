@@ -267,6 +267,10 @@ per text style) stands in for SF Pro, Nunito for SF Rounded (the `rounded` desig
 metric and stat figures, the wordmark); both ship in `design/fonts` under the OFL. Segoe UI Variable (Text below
 20, Display from 20) is the fallback when a resource cannot load, Cascadia Mono / Consolas serve monospace. Text
 is antialiased in grayscale, like macOS, rather than ClearType, whose colour fringes show on dark surfaces.
+`IDWriteTextLayout`s are cached by text, style and box and dropped after three frames unused: a table redraws
+hundreds of unchanged cells a second, and laying each out again was most of the Processes screen's CPU (8% of a
+core on the CI runner, at the spec's limit; about half that with the cache). The ellipsis sign and the tabular
+typography are shared per font.
 
 **Window.** The canvas draws into a DirectComposition swap chain (premultiplied alpha, `WS_EX_NOREDIRECTIONBITMAP`),
 and the window asks for the Mica backdrop (`DWMWA_SYSTEMBACKDROP_TYPE`, Windows 11 22H2+): the sidebar is painted
