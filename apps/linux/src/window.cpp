@@ -383,6 +383,10 @@ public:
         for (const char *name : {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP",
                                  "XDG_CONFIG_HOME", "XDG_DATA_HOME"})
             if (const char *value = g_getenv(name)) args.push_back(std::string(name) + "=" + value);
+        // The desktop's light or dark preference as this copy reads it. The root copy can't: dconf finds
+        // the user's database through HOME, which pkexec sets to root's, so it would read no dark
+        // preference and turn a "System" appearance light.
+        args.push_back(std::string("PROCYON_DESKTOP_DARK=") + (platform::system_prefers_dark() ? "1" : "0"));
         args.emplace_back(exe);
         args.emplace_back("--page");
         args.emplace_back(current_ ? page_name(current_->id()) : "overview");
@@ -1210,6 +1214,10 @@ private:
         if (current_) current_->tick(*this);
         for (auto &overlay : overlays_) overlay->tick(*this);
         if (screenshot_ && ++screenshot_samples_ == 6) take_screenshot();
+        // In the background, return what the samples freed: the first ones read every desktop entry,
+        // GPU and sensor once, and glibc keeps freed pages of the sampler's arena otherwise. Then once
+        // a minute, which costs a few microseconds.
+        if (hidden_ && (++hidden_samples_ == 3 || hidden_samples_ % 60 == 0)) malloc_trim(0);
         update_tray();
         repaint();
     }
@@ -1327,6 +1335,7 @@ private:
         // freed pages, so the background footprint is the sampler's, not the window's.
         canvas_.trim();
         malloc_trim(0);
+        hidden_samples_ = 0;
     }
 
     void show_again() {
@@ -1416,6 +1425,7 @@ private:
     int screenshot_samples_ = 0;
     bool failed_ = false;
     bool start_in_background_ = false;
+    int hidden_samples_ = 0;  // samples since the window was hidden
     bool first_frame_reported_ = false;
     std::unique_ptr<Tray> tray_;
     bool handed_over_ = false;  // a root copy runs in this one's place

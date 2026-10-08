@@ -258,6 +258,9 @@ void watch_color_scheme(std::function<void()> changed) {
 }
 
 bool system_prefers_dark() {
+    // The root copy (pkexec) is told what the desktop prefers: it can't read the user's dconf database.
+    if (pkexec_caller())
+        if (const char *dark = std::getenv("PROCYON_DESKTOP_DARK"); dark && *dark) return dark[0] == '1';
     if (GSettings *interface = interface_settings()) {
         gchar *scheme = g_settings_get_string(interface, "color-scheme");
         const bool dark = scheme && g_strcmp0(scheme, "prefer-dark") == 0;

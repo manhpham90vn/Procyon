@@ -16,8 +16,8 @@ Actions, a summary table. Needs a display: on CI, run it under xvfb-run.
 
 On a display without a GPU (Xvfb on a CI runner) GTK draws through Mesa's software OpenGL (llvmpipe),
 whose buffers and JIT land in the app's private memory: 110-180 MB where the same screen holds about
-35 MB on a desktop, whose GL buffers live in GPU memory. --renderer cairo (GSK_RENDERER) measures
-Procyon's own footprint there; CI passes it.
+35 MB on a desktop, whose GL buffers live in GPU memory. --renderer cairo (GSK_RENDERER, with GDK's
+OpenGL context off too) measures Procyon's own footprint there; CI passes it.
 
 Shared CI runners are noisy: a fixed piece of work is timed alongside each measurement; its slowdown
 against the fastest one of the run says how slow the runner was. A missed CPU or startup target whose
@@ -99,6 +99,27 @@ def private_bytes(pid):
     return 0
 
 
+def anonymous_mappings(pid, top=12):
+    """The largest private anonymous regions of a process (Anonymous: in /proc/<pid>/smaps), with the
+    name of the region before them, which tells the heap from thread arenas and library allocations."""
+    regions, current = [], None
+    try:
+        with open(f"/proc/{pid}/smaps") as f:
+            for line in f:
+                head = line.split()
+                if head and "-" in head[0] and len(head) >= 5 and not head[0].endswith(":"):
+                    current = {"range": head[0], "name": head[5] if len(head) > 5 else "", "anonymous_kb": 0}
+                    regions.append(current)
+                elif head and head[0] == "Anonymous:" and current is not None:
+                    current["anonymous_kb"] = int(head[1])
+    except OSError:
+        return []
+    for i, region in enumerate(regions):
+        if not region["name"] and i > 0:
+            region["after"] = regions[i - 1]["name"]
+    return sorted((r for r in regions if r["anonymous_kb"]), key=lambda r: -r["anonymous_kb"])[:top]
+
+
 def probe(page, warmup, duration):
     """Launches the app on `page` (or in the background), then samples its CPU and memory."""
     args = [str(APP), "--no-settings"]
@@ -106,6 +127,12 @@ def probe(page, warmup, duration):
     env = dict(os.environ, PROCYON_BENCH="1")
     if RENDERER:
         env["GSK_RENDERER"] = RENDERER
+        if RENDERER == "cairo":
+            # GDK still opens an OpenGL context on llvmpipe (libLLVM, 7 MB of private memory on the
+            # runner, growing as it compiles) though nothing draws with it: off too. GTK 4.14 spells
+            # it GDK_DEBUG=gl-disable, later versions GDK_DISABLE=gl.
+            env["GDK_DEBUG"] = "gl-disable"
+            env["GDK_DISABLE"] = "gl"
     calibration = calibrate()
     started = time.monotonic()
     process = subprocess.Popen(args, env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
@@ -134,12 +161,16 @@ def probe(page, warmup, duration):
             memory.append(private_bytes(process.pid))
             time.sleep(1)
         ticks1, t1 = cpu_ticks(process.pid), time.monotonic()
+        samples = list(memory)  # in time order, for the JSON: shows growth or a startup peak
+        regions = anonymous_mappings(process.pid)
         memory.sort()
         result.update(
             cpu_percent_of_core=(ticks1 - ticks0) / TICKS / (t1 - t0) * 100,
             memory_p90_bytes=memory[min(len(memory) - 1, int(len(memory) * 0.9))],
             memory_peak_bytes=memory[-1],
             memory_average_bytes=statistics.mean(memory),
+            memory_samples_bytes=samples,
+            largest_anonymous_regions=regions,
         )
         return result
     finally:

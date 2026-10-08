@@ -33,6 +33,7 @@ Store::Store() : alert_settings_(AlertSettings::load()) {
 
 Store::~Store() {
     stop();
+    if (services_thread_.joinable()) services_thread_.join();
     flush_history();
     if (monitor_) pc_monitor_destroy(monitor_);
 }
@@ -411,11 +412,34 @@ std::vector<pc_volume> Store::volumes() {
     return std::vector<pc_volume>(rows, rows + std::max(0, count));
 }
 
-std::vector<pc_service> Store::services() {
-    std::lock_guard lock(monitor_mutex_);
-    const pc_service *rows = nullptr;
-    const int32_t count = pc_monitor_services(monitor_, &rows);
-    return std::vector<pc_service>(rows, rows + std::max(0, count));
+void Store::request_services() {
+    // One listing at a time; a request during one (after Start or Stop) gets one more afterwards, so
+    // the screen never settles on a list taken before the change.
+    if (services_busy_.exchange(true)) {
+        services_again_ = true;
+        return;
+    }
+    if (services_thread_.joinable()) services_thread_.join();  // the previous one, finished
+    // pc_monitor_services touches only the monitor's own service list, never the sampler's data,
+    // so it runs without monitor_mutex_: the sampler isn't held up for the second it takes.
+    services_thread_ = std::thread([this] {
+        do {
+            services_again_ = false;
+            const pc_service *rows = nullptr;
+            const int32_t count = pc_monitor_services(monitor_, &rows);
+            std::vector<pc_service> list(rows, rows + std::max(0, count));
+            std::lock_guard lock(services_mutex_);
+            services_ = std::move(list);
+            ++services_generation_;
+        } while (services_again_.exchange(false));
+        services_busy_ = false;
+    });
+}
+
+std::vector<pc_service> Store::services(uint64_t *generation) const {
+    std::lock_guard lock(services_mutex_);
+    if (generation) *generation = services_generation_;
+    return services_;
 }
 
 pc_result Store::service_control(int32_t domain, const std::string &label, int32_t action) {

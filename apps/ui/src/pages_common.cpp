@@ -90,14 +90,18 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
         TextStyle value;
         value.font = Font::Headline;
         value.tabular = true;
-        const float vw = r.measure(s.value, Font::Headline);
+        const float vw = r.measure_tabular(s.value, Font::Headline);
         r.text(s.value, Rect{x, legend.y, vw + 2, legend.h}, value, theme.text());
         x += vw + tokens::space::lg;
     }
     area.take_top(tokens::space::md);
     Rect footer = area.take_bottom(14);
     area.take_bottom(tokens::space::md);
-    Rect axis = area.take_right(44);
+    // As wide as its longest label ("977 KB/s"), at least the 44 of a percentage axis.
+    float axis_w = 44;
+    for (const float v : {max, max / 2, 0.0f})
+        axis_w = std::max(axis_w, r.measure_tabular(axis_label(v), Font::Caption) + 4);
+    Rect axis = area.take_right(axis_w);
     area.take_right(tokens::space::sm);
     const Rect chart = area;
     const float lw = 2;
@@ -133,28 +137,20 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
 }
 
 float value_text(Renderer &r, const Rect &bounds, std::wstring_view value, std::wstring_view unit, Font font,
-                 Color color, HAlign align) {
-    TextStyle big;
-    big.font = font;
-    big.tabular = true;
-    big.trim = false;
-    big.valign = VAlign::Bottom;
-    const float vw = r.measure(value, font);
+                 Color color, HAlign align, float *baseline) {
+    const float vw = r.measure_tabular(value, font);
     const float uw = unit.empty() ? 0 : r.measure(unit, Font::Headline) + 3;
     float x = bounds.x;
     if (align == HAlign::Right)
         x = bounds.right() - vw - uw;
     else if (align == HAlign::Center)
         x = bounds.cx() - (vw + uw) / 2;
-    r.text(value, Rect{x, bounds.y, vw + 4, bounds.h}, big, color);
-    if (!unit.empty()) {
-        // The unit sits on the value's baseline: a little above the bottom of the big glyphs.
-        TextStyle unit_style;
-        unit_style.font = Font::Headline;
-        unit_style.valign = VAlign::Bottom;
-        r.text(unit, Rect{x + vw + 3, bounds.y, uw + 4, bounds.h - std::round(r.line_height(font) * 0.16f)}, unit_style,
-               r.theme().text_secondary());
-    }
+    // The figure's line ends at the bottom of the bounds; the unit shares its baseline (macOS's
+    // firstTextBaseline), whatever the two fonts' sizes.
+    const float base = bounds.bottom() - r.line_height(font) + r.baseline(font);
+    r.text_on_baseline(value, x, base, font, color, HAlign::Left, true);
+    if (!unit.empty()) r.text_on_baseline(unit, x + vw + 3, base, Font::Headline, r.theme().text_secondary());
+    if (baseline) *baseline = base;
     return vw + uw;
 }
 
@@ -190,7 +186,17 @@ float stat_grid(Renderer &r, const Rect &bounds, const std::vector<Stat> &stats,
         TextStyle value;
         value.font = Font::Stat;
         value.tabular = true;
-        r.text(s.value, value_rect, value, theme.text());
+        // As macOS's StatGrid (lineLimit 1, minimumScaleFactor 0.7): a value too wide for its column is
+        // drawn smaller, down to 70%, before it is cut short.
+        const float needed = r.measure_tabular(s.value, Font::Stat);
+        if (needed > value_rect.w && value_rect.w > 0) {
+            const float scale = std::max(0.7f, value_rect.w / needed);
+            r.canvas().push_scale(scale, Point{value_rect.x, value_rect.cy()});
+            r.text(s.value, Rect{value_rect.x, value_rect.y, value_rect.w / scale, value_rect.h}, value, theme.text());
+            r.canvas().pop_transform();
+        } else {
+            r.text(s.value, value_rect, value, theme.text());
+        }
         if (!s.detail.empty()) {
             TextStyle detail;
             detail.font = Font::Caption;
@@ -388,8 +394,7 @@ std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring
         headline.tabular = true;
         headline.halign = HAlign::Right;
         const std::wstring v = value(row);
-        // Tabular figures run a little wider than the measured proportional ones.
-        const float vw = r.measure(v, Font::Headline) + 6;
+        const float vw = r.measure_tabular(v, Font::Headline) + 2;
         r.text(v, Rect{top.right() - vw - 2, top.y, vw + 2, top.h}, headline,
                v == fmt::unavailable ? theme.text_tertiary() : theme.text());
         headline.halign = HAlign::Left;

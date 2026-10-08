@@ -196,7 +196,13 @@ public:
     std::vector<OpenFileCopy> open_files(int32_t pid, bool &complete);
     std::vector<pc_connection> connections(int32_t pid, bool &complete);
     std::vector<pc_volume> volumes();
-    std::vector<pc_service> services();
+    // Services take about a second to list on Linux (systemctl over every unit): they are listed on a
+    // worker thread, as the macOS app does, while the Services screen shows the last list.
+    // request_services() starts a listing unless one runs; services() is the last one, with the
+    // number of listings so far (0: none yet) so the page knows when to take a new one.
+    void request_services();
+    std::vector<pc_service> services(uint64_t *generation = nullptr) const;
+    bool services_loading() const { return services_busy_.load(); }
     pc_result service_control(int32_t domain, const std::string &label, int32_t action);
     std::vector<pc_startup_item> startup_items();
     pc_result startup_set_enabled(int32_t scope, const std::string &label, bool enabled);
@@ -218,6 +224,12 @@ private:
     pc_system_info info_{};
 
     std::thread thread_;
+    std::thread services_thread_;
+    std::atomic<bool> services_busy_{false};
+    std::atomic<bool> services_again_{false};  // asked during a listing: list once more after it
+    mutable std::mutex services_mutex_;
+    std::vector<pc_service> services_;
+    uint64_t services_generation_ = 0;
     std::mutex wake_mutex_;
     std::condition_variable wake_;
     std::atomic<bool> running_{false};

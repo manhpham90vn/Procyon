@@ -406,7 +406,7 @@ private:
             TextStyle v;
             v.font = Font::Headline;
             v.tabular = true;
-            const float vw = r.measure(value, Font::Headline);
+            const float vw = r.measure_tabular(value, Font::Headline);
             r.text(value, Rect{x, legend.y, vw + 2, legend.h}, v, theme.text());
             x += vw + tokens::space::lg;
         };
@@ -565,7 +565,7 @@ private:
             headline.tabular = true;
             headline.halign = HAlign::Right;
             const std::wstring v = app_format(metric_, app_value(metric_, app));
-            const float vw = r.measure(v, Font::Headline) + 6;
+            const float vw = r.measure_tabular(v, Font::Headline) + 2;
             r.text(v, Rect{head.right() - vw - 2, head.y, vw + 2, head.h}, headline, theme.text());
             headline.halign = HAlign::Left;
             r.text(app.name.empty() ? fmt::from_utf8(app.app_id) : app.name,

@@ -277,12 +277,28 @@ float Renderer::text(std::wstring_view value, const Rect &r, const TextStyle &st
     return canvas_.draw_text(value, r, style, color);
 }
 
-float Renderer::measure(std::wstring_view value, Font font, float tracking) {
+float Renderer::measure(std::wstring_view value, Font font, float tracking, bool tabular) {
     if (value.empty()) return 0;
-    return canvas_.measure_text(value, font, tracking);
+    return canvas_.measure_text(value, font, tracking, tabular);
 }
 
 float Renderer::line_height(Font font) { return canvas_.line_height(font); }
+
+float Renderer::baseline(Font font) { return canvas_.baseline(font); }
+
+float Renderer::text_on_baseline(std::wstring_view value, float x, float baseline_y, Font font, Color color,
+                                 HAlign align, bool tabular) {
+    if (value.empty()) return 0;
+    const float w = measure(value, font, 0, tabular);
+    TextStyle style;
+    style.font = font;
+    style.tabular = tabular;
+    style.trim = false;
+    style.valign = VAlign::Top;
+    const float left = align == HAlign::Right ? x - w : align == HAlign::Center ? x - w / 2 : x;
+    text(value, Rect{left, baseline_y - baseline(font), w + 2, line_height(font)}, style, color);
+    return w;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Components

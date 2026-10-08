@@ -279,8 +279,12 @@ public:
 
     // Draws `text` in `r`; returns the laid-out width.
     virtual float draw_text(std::wstring_view text, const Rect &r, const TextStyle &style, Color color) = 0;
-    virtual float measure_text(std::wstring_view text, Font font, float tracking) = 0;
+    // `tabular`: measured with tabular figures, as text drawn with TextStyle::tabular is laid out
+    // (wider digits than the proportional ones).
+    virtual float measure_text(std::wstring_view text, Font font, float tracking, bool tabular = false) = 0;
     virtual float line_height(Font font) = 0;
+    // From the top of a line of `font` to its baseline: lets text of different sizes share a baseline.
+    virtual float baseline(Font font) = 0;
 };
 
 // ---- renderer: the component vocabulary of design/components.md over a Canvas ----
@@ -312,8 +316,15 @@ public:
 
     // Text. Returns the laid-out width.
     float text(std::wstring_view value, const Rect &r, const TextStyle &style, Color color);
-    float measure(std::wstring_view value, Font font, float tracking = 0);
+    float measure(std::wstring_view value, Font font, float tracking = 0, bool tabular = false);
+    // The width `value` takes when drawn with tabular figures (TextStyle::tabular).
+    float measure_tabular(std::wstring_view value, Font font) { return measure(value, font, 0, true); }
     float line_height(Font font);
+    float baseline(Font font);
+    // Draws `value` on the baseline at `baseline_y`, starting at `x` (ending there for HAlign::Right);
+    // returns its width. Text of different fonts drawn this way lines up as one line.
+    float text_on_baseline(std::wstring_view value, float x, float baseline_y, Font font, Color color,
+                           HAlign align = HAlign::Left, bool tabular = false);
 
     // ---- components (design/components.md) ----
     void card(const Rect &r, std::optional<MetricKind> tint = std::nullopt, float radius = tokens::radius::lg);

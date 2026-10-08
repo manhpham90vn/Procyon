@@ -194,8 +194,10 @@ struct ChartSeries {
 void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> &series, float max, MetricKind kind,
                 const std::function<std::wstring(float)> &axis_label);
 // Big number + unit (ValueText); returns the width used.
+// A figure and its unit on one baseline (ValueText), the figure's bottom on the bounds' bottom.
+// `baseline` receives that baseline, for more text on the same line ("of 30.4 GB").
 float value_text(Renderer &r, const Rect &bounds, std::wstring_view value, std::wstring_view unit, Font font,
-                 Color color, HAlign align = HAlign::Left);
+                 Color color, HAlign align = HAlign::Left, float *baseline = nullptr);
 // Label / value facts in an adaptive grid (StatGrid). Returns the height used.
 struct Stat {
     std::wstring label;

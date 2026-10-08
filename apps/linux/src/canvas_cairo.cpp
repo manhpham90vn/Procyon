@@ -593,14 +593,23 @@ float CairoCanvas::draw_text(std::wstring_view value, const Rect &r, const TextS
     return l->width;
 }
 
-float CairoCanvas::measure_text(std::wstring_view value, Font f, float tracking) {
+float CairoCanvas::measure_text(std::wstring_view value, Font f, float tracking, bool tabular) {
     if (value.empty()) return 0;
     TextStyle style;
     style.font = f;
     style.trim = false;
     style.tracking = tracking;
+    style.tabular = tabular;
     const CachedLayout *l = layout(value, style, 10000, 10000);
     return l ? l->width : 0;
+}
+
+float CairoCanvas::baseline(Font f) {
+    TextStyle style;
+    style.font = f;
+    style.trim = false;
+    const CachedLayout *l = layout(L"Ag", style, 1000, 1000);
+    return l ? static_cast<float>(pango_layout_get_baseline(l->layout)) / PANGO_SCALE : font_spec(f).size;
 }
 
 float CairoCanvas::line_height(Font f) {

@@ -30,7 +30,7 @@ void rate_headline(Renderer &r, const Rect &trailing, double primary, double sec
     float right = trailing.right();
     const auto entry = [&](const wchar_t *label, double value, Color color) {
         const auto parts = fmt::split_unit(fmt::rate(value));
-        const float vw = r.measure(parts.first, Font::Metric) + r.measure(parts.second, Font::Headline) + 3;
+        const float vw = r.measure_tabular(parts.first, Font::Metric) + r.measure(parts.second, Font::Headline) + 3;
         const float lw = r.measure(label, Font::Label) + 11;
         const float w = std::max(vw, lw);
         value_text(r, Rect{right - w, trailing.y + 16, w, 32}, parts.first, parts.second, Font::Metric, theme.text(),
@@ -316,14 +316,10 @@ private:
         const auto used = fmt::split_unit(fmt::bytes(static_cast<int64_t>(s.memory_used)));
         const std::wstring of = L"of " + fmt::bytes(static_cast<int64_t>(s.memory_total));
         const float ofw = r.measure(of, Font::Body) + tokens::space::xs;
+        float base = 0;
         value_text(r, Rect{trailing.x, trailing.y + 6, trailing.w - ofw, 40}, used.first, used.second, Font::Display,
-                   theme.text(), HAlign::Right);
-        TextStyle body;
-        body.font = Font::Body;
-        body.halign = HAlign::Right;
-        body.valign = VAlign::Bottom;
-        r.text(of, Rect{trailing.right() - ofw + tokens::space::xs, trailing.y + 6, ofw, 34}, body,
-               theme.text_tertiary());
+                   theme.text(), HAlign::Right, &base);
+        r.text_on_baseline(of, trailing.right(), base, Font::Body, theme.text_tertiary(), HAlign::Right);
 
         Rect inner =
             panel(r, stack.next(kPanelChrome + 220), L"Memory used", Renderer::Symbol::Waveform, MetricKind::Memory);
@@ -398,12 +394,11 @@ private:
         const Rect swap_card = wide ? Rect{row.right() - swap_w, row.y, swap_w, row_h} : stack.next(kPanelChrome + 120);
         inner = panel(r, swap_card, os::swap_name, Renderer::Symbol::Drive);
         const auto swap = fmt::split_unit(fmt::bytes(static_cast<int64_t>(s.swap_used)));
-        const float vw = value_text(r, inner.take_top(32), swap.first, swap.second, Font::Metric, theme.text());
-        TextStyle of_label;
-        of_label.font = Font::Label;
-        of_label.valign = VAlign::Bottom;
-        r.text(L"of " + fmt::bytes(static_cast<int64_t>(s.swap_total)),
-               Rect{inner.x + vw + tokens::space::xs, inner.y - 32, inner.w - vw, 28}, of_label, theme.text_tertiary());
+        float swap_base = 0;
+        const float vw = value_text(r, inner.take_top(32), swap.first, swap.second, Font::Metric, theme.text(),
+                                    HAlign::Left, &swap_base);
+        r.text_on_baseline(L"of " + fmt::bytes(static_cast<int64_t>(s.swap_total)), inner.x + vw + tokens::space::xs,
+                           swap_base, Font::Label, theme.text_tertiary());
         inner.take_top(tokens::space::md);
         r.usage_bar(inner.take_top(6), s.swap_total ? static_cast<float>(s.swap_used) / s.swap_total : 0,
                     MetricKind::Memory);
@@ -659,14 +654,12 @@ private:
             const Rect mem_card = wide ? Rect{row.right() - mem_w, row.y, mem_w, row_h} : stack.next(kPanelChrome + 80);
             inner = panel(r, mem_card, L"Memory", Renderer::Symbol::Stack);
             const auto used = fmt::split_unit(fmt::bytes(g.memory_used));
-            const float vw = value_text(r, inner.take_top(32), used.first, used.second, Font::Metric, theme.text());
+            float base = 0;
+            const float vw = value_text(r, inner.take_top(32), used.first, used.second, Font::Metric, theme.text(),
+                                        HAlign::Left, &base);
             if (g.memory_total > 0) {
-                TextStyle of;
-                of.font = Font::Label;
-                of.valign = VAlign::Bottom;
-                r.text(L"of " + fmt::bytes(g.memory_total),
-                       Rect{inner.x + vw + tokens::space::xs, inner.y - 32, inner.w - vw, 28}, of,
-                       theme.text_tertiary());
+                r.text_on_baseline(L"of " + fmt::bytes(g.memory_total), inner.x + vw + tokens::space::xs, base,
+                                   Font::Label, theme.text_tertiary());
                 inner.take_top(tokens::space::md);
                 r.usage_bar(
                     inner.take_top(6),

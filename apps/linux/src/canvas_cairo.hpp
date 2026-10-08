@@ -50,8 +50,9 @@ public:
     void push_scale(float scale, Point about) override;
     void pop_transform() override;
     float draw_text(std::wstring_view text, const Rect &r, const TextStyle &style, Color color) override;
-    float measure_text(std::wstring_view text, Font font, float tracking) override;
+    float measure_text(std::wstring_view text, Font font, float tracking, bool tabular = false) override;
     float line_height(Font font) override;
+    float baseline(Font font) override;
 
 private:
     struct ShadowKey {
