@@ -342,7 +342,12 @@ public:
     // Light/dark aware icon-only control background on hover.
     void icon_button(const Rect &r, Symbol symbol, Color color, bool hovered, bool enabled = true);
     void sparkline(const Rect &r, const float *values, size_t count, size_t window, float max, MetricKind kind,
-                   const SparklineOptions &options = {});
+                   const SparklineOptions &options);
+    // An overload rather than `options = {}`: GCC rejects a default argument built from a nested
+    // struct with default member initializers while the enclosing class is incomplete.
+    void sparkline(const Rect &r, const float *values, size_t count, size_t window, float max, MetricKind kind) {
+        sparkline(r, values, count, window, max, kind, SparklineOptions{});
+    }
     void ring_gauge(float cx, float cy, float radius, float fraction, MetricKind kind,
                     float width = tokens::chart::gaugeLineWidth);
     void usage_bar(const Rect &r, float fraction, MetricKind kind);

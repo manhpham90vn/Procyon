@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Procyon
+GenericName=Task Manager
+Comment=See what is using your CPU, memory, disk, network and GPU, and stop what you don't need
+Exec=procyon
+Icon=dev.procyon.Procyon
+Terminal=false
+Categories=System;Monitor;GTK;
+Keywords=task;manager;process;monitor;cpu;memory;gpu;
+StartupNotify=true
+StartupWMClass=dev.procyon.Procyon

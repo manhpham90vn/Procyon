@@ -9,6 +9,7 @@ find_tool() {
     for prefix in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
         [ -x "$prefix/$1" ] && { echo "$prefix/$1"; return; }
     done
+    return 0  # not found: empty output, never a failure (the callers run under set -e)
 }
 
 CLANG_FORMAT="$(find_tool clang-format)"
@@ -17,7 +18,7 @@ CLANG_TIDY="$(find_tool clang-tidy)"
 SWIFT_PATHS=(Package.swift apps scripts/make-icon.swift scripts/bench-probe.swift)
 CPP_FILES=()
 while IFS= read -r file; do CPP_FILES+=("$file"); done < <(
-    find core apps/ui/src apps/windows/src apps/windows/tools -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' \) |
+    find core apps/ui/src apps/windows/src apps/windows/tools apps/linux/src -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.c' \) |
         grep -v -e 'Tokens.generated.h' -e 'icons_data.hpp' | sort
 )
 SHELL_FILES=(scripts/*.sh)

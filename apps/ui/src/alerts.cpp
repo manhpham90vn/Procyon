@@ -1,4 +1,5 @@
 #include "alerts.hpp"
+#include "os.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -244,7 +245,8 @@ AlertEvent event_for(const AlertRule &rule, const Candidate &c, double now) {
             break;
         case AlertKind::MemoryPressure:
             event.title = L"Memory pressure is critical";
-            event.message = L"Windows is short of memory: apps may slow down. Close apps you don't need.";
+            event.message =
+                std::wstring(os::name) + L" is short of memory: apps may slow down. Close apps you don't need.";
             break;
         case AlertKind::Temperature:
             event.title = L"Your PC is hot";

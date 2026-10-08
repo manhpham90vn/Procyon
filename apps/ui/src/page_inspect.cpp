@@ -3,6 +3,7 @@
 
 #include <algorithm>
 
+#include "os.hpp"
 #include "pages.hpp"
 #include "widgets.hpp"
 
@@ -130,8 +131,9 @@ public:
         if (!complete_ && !host.elevated()) {
             const Banner b =
                 action_banner(r, area.take_top(kActionBannerHeight), L"Processes of other users are hidden",
-                              L"System services and other users' processes need administrator access to show their "
-                              L"files and sockets.",
+                              std::wstring(L"System services and other users' processes need ") + os::admin +
+                                  L" access to show their "
+                                  L"files and sockets.",
                               L"Unlock Full Access", Renderer::Tone::Accent, banner_button_.contains(mx, my));
             banner_button_ = b.button;
             area.take_top(tokens::space::lg);
@@ -438,7 +440,7 @@ private:
         const RowData d = rows_[static_cast<size_t>(row)];
         std::vector<MenuItem> items = {{MenuInfo, L"Get Info"},
                                        {MenuCopy, tab_ == TabFiles ? L"Copy Path" : L"Copy Address"}};
-        if (tab_ == TabFiles) items.push_back({MenuOpen, L"Show in Explorer"});
+        if (tab_ == TabFiles) items.push_back({MenuOpen, std::wstring(L"Show in ") + os::file_manager});
         switch (host_->popup_menu(items, x, y)) {
             case MenuInfo: host_->show_info(d.pid); break;
             case MenuCopy:

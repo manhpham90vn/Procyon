@@ -43,7 +43,9 @@ struct Settings {
     int theme = 0;  // 0 system, 1 light, 2 dark
     bool fahrenheit = false;
     bool minimize_to_tray = true;
-    int tray_modules = 1 | 2;            // figures in the tray tooltip: 1 CPU, 2 memory, 4 network, 8 GPU
+    // Figures next to the tray icon (Linux panels that show a label) or in its tooltip: 1 CPU, 2 memory,
+    // 4 network, 8 GPU, 16 temperature, 32 battery (the macOS menu bar modules).
+    int tray_modules = 1 | 2;
     bool records_history = true;         // the last 24 hours on disk (History screen)
     int default_view = PC_VIEW_GROUPED;  // the Processes screen's view at launch (pc_view_mode)
 };

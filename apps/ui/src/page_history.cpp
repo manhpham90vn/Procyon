@@ -44,7 +44,11 @@ int64_t now_seconds() {
 std::wstring weekday_time(int64_t unix_seconds) {
     const time_t t = static_cast<time_t>(unix_seconds);
     tm local{};
+#ifdef _WIN32
     if (localtime_s(&local, &t) != 0) return fmt::unavailable;
+#else
+    if (localtime_r(&t, &local) == nullptr) return fmt::unavailable;
+#endif
     wchar_t buffer[32];
     (void)wcsftime(buffer, 32, L"%a %H:%M", &local);
     return buffer;

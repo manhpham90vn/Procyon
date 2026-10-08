@@ -1,11 +1,13 @@
-# Common entry points, the same names on macOS and Windows. `make help` lists them.
+# Common entry points, the same names on macOS, Windows and Linux. `make help` lists them.
 #
 # macOS needs Xcode 27 (see docs/development.md). Windows needs Visual Studio 2022 with the C++
 # workload and GNU Make (`winget install ezwinports.make`); `make tools` fetches CMake, Ninja and
-# clang-format into build\tools when Visual Studio's CMake component is not installed.
-.PHONY: help build test app core run bench screenshots format lint tokens icon tools clean ci
+# clang-format into build\tools when Visual Studio's CMake component is not installed. Linux needs a
+# C++20 compiler, CMake, Ninja and GTK 4 (`make tools` prints the packages to install).
+.PHONY: help build test app core run bench screenshots format lint tokens icon tools clean ci install package
 
 ifeq ($(OS),Windows_NT)
+# ---- Windows ---- (each `make help` lists the targets of its own block)
 # Recipes run through cmd.exe whatever shell `make` was started from (Git Bash, PowerShell, cmd).
 SHELL := cmd.exe
 .SHELLFLAGS := /c
@@ -58,9 +60,74 @@ clean: ## Remove build outputs (keeps build\tools)
 ci: lint test app ## What CI runs
 
 else
+UNAME_S := $(shell uname -s)
+endif
+
+ifeq ($(UNAME_S),Linux)
+# ---- Linux ----
+PREFIX ?= $(HOME)/.local
+SCREENSHOT_PAGES ?= overview processes cpu history inspect startup services
 
 help: ## List targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
+	@awk -F':.*## ' '/^# ---- /{f = /Linux/; next} f && /^[a-z-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+build: ## Debug build of the core, CLI, tests and app into build/linux-debug
+	scripts/build-linux.sh debug --no-tests
+
+test: ## Release build and the core tests
+	scripts/build-linux.sh release
+
+core: test ## Build the C++ core and CLI with CMake, run the core tests
+
+app: ## Release dist/linux/procyon (GTK 4, fonts embedded)
+	scripts/build-linux.sh release --no-tests
+
+run: app ## Build and open the app
+	dist/linux/procyon
+
+bench: ## (macOS and Windows) measure the app against the spec's targets
+	@echo "bench is not ported to Linux yet; procyon-cli prints the core's own overhead: build/linux/procyon-cli 10 1000"
+
+screenshots: app ## Render the main screens, light and dark, into dist/linux/screenshots
+	@mkdir -p dist/linux/screenshots
+	@for page in $(SCREENSHOT_PAGES); do for theme in light dark; do \
+		dist/linux/procyon --screenshot dist/linux/screenshots/$$page-$$theme.png --$$theme --page $$page || exit 1; \
+	done; done; echo dist/linux/screenshots
+
+format: ## Format C/C++ sources in place (and regenerate tokens)
+	scripts/format.sh
+
+lint: ## Read-only checks (tokens, clang-format, clang-tidy, shellcheck). SKIP_TIDY=1 skips clang-tidy
+	scripts/lint.sh
+
+tokens: ## Regenerate design tokens and the process catalog
+	python3 scripts/gen-tokens.py
+	python3 scripts/gen-catalog.py
+
+icon: ## (macOS and Windows) re-render the app icon; Linux installs the shared PNG
+	@echo "Linux uses apps/macos/Resources/AppIcon.png as is (make icon on macOS re-renders it)"
+
+tools: ## Print the packages the Linux build needs
+	@echo "Debian/Ubuntu: sudo apt install build-essential cmake ninja-build pkg-config libgtk-4-dev clang-format clang-tidy shellcheck"
+	@echo "Fedora:        sudo dnf install gcc-c++ cmake ninja-build pkgconf gtk4-devel clang-tools-extra ShellCheck"
+	@echo "Arch:          sudo pacman -S base-devel cmake ninja pkgconf gtk4 clang shellcheck"
+
+install: app ## Install into PREFIX (default ~/.local): binary, desktop entry, icon, licenses
+	cmake --install build/linux --prefix "$(PREFIX)"
+
+package: app ## dist/Procyon-<version>-linux-<arch>.tar.gz and its SHA-256
+	scripts/package-linux.sh
+
+clean: ## Remove build outputs
+	rm -rf build/linux build/linux-debug build/core dist
+
+ci: lint test app ## What CI runs
+
+else ifneq ($(OS),Windows_NT)
+# ---- macOS ----
+
+help: ## List targets
+	@awk -F':.*## ' '/^# ---- /{f = /macOS/; next} f && /^[a-z-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Debug build of the Swift package (app + helper)
 	swift build

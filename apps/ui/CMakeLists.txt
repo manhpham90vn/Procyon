@@ -50,5 +50,7 @@ if(MSVC)
   target_compile_options(procyon_ui PRIVATE /W4 /utf-8 /permissive- /Zc:__cplusplus /wd4100)
   target_compile_definitions(procyon_ui PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
-  target_compile_options(procyon_ui PRIVATE -Wall -Wextra -Wno-unused-parameter)
+  # Screens build their rows and stats as partial aggregates ({label, value}): the members left out
+  # take their defaults on purpose.
+  target_compile_options(procyon_ui PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()

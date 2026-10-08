@@ -1,7 +1,9 @@
 // System (facts about this PC) and Settings, laid out like the macOS SystemView and SettingsView.
 #include <algorithm>
 
+#include "os.hpp"
 #include "pages.hpp"
+#include "platform.hpp"
 #include "version.h"
 
 namespace procyon::ui {
@@ -176,7 +178,10 @@ public:
         r.push_clip(bounds);
         area.y -= scroll_.offset;
         area = page_header(r, area, L"Settings",
-                           L"Updates, full access, notification area, alerts, appearance, processes and about",
+                           platform::tray_available()
+                               ? L"Updates, full access, notification area, alerts, appearance, processes "
+                                 L"and about"
+                               : L"Updates, full access, background, alerts, appearance, processes and about",
                            std::nullopt);
         area.w = std::min(area.w, 720.0f);
         hits_.clear();
@@ -249,17 +254,18 @@ public:
                 r.badge(row.right() - bw, row.cy() - 8.5f, on ? L"On" : L"Off",
                         on ? Renderer::Tone::Success : Renderer::Tone::Neutral);
                 caption(inner,
-                        L"Full access runs Procyon as an administrator. It lets Processes read and manage "
-                        L"system processes, Files & Ports list every process's files and connections, Startup and "
-                        L"Services switch machine-wide entries, and shows which apps keep the PC awake and how "
-                        L"much network each process uses. Without it, those rows show a lock.",
+                        std::wstring(L"Full access runs Procyon as ") + os::admin +
+                            L". It lets Processes read and manage "
+                            L"system processes, Files & Ports list every process's files and connections, Startup and "
+                            L"Services switch machine-wide entries, and shows which apps keep the PC awake and how "
+                            L"much network each process uses. Without it, those rows show a lock.",
                         3);
                 inner.take_top(tokens::space::sm);
                 row = inner.take_top(kRow);
                 if (on) {
-                    label(row, L"Procyon is running as administrator for this session.", true);
+                    label(row, std::wstring(L"Procyon is running as ") + os::admin + L" for this session.", true);
                 } else {
-                    label(row, L"Restarts Procyon once, with a UAC prompt.", true);
+                    label(row, os::elevation, true);
                     const float w = r.measure(L"Unlock Full Access", Font::BodyMedium) + tokens::space::md * 2;
                     const Rect b = button(r, row.right() - w, row.cy() - kControlHeight / 2, L"Unlock Full Access",
                                           true, false, Rect{row.right() - w, row.cy() - 14, w, 28}.contains(mx, my), w);
@@ -274,30 +280,40 @@ public:
                 int bit;
                 bool available;
             };
-            const std::vector<Module> modules = {
-                {L"CPU", 1, true}, {L"Memory", 2, true}, {L"Network", 4, true}, {L"GPU", 8, store.has(PC_CAP_GPU)}};
+            const std::vector<Module> modules = {{L"CPU", 1, true},
+                                                 {L"Memory", 2, true},
+                                                 {L"Network", 4, true},
+                                                 {L"GPU", 8, store.has(PC_CAP_GPU)},
+                                                 {L"Temperature", 16, store.has(PC_CAP_TEMPERATURE)},
+                                                 {L"Battery", 32, store.has(PC_CAP_BATTERY)}};
+            // Without a tray there is nowhere to put figures: only the keep-running switch.
+            const bool figures = platform::tray_available() && (settings.minimize_to_tray || os::tray_while_open);
             size_t shown = 0;
-            for (const Module &m : modules) shown += settings.minimize_to_tray && m.available ? 1 : 0;
-            section(L"Notification area", Renderer::Symbol::Grid, kRow * (1 + shown) + kCaption * 2, [&](Rect &inner) {
-                Rect row = inner.take_top(kRow);
-                label(row, L"Keep running in the tray when the window is closed");
-                toggle(row, settings.minimize_to_tray, GroupTray, settings.minimize_to_tray ? 0 : 1);
-                if (settings.minimize_to_tray) {
-                    for (const Module &m : modules) {
-                        if (!m.available) continue;
-                        row = inner.take_top(kRow);
-                        label(Rect{row.x + tokens::space::lg, row.y, row.w, row.h}, m.title, true);
-                        toggle(row, (settings.tray_modules & m.bit) != 0, GroupTrayModule, m.bit);
-                    }
-                }
-                caption(inner,
-                        settings.minimize_to_tray
-                            ? L"Closing the window moves Procyon to the notification area, with the chosen "
-                              L"figures in the icon's tooltip and the busiest apps one click away. Opening "
-                              L"the window brings it back."
-                            : L"Closing the window quits Procyon.",
-                        2);
-            });
+            for (const Module &m : modules) shown += figures && m.available ? 1 : 0;
+            section(platform::tray_available() ? L"Notification area" : L"Background", Renderer::Symbol::Grid,
+                    kRow * (1 + shown) + kCaption * 2, [&](Rect &inner) {
+                        Rect row = inner.take_top(kRow);
+                        label(row, platform::tray_available()
+                                       ? L"Keep running in the tray when the window is closed"
+                                       : L"Keep running in the background when the window is closed");
+                        toggle(row, settings.minimize_to_tray, GroupTray, settings.minimize_to_tray ? 0 : 1);
+                        if (figures) {
+                            for (const Module &m : modules) {
+                                if (!m.available) continue;
+                                row = inner.take_top(kRow);
+                                label(Rect{row.x + tokens::space::lg, row.y, row.w, row.h}, m.title, true);
+                                toggle(row, (settings.tray_modules & m.bit) != 0, GroupTrayModule, m.bit);
+                            }
+                        }
+                        caption(
+                            inner,
+                            !settings.minimize_to_tray ? L"Closing the window quits Procyon."
+                            : platform::tray_available()
+                                ? os::tray_figures
+                                : L"Closing the window keeps Procyon sampling for alerts and History. Open it again "
+                                  L"from the app grid; Ctrl+Q quits.",
+                            2);
+                    });
         }
 
         // Alerts: a switch per rule; an enabled rule unfolds its threshold and duration.
@@ -349,9 +365,13 @@ public:
                     choices(row, durations, selected, GroupAlertDuration, values);
                 }
                 caption(inner,
-                        L"An alert fires when the condition lasts for the chosen time, then stays quiet for 15 "
-                        L"minutes. Watching apps keeps Procyon reading every process while it sits in the "
-                        L"notification area, which costs a little more CPU.",
+                        platform::tray_available()
+                            ? L"An alert fires when the condition lasts for the chosen time, then stays quiet for 15 "
+                              L"minutes. Watching apps keeps Procyon reading every process while it sits in the "
+                              L"notification area, which costs a little more CPU."
+                            : L"An alert fires when the condition lasts for the chosen time, then stays quiet for 15 "
+                              L"minutes. Watching apps keeps Procyon reading every process while it runs in the "
+                              L"background, which costs a little more CPU.",
                         2);
                 if (!recent.empty()) {
                     const Rect row = inner.take_top(kRow);
@@ -390,7 +410,7 @@ public:
             r.text(L"Share of one core; 100% = one fully busy core", row, note, theme.text_secondary());
         });
 
-        section(L"About", Renderer::Symbol::Info, kRow * 4 + kCaption, [&](Rect &inner) {
+        section(L"About", Renderer::Symbol::Info, kRow * 4 + kCaption * 2, [&](Rect &inner) {
             Rect row = inner.take_top(kRow);
             label(row, L"Version");
             TextStyle v;
@@ -409,7 +429,10 @@ public:
             row = inner.take_top(kRow);
             label(row, L"Feedback");
             link(row, L"Report an issue", kIssues);
-            caption(inner, L"Procyon is open source under the MIT license.");
+            caption(inner,
+                    L"Procyon is open source under the MIT license. Fonts: Inter and Nunito (SIL OFL 1.1). "
+                    L"Icons: Lucide (ISC).",
+                    2);
         });
 
         y += tokens::space::xxl - kSectionGap;

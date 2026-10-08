@@ -4,6 +4,7 @@
 #include <unordered_set>
 
 #include "commands.hpp"
+#include "os.hpp"
 #include "pages.hpp"
 #include "widgets.hpp"
 
@@ -147,8 +148,8 @@ public:
         if (!host.elevated()) {
             const Banner b =
                 action_banner(r, area.take_top(kActionBannerHeight), L"Processes of other users are locked",
-                              L"Their command lines, open files and End Task need administrator access. Procyon "
-                              L"restarts once, with a UAC prompt.",
+                              std::wstring(L"Their command lines, open files and End Task need ") + os::admin +
+                                  L" access. " + os::elevation,
                               L"Unlock Full Access", Renderer::Tone::Accent, banner_button_.contains(mx, my));
             banner_button_ = b.button;
             area.take_top(tokens::space::lg);
@@ -534,7 +535,8 @@ private:
     std::wstring explain(const pc_process &p) const {
         std::wstring text;
         if (p.flags & PC_PROC_SYSTEM)
-            text += L"This is a Windows system process. Ending it may make Windows unstable or sign you out.";
+            text += std::wstring(L"This is a ") + os::name + L" system process. Ending it may make " + os::name +
+                    L" unstable or sign you out.";
         if (p.path[0]) text += (text.empty() ? L"" : L"\n\n") + std::wstring(L"Path: ") + fmt::from_utf8(p.path);
         return text;
     }
@@ -544,7 +546,8 @@ private:
         Store &store = host_->store();
         const Snapshot &s = store.snapshot();
         if (is_protected(r)) {
-            host_->alert(L"Can't end this process", L"It is critical to Windows (or it is Procyon itself).");
+            host_->alert(L"Can't end this process",
+                         std::wstring(L"It is critical to ") + os::name + L" (or it is Procyon itself).");
             return;
         }
         std::vector<int32_t> pids;

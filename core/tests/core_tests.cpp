@@ -27,6 +27,9 @@
 #include <string>
 
 #include "helper_protocol.hpp"
+#if defined(__linux__)
+#include "platform/linux_internal.hpp"
+#endif
 #include "monitor.hpp"
 #include "platform.hpp"
 #include "procyon/procyon.h"
@@ -221,7 +224,7 @@ void power_request_parsing() {
 }
 #endif
 
-#if !defined(_WIN32)
+#if defined(__APPLE__)
 // The helper parses as root on behalf of the app's user: the user's records must be chosen by the
 // uid it is given, not by the process's own.
 void managed_startup_parsing() {
@@ -309,7 +312,115 @@ void launchctl_parsing() {
               overrides.count("com.example.legacy_on") && !overrides.at("com.example.legacy_on"),
           "older true/false form");
 }
-#endif  // !_WIN32
+#endif  // __APPLE__
+
+#if defined(__linux__)
+// /proc/<pid>/stat: the command name may hold spaces and parentheses.
+void proc_stat_parsing() {
+    platform::linux_internal::ProcStat stat;
+    const std::string text =
+        "1234 (Web Content (x)) S 1000 1234 1234 0 -1 4194560 100 0 0 0 250 50 0 0 20 -5 31 0 98765 1000 200 "
+        "18446744073709551615";
+    check(platform::linux_internal::parse_stat(text, stat), "stat parsed");
+    check(stat.pid == 1234 && stat.comm == "Web Content (x)" && stat.state == 'S' && stat.ppid == 1000,
+          "stat identity");
+    check(stat.utime == 250 && stat.stime == 50 && stat.nice == -5 && stat.threads == 31 && stat.start_ticks == 98765,
+          "stat counters");
+    check(!stat.kernel_thread(), "a user process is no kernel thread");
+    check(platform::linux_internal::parse_stat("2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 1 0 0",
+                                               stat) &&
+              stat.kernel_thread(),
+          "PF_KTHREAD flags a kernel thread");
+    check(!platform::linux_internal::parse_stat("garbage", stat), "garbage rejected");
+}
+
+void proc_net_parsing() {
+    const std::string tcp =
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242 1\n"
+        "   1: 0F02000A:D2F0 22D8B85D:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 4343 1\n";
+    const auto entries = platform::parse_proc_net(tcp, PC_PROTOCOL_TCP, 4);
+    check(entries.size() == 2, "two tcp rows");
+    check(entries.size() == 2 && std::string(entries[0].connection.local_address) == "127.0.0.1" &&
+              entries[0].connection.local_port == 8080 && entries[0].connection.state == PC_TCP_LISTEN &&
+              entries[0].connection.remote_address[0] == '\0' && entries[0].inode == 4242,
+          "listening socket on loopback");
+    check(entries.size() == 2 && std::string(entries[1].connection.local_address) == "10.0.2.15" &&
+              std::string(entries[1].connection.remote_address) == "93.184.216.34" &&
+              entries[1].connection.remote_port == 443 && entries[1].connection.state == PC_TCP_ESTABLISHED,
+          "established connection");
+    const std::string tcp6 =
+        "  sl  local_address                         remote_address                        st\n"
+        "   0: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000     0        0 77 1\n"
+        "   1: 00000000000000000000000001000000:0277 00000000000000000000000000000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000     0        0 78 1\n";
+    const auto v6 = platform::parse_proc_net(tcp6, PC_PROTOCOL_TCP, 6);
+    check(v6.size() == 2 && std::string(v6[0].connection.local_address) == "*" && v6[0].connection.local_port == 22,
+          "any address reads as *");
+    check(v6.size() == 2 && std::string(v6[1].connection.local_address) == "::1", "ipv6 loopback");
+    const auto udp = platform::parse_proc_net(
+        "header\n 5: 00000000:14E9 00000000:0000 07 00000000:00000000 00:00000000 00000000 0 0 99 2\n", PC_PROTOCOL_UDP,
+        4);
+    check(udp.size() == 1 && udp[0].connection.state == PC_TCP_NONE && udp[0].connection.local_port == 5353,
+          "udp has no tcp state");
+}
+
+void drm_fdinfo_parsing() {
+    uint64_t client = 0, ns = 0;
+    const std::string amd =
+        "pos:\t0\nflags:\t02100002\ndrm-driver:\tamdgpu\ndrm-client-id:\t17\ndrm-engine-gfx:\t5000 ns\n"
+        "drm-engine-dec:\t9000 ns\ndrm-engine-capacity-gfx:\t2\ndrm-memory-vram:\t1024 KiB\n";
+    check(platform::parse_drm_fdinfo(amd, client, ns) && client == 17 && ns == 9000, "busiest engine kind counted");
+    check(!platform::parse_drm_fdinfo("pos:\t0\nflags:\t02\n", client, ns), "a plain file is no DRM client");
+}
+
+void inhibitor_parsing() {
+    const std::string json =
+        "{\"type\":\"a(ssssuu)\",\"data\":[[[\"sleep\",\"Firefox\",\"Playing video\",\"block\",1000,4242],"
+        "[\"shutdown:sleep\",\"NetworkManager\",\"NetworkManager needs to turn off networks\",\"delay\",0,812],"
+        "[\"idle\",\"GNOME Videos\",\"Playing \\\"Movie\\\"\",\"block\",1000,5000],"
+        "[\"handle-lid-switch\",\"gsd\",\"External monitor\",\"block\",1000,900]]]}";
+    const auto locks = platform::parse_inhibitors(json);
+    check(locks.size() == 2, "delay locks and lid handling left out");
+    check(locks.size() == 2 && locks[0].pid == 4242 && locks[0].kind == PC_ASSERT_SYSTEM_SLEEP &&
+              locks[0].reason == "Firefox · Playing video",
+          "sleep lock");
+    check(locks.size() == 2 && locks[1].kind == PC_ASSERT_DISPLAY_SLEEP &&
+              locks[1].reason == "GNOME Videos · Playing \"Movie\"",
+          "idle lock keeps the display on, escapes read");
+    check(platform::parse_inhibitors("").empty() && platform::parse_inhibitors("{\"data\":[[]]}").empty(), "no locks");
+    const auto paths = platform::busctl_values(
+        "{\"type\":\"ao\",\"data\":[[\"/org/gnome/SessionManager/Inhibitor4\",\"/org/gnome/SessionManager/"
+        "Inhibitor7\"]]}");
+    check(paths.size() == 2 && paths[1] == "/org/gnome/SessionManager/Inhibitor7", "object paths read");
+    const auto flags = platform::busctl_values("{\"type\":\"u\",\"data\":[12]}");
+    check(flags.size() == 1 && flags[0] == "12", "a number read");
+    check(platform::busctl_values("{\"type\":\"s\",\"data\":[\"\"]}") == std::vector<std::string>{""},
+          "an empty string is still a value");
+}
+
+void systemd_parsing() {
+    const auto units = platform::parse_systemctl_show(
+        "Id=ssh.service\nDescription=OpenBSD Secure Shell server\nMainPID=812\nExecStart={ path=/usr/sbin/sshd ; "
+        "argv[]=/usr/sbin/sshd -D ; ignore_errors=no }\n\nId=cups.service\nMainPID=0\nUnitFileState=disabled\n");
+    check(units.size() == 2, "one map per unit");
+    check(units.size() == 2 && units[0].at("Description") == "OpenBSD Secure Shell server" &&
+              units[0].at("MainPID") == "812" && units[1].at("UnitFileState") == "disabled",
+          "unit properties");
+
+    const auto entry = platform::parse_desktop_entry(
+        "[Desktop Entry]\nName=Backup\nExec=env FOO=1 backup --quiet\nOnlyShowIn=GNOME;Unity;\nHidden=true\n"
+        "X-GNOME-Autostart-enabled=false\n[Desktop Action New]\nName=Other\n");
+    check(entry.name == "Backup" && entry.exec == "env FOO=1 backup --quiet" && entry.only_show_in == "GNOME;Unity;",
+          "desktop entry keys");
+    check(entry.hidden && !entry.autostart_enabled, "desktop entry switches");
+    check(platform::valid_service_label("getty@tty1.service") &&
+              platform::valid_service_label("xdg:org.gnome.Foo.desktop") &&
+              platform::valid_service_label("dev-disk-by\\x2duuid.swap"),
+          "unit and autostart labels accepted");
+}
+#endif  // __linux__
 
 // The kernel's per-core tick counters are 32-bit: a wrap must read as the small delta it is.
 void tick_wrap() {
@@ -504,7 +615,22 @@ void refusals() {
     check(pc_process_set_affinity(monitor, victim, 0) == PC_ERR_INVALID ||
               pc_process_set_affinity(monitor, victim, 0) == PC_ERR_UNSUPPORTED,
           "empty affinity rejected");
-#if !defined(_WIN32)
+#if defined(__linux__)
+    // No helper: systemctl answers (asking polkit only for units that exist). Without systemd the
+    // capability is off.
+    const bool services = (pc_capabilities() & PC_CAP_SERVICES) != 0;
+    check(pc_service_control(monitor, PC_DOMAIN_SYSTEM, "procyon-no-such.service", PC_SERVICE_STOP) ==
+              (services ? PC_ERR_NOT_FOUND : PC_ERR_UNSUPPORTED),
+          "unknown unit not found");
+    check(pc_service_control(monitor, PC_DOMAIN_USER, "bad label", PC_SERVICE_STOP) ==
+              (services ? PC_ERR_INVALID : PC_ERR_UNSUPPORTED),
+          "bad service label rejected");
+    check(pc_startup_set_enabled(monitor, PC_STARTUP_USER_AGENT, "xdg:procyon-no-such.desktop", false) ==
+              PC_ERR_NOT_FOUND,
+          "unknown autostart entry not found");
+    check(pc_startup_set_enabled(monitor, PC_STARTUP_USER_AGENT, "xdg:../escape.desktop", false) == PC_ERR_INVALID,
+          "autostart label with a path rejected");
+#elif !defined(_WIN32)
     // System-domain changes need the helper; without it nothing runs.
     check(pc_service_control(monitor, PC_DOMAIN_SYSTEM, "com.example.none", PC_SERVICE_STOP) == PC_ERR_PERMISSION,
           "system service needs helper");
@@ -542,9 +668,15 @@ int main() {
         validation();
 #if defined(_WIN32)
         power_request_parsing();
-#else
+#elif defined(__APPLE__)
         managed_startup_parsing();
         launchctl_parsing();
+#else
+        proc_stat_parsing();
+        proc_net_parsing();
+        drm_fdinfo_parsing();
+        inhibitor_parsing();
+        systemd_parsing();
 #endif
         tick_wrap();
         handle_denial();

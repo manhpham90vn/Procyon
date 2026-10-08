@@ -112,3 +112,34 @@ jobs:
           path: dist\bench-windows.json
           if-no-files-found: ignore
           retention-days: 30
+
+  linux:
+    name: Linux
+    # 24.04's glibc and GTK 4.14: the oldest supported base, so the binary runs on newer distributions too.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools and GTK 4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build pkg-config \
+            libgtk-4-dev clang-format shellcheck xvfb
+      - name: Lint (generated files, clang-format, shellcheck, python)
+        # clang-tidy runs in the macOS job; the Linux sources are formatted and built here.
+        run: SKIP_TIDY=1 scripts/lint.sh
+      - name: Build, core tests, smoke run
+        run: |
+          scripts/build-linux.sh release
+          build/linux/procyon-cli 1 300
+      - name: Render a screen offscreen
+        # The app's own --screenshot mode on a virtual X display: draws the Overview after a few
+        # samples and exits, which exercises GTK, the Cairo canvas, the embedded fonts and the sampler.
+        run: xvfb-run -a dist/linux/procyon --screenshot dist/linux/overview.png --page overview
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Procyon-linux-${{ github.sha }}
+          path: |
+            dist/linux/procyon
+            dist/linux/overview.png
+          retention-days: 7

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -160,6 +161,33 @@ bool handles_denied(int bytes, int error);
 
 bool battery(pc_battery &out);
 std::vector<PowerAssertion> power_assertions();
+#if defined(__linux__)
+// The parsing half of power_assertions() on Linux: `busctl --json=short call … ListInhibitors`
+// output (systemd-logind's inhibitor locks). Spawns nothing (exposed for tests).
+std::vector<PowerAssertion> parse_inhibitors(const std::string &json);
+// Every string and number in the "data" of a `busctl --json=short` reply, in order (exposed for tests).
+std::vector<std::string> busctl_values(const std::string &json);
+// One DRM client's fdinfo: its client id and engine time in nanoseconds (the busiest engine kind).
+// False when the text isn't a DRM client's (exposed for tests).
+bool parse_drm_fdinfo(const std::string &text, uint64_t &client_id, uint64_t &engine_ns);
+// One row of /proc/net/{tcp,tcp6,udp,udp6} and the socket inode it belongs to.
+struct SocketEntry {
+    pc_connection connection{};
+    uint64_t inode = 0;
+};
+std::vector<SocketEntry> parse_proc_net(const std::string &text, int32_t protocol, int32_t family);
+// `systemctl show` output: one key/value map per unit (blank-line separated).
+std::vector<std::map<std::string, std::string>> parse_systemctl_show(const std::string &text);
+// The [Desktop Entry] keys of an XDG autostart file that decide whether and where it runs.
+struct DesktopEntry {
+    std::string name, exec, type, only_show_in, not_show_in;
+    bool hidden = false;
+    bool no_display = false;
+    bool autostart_enabled = true;  // X-GNOME-Autostart-enabled
+    bool session_phase = false;     // X-GNOME-Autostart-Phase: a session component
+};
+DesktopEntry parse_desktop_entry(const std::string &text);
+#endif
 #if defined(_WIN32)
 // The parsing half of power_assertions() on Windows: `report` is the output of `powercfg /requests`.
 // Spawns nothing (exposed for tests).

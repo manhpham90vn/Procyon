@@ -111,7 +111,7 @@ jobs:
         if: always() && env.MACOS_CERTIFICATE_P12 != ''
         run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
 
-  # Windows: a zip with Procyon.exe, attached to the release the macOS job created.
+  # Windows: a zip with Procyon.exe and the licenses of what it embeds, attached to the release the macOS job created.
   windows:
     name: Windows package
     needs: release
@@ -128,7 +128,8 @@ jobs:
         shell: pwsh
         run: |
           $v = "${{ needs.release.outputs.version }}"
-          Compress-Archive -Path dist\windows\Procyon.exe, LICENSE, README.md -DestinationPath "dist\Procyon-$v-windows-x64.zip" -Force
+          # The exe embeds Inter, Nunito (SIL OFL 1.1) and Lucide icons (ISC): their licenses ship with it.
+          Compress-Archive -Path dist\windows\Procyon.exe, LICENSE, README.md, design\fonts\LICENSE-Inter.txt, design\fonts\LICENSE-Nunito.txt, design\icons\LICENSE-Lucide.txt -DestinationPath "dist\Procyon-$v-windows-x64.zip" -Force
           $hash = (Get-FileHash "dist\Procyon-$v-windows-x64.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  Procyon-$v-windows-x64.zip" | Out-File -Encoding ascii "dist\Procyon-$v-windows-x64.sha256"
       - name: Upload to the release
@@ -137,3 +138,28 @@ jobs:
           $v = "${{ needs.release.outputs.version }}"
           $tag = "${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.release.outputs.version) }}"
           gh release upload $tag "dist\Procyon-$v-windows-x64.zip" "dist\Procyon-$v-windows-x64.sha256" --clobber
+
+  # Linux: a tarball with the binary (fonts embedded), desktop entry, icon and the licenses of what it
+  # embeds, attached to the same release. Built on the oldest supported base for a portable glibc.
+  linux:
+    name: Linux package
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools and GTK 4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build pkg-config libgtk-4-dev
+      - name: Build and test
+        run: PROCYON_VERSION="${{ needs.release.outputs.version }}" scripts/build-linux.sh release
+      - name: Package
+        run: scripts/package-linux.sh "${{ needs.release.outputs.version }}"
+      - name: Upload to the release
+        run: |
+          v="${{ needs.release.outputs.version }}"
+          tag="${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.release.outputs.version) }}"
+          gh release upload "$tag" "dist/Procyon-$v-linux-x86_64.tar.gz" "dist/Procyon-$v-linux-x86_64.sha256" --clobber

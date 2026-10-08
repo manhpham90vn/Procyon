@@ -79,6 +79,27 @@ private:
     const int &fd_;
 };
 
+// The uid of the process at the other end of a connected Unix socket, -1 when unknown.
+uid_t peer_uid(int fd) {
+#if defined(__linux__)
+    ucred credentials{};
+    socklen_t length = sizeof(credentials);
+    return getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) == 0 ? credentials.uid
+                                                                               : static_cast<uid_t>(-1);
+#else
+    uid_t uid = static_cast<uid_t>(-1);
+    gid_t gid = 0;
+    return getpeereid(fd, &uid, &gid) == 0 ? uid : static_cast<uid_t>(-1);
+#endif
+}
+
+// SO_NOSIGPIPE (BSD) is set on the socket; Linux asks per send.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
 }  // namespace
 
 bool HelperClient::connect(const std::string &socket_path) {
@@ -94,14 +115,13 @@ bool HelperClient::connect(const std::string &socket_path) {
     set_receive_timeout(fd_, kReplyTimeoutSeconds);
     const timeval send_timeout{kReplyTimeoutSeconds, 0};
     setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
+#ifdef SO_NOSIGPIPE
     int no_sigpipe = 1;
     setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe));
+#endif
 
     // Only a root helper is worth talking to; anything else squatting on the path is ignored.
-    uid_t peer_uid = 1;
-    gid_t peer_gid = 0;
-    if (::connect(fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 ||
-        getpeereid(fd_, &peer_uid, &peer_gid) != 0 || peer_uid != 0) {
+    if (::connect(fd_, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 || peer_uid(fd_) != 0) {
         disconnect();
         return false;
     }
@@ -275,7 +295,7 @@ bool HelperClient::details(int32_t pid, platform::Details &out) {
 bool HelperClient::send_all(const void *data, size_t size) {
     auto bytes = static_cast<const char *>(data);
     while (size > 0) {
-        ssize_t sent = ::send(fd_, bytes, size, 0);
+        ssize_t sent = ::send(fd_, bytes, size, kSendFlags);
         if (sent < 0 && errno == EINTR) continue;
         if (sent <= 0) return false;
         bytes += sent;

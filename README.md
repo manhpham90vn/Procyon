@@ -1,11 +1,12 @@
 # Procyon
 
-A lightweight, open-source task manager for macOS and Windows. See what is using your CPU, memory, disk,
+A lightweight, open-source task manager for macOS, Windows and Linux. See what is using your CPU, memory, disk,
 network, GPU and battery, find out what a process is, and stop the ones you don't need.
 
 The macOS app is complete (P2 in the [spec](docs/procyon-spec.md)); the Windows app is new and covers the same
 screens: processes, performance, GPU, battery, startup, services, History, alerts and Files & Ports (status in
-[docs/development.md](docs/development.md#windows)).
+[docs/development.md](docs/development.md#windows)). The Linux app (GTK 4) is newer still and shares the Windows
+app's screens (status in [docs/development.md](docs/development.md#linux)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
@@ -99,6 +100,8 @@ Procyon is light on resources: sampling uses about 0.5% of one core.
 
 - macOS 14 Sonoma or later, Apple Silicon or Intel (the release is a universal app)
 - Windows 10 version 1809 or later, or Windows 11, 64-bit
+- Linux with GTK 4.12 or later and systemd for the Services screen (Ubuntu 24.04, Fedora 39, Debian 13 or
+  newer), x86-64
 
 ## Install
 
@@ -115,6 +118,19 @@ Procyon is light on resources: sampling uses about 0.5% of one core.
 
 The Windows build is not code-signed yet, so SmartScreen may ask once (More info → Run anyway) and Smart App
 Control, where it is on, refuses unsigned apps altogether.
+
+### Linux
+
+1. Download the latest `Procyon-x.y.z-linux-x86_64.tar.gz` from the [Releases page](https://github.com/manhpham90vn/Procyon/releases/latest).
+2. Unpack it into `~/.local` (or `/usr/local` with `sudo`): the binary goes to `bin`, the desktop entry, icon
+   and licenses to `share`, and Procyon appears in your app grid.
+
+```sh
+tar -xzf Procyon-x.y.z-linux-x86_64.tar.gz --strip-components=1 -C ~/.local
+sha256sum -c Procyon-x.y.z-linux-x86_64.sha256   # optional: check the download
+```
+
+Settings live in `~/.config/procyon/settings.ini`, the history in `~/.local/share/procyon`.
 
 ### Homebrew
 
@@ -183,6 +199,12 @@ the `Ctrl+K` palette) restarts Procyon as administrator through the usual User A
 Procyon still lists every process with its CPU, memory and disk use, but other users' command lines and open
 files stay hidden, their processes can't be ended, and services and machine-wide startup entries can't be changed.
 
+On Linux there is no helper either: Procyon reads every process's CPU and memory as your user, systemd asks for
+your password (through the desktop's polkit dialog) when you start, stop or switch a system service, and
+machine-wide startup entries are switched with a per-user override, as GNOME and KDE do. **Unlock Full Access**
+restarts Procyon as root through `pkexec`, which lets it end other users' processes, raise priority and read
+their command lines, files and disk use.
+
 ### Menu bar
 
 Closing the window keeps Procyon running in the menu bar instead of the Dock. Choose what the menu bar
@@ -213,9 +235,13 @@ On macOS:
 On Windows, quit Procyon (right-click its tray icon → Quit), delete the folder you unzipped it into, and
 optionally delete the settings key `HKEY_CURRENT_USER\Software\Procyon`.
 
+On Linux, quit Procyon (`Ctrl+Q`), delete `bin/procyon`, `share/applications/dev.procyon.Procyon.desktop`,
+`share/metainfo/dev.procyon.Procyon.metainfo.xml`, `share/icons/hicolor/512x512/apps/dev.procyon.Procyon.png`
+and `share/licenses/procyon` from where you unpacked it, and optionally `~/.config/procyon` and
+`~/.local/share/procyon`.
+
 ## Known limitations
 
-- The core is cross-platform C++; a Linux front end is planned.
 - The interface is English only.
 - Not available on macOS: CPU affinity, GPU encode/decode usage, fan speeds, and closing another process's
   network connection.
@@ -224,6 +250,14 @@ optionally delete the settings key `HKEY_CURRENT_USER\Software\Procyon`.
   Full Access (administrator rights), as Windows itself requires for them.
   Temperatures come from the ACPI thermal zones (the motherboard sensors the firmware publishes, not the CPU die, which needs a kernel driver; a zone whose reading never moves is labelled as the board's) and the system drive, which not every PC exposes.
   GPU temperature is read for NVIDIA cards only (AMD and Intel: not yet).
+- On Linux, per-app network counts TCP only (QUIC and other UDP traffic, much of a browser's video, has no
+  per-socket counters) and only your own apps without Full Access; a new connection is counted from the moment
+  Procyon finds it (within 3 seconds). Overall GPU usage on Intel is how long the GPU was awake, which reads a
+  little high at light loads. The tray icon needs a desktop that hosts one (KDE, XFCE, Cinnamon, Ubuntu's
+  GNOME), and the figures beside it (**Settings → Notification area**) one that shows labels (Ubuntu's GNOME;
+  KDE puts them in the tooltip); on plain GNOME, **Keep running in the background** keeps Procyon sampling with
+  the window closed.
+  Not yet: per-app energy (RAPL is root-only).
 
 ## Building from source
 
@@ -258,6 +292,21 @@ make help     rem all targets
 
 Builds from source are unsigned: Smart App Control, where it is on, won't run them.
 
+### Linux
+
+You need a C++20 compiler, CMake, Ninja and GTK 4 (`make tools` prints the packages for Debian/Ubuntu, Fedora
+and Arch):
+
+```sh
+sudo apt install build-essential cmake ninja-build pkg-config libgtk-4-dev clang-format
+git clone https://github.com/manhpham90vn/Procyon.git
+cd Procyon
+make run       # build dist/linux/procyon and open it
+make test      # core tests
+make install   # into ~/.local (PREFIX=/usr/local for everyone)
+make help      # all targets
+```
+
 ## Contributing
 
 Bug reports, ideas and pull requests are welcome on
@@ -269,7 +318,7 @@ The repo layout, CI and release process, how the privileged helper works, and fe
 
 ## License
 
-Procyon is released under the [MIT License](LICENSE). The Windows app embeds the
+Procyon is released under the [MIT License](LICENSE). The Windows and Linux apps embed the
 [Inter](https://github.com/rsms/inter) and [Nunito](https://github.com/googlefonts/nunito) typefaces, licensed
 under the [SIL Open Font License 1.1](design/fonts/LICENSE-Inter.txt) ([Nunito](design/fonts/LICENSE-Nunito.txt)),
 and draws its icons from [Lucide](https://lucide.dev), licensed under the

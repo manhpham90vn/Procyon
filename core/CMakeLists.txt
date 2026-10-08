@@ -30,6 +30,15 @@ elseif(WIN32)
     src/platform/windows_power.cpp
     src/platform/windows_network.cpp
   )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND PROCYON_CORE_SOURCES
+    src/platform/linux.cpp
+    src/platform/linux_handles.cpp
+    src/platform/linux_network.cpp
+    src/platform/linux_gpu.cpp
+    src/platform/linux_power.cpp
+    src/platform/linux_services.cpp
+  )
 else()
   message(FATAL_ERROR "No platform adapter for ${CMAKE_SYSTEM_NAME} yet (see docs/procyon-spec.md)")
 endif()
@@ -46,6 +55,10 @@ endif()
 
 if(APPLE)
   target_link_libraries(procyon_core PUBLIC "-framework CoreFoundation" "-framework CoreServices" "-framework IOKit" "-framework Security" bsm)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # dlopen for NVML; the sampler runs on its own thread in the apps.
+  find_package(Threads REQUIRED)
+  target_link_libraries(procyon_core PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 elseif(WIN32)
   target_link_libraries(procyon_core PUBLIC
     advapi32 iphlpapi ws2_32 version pdh dxgi setupapi ole32 oleaut32 wbemuuid shell32 user32 taskschd)
@@ -74,8 +87,11 @@ endif()
 add_test(NAME core COMMAND procyon-core-tests)
 
 # The shared UI (apps/ui) and the Win32 app live next to the core and are built from the same tree.
-option(PROCYON_BUILD_APP "Build the native app for this platform (Windows)" ON)
+option(PROCYON_BUILD_APP "Build the native app for this platform (Windows, Linux)" ON)
 if(WIN32 AND PROCYON_BUILD_APP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../apps/windows/CMakeLists.txt")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../apps/ui" apps/ui)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../apps/windows" apps/windows)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND PROCYON_BUILD_APP)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../apps/ui" apps/ui)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../apps/linux" apps/linux)
 endif()

@@ -21,6 +21,12 @@ core/                       C++20 core with a stable C ABI (shared by every UI)
   src/platform/windows_gpu.cpp       GPUs (DXGI) and usage per adapter and process ("GPU Engine" counters)
   src/platform/windows_power.cpp     battery (battery class driver), ACPI and drive temperatures
   src/platform/windows_internal.hpp  shared native declarations and helpers for the Windows files
+  src/platform/linux.cpp          Linux adapter (procfs, sysfs): processes, CPU, memory, I/O, volumes, actions
+  src/platform/linux_services.cpp systemd units (systemctl) and XDG autostart entries
+  src/platform/linux_handles.cpp  open files (/proc/<pid>/fd) and TCP/UDP sockets (/proc/net, by inode)
+  src/platform/linux_gpu.cpp      GPUs (DRM sysfs, NVML) and per-process GPU time (DRM fdinfo)
+  src/platform/linux_power.cpp    battery (power_supply), temperatures (hwmon), logind inhibitor locks
+  src/platform/linux_internal.hpp shared procfs/sysfs helpers and the /proc/<pid>/stat parser
   src/helper_server.cpp       privileged helper (procyon-helper), src/helper_client.cpp its client
                               (a stub on Windows: the app relaunches itself elevated instead)
   helper/main.c               procyon-helper entry point
@@ -50,6 +56,7 @@ apps/ui/                    the shared UI of the non-Apple apps (C++20, no platf
   src/overlays.*            Ctrl+K palette and Get Info
   src/history.*, alerts.*   the 24-hour history file and alert rules
   src/commands.hpp          command ids shared with the Windows accelerator table
+  src/os.hpp                what differs per OS in words and behaviour (compile time, no platform headers)
   src/Tokens.generated.h    generated from design/tokens.json
 apps/windows/
   CMakeLists.txt            Procyon.exe (Win32 + Direct2D/DirectWrite, no other dependencies)
@@ -59,6 +66,16 @@ apps/windows/
   src/window.cpp            main window: custom caption, sidebar, routing, tray icon, dialogs,
                             elevation, settings
   res/                      icon (from the shared PNG), manifest, accelerators, version resource
+apps/linux/
+  CMakeLists.txt            procyon (GTK 4 + Cairo/Pango), install rules
+  src/canvas_cairo.*        the Cairo/Pango Canvas: paths (SVG arcs converted), gradients, blurred-mask
+                            shadows cached by size, cached Pango layouts, images
+  src/fonts.cpp             Inter and Nunito assembled into the binary (.incbin), loaded via memfd + fontconfig
+  src/platform_linux.cpp    platform.hpp for Linux (desktop entries + icon theme, GNOME colour scheme, XDG
+                            folders, key-file settings, GDK clipboard)
+  src/window.cpp            main window: drawing area, drag handles + GtkWindowControls, sidebar, routing,
+                            shortcuts, dialogs and menus (nested loops), notifications, pkexec, --screenshot
+  data/                     desktop entry and AppStream metadata
 design/fonts/               InterVariable.ttf and NunitoVariable.ttf (SIL OFL 1.1), embedded as RCDATA
 design/icons/               the Lucide license
 data/
@@ -67,6 +84,8 @@ scripts/
   gen-tokens.py             tokens.json → Tokens.generated.swift and apps/ui's Tokens.generated.h
   build-macos-app.sh        builds dist/Procyon.app
   build-windows.cmd         builds build\windows (core, CLI, tests, app) and dist\windows\Procyon.exe
+  build-linux.sh            builds build/linux (core, CLI, tests, app) and dist/linux/procyon
+  package-linux.sh          dist/Procyon-<version>-linux-<arch>.tar.gz (cmake --install into a staging prefix)
   make-icon.swift           renders the app icon; make-icon-windows.ps1 converts it to Procyon.ico
 ```
 
@@ -113,6 +132,26 @@ window to the tray first. The CLI's numbers are compared with `GetSystemTimes`, 
 `Win32_PageFileUsage` and `EnumProcesses`, and the release zip is rebuilt in a temp folder for its size. Output:
 `dist\bench-windows.json`. Options: `--pages`, `--duration`, `--attempts`, `--known-misses`, `--report-only`.
 
+## Build and run (Linux, GTK 4.12+)
+
+The same `make` targets again, through `scripts/build-linux.sh [release|debug] [--no-tests]` (CMake + Ninja, from
+`core/CMakeLists.txt`, which adds `apps/ui` and `apps/linux` on Linux). `make tools` prints the packages to install.
+
+```sh
+make run          # release build, dist/linux/procyon, open it
+make test         # release build + core tests (make core is the same)
+make build        # debug build into build/linux-debug
+make screenshots  # render the main screens, light and dark, into dist/linux/screenshots
+make install      # cmake --install into PREFIX (default ~/.local)
+make package      # dist/Procyon-<version>-linux-<arch>.tar.gz + .sha256
+make lint         # generated files, clang-format, clang-tidy (SKIP_TIDY=1 skips it), shellcheck, python
+make help         # everything else
+```
+
+Headless: `build/linux/procyon-cli 3 1000`; a screen at launch: `dist/linux/procyon --page processes`; any screen
+as a PNG without opening a window: `dist/linux/procyon --screenshot out.png --page cpu --dark` (2x, after six
+samples; it needs a display, `xvfb-run -a` provides one in CI).
+
 ## Development
 
 | Command | What it does |
@@ -134,6 +173,9 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
   the generated token header), then `scripts\build-windows.cmd` (core tests included), smoke-runs
   `procyon-cli.exe`, uploads `Procyon.exe`, and runs `scripts\bench-windows.py` against the spec's targets
   (`dist\bench-windows.json` is uploaded).
+- A `ubuntu-24.04` job (the oldest supported base, so the binary's glibc and GTK requirements stay low) runs
+  `SKIP_TIDY=1 scripts/lint.sh`, `scripts/build-linux.sh release` (core tests included), smoke-runs `procyon-cli`,
+  renders the Overview offscreen under `xvfb-run` with `--screenshot`, and uploads the binary and the PNG.
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID
@@ -141,7 +183,8 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
   [manhpham90vn/homebrew-tap](https://github.com/manhpham90vn/homebrew-tap)), stable releases also update the `procyon`
   cask there through `scripts/publish-homebrew.sh`, rendered from `packaging/homebrew/procyon.rb`. A second job
   then builds `Procyon-x.y.z-windows-x64.zip` (unsigned; Authenticode signing and winget are open) with its
-  SHA-256 and attaches both to the same release.
+  SHA-256 and attaches both to the same release; a third, on `ubuntu-24.04`, builds
+  `Procyon-x.y.z-linux-x86_64.tar.gz` (`scripts/package-linux.sh`) with its SHA-256.
 
 The `VERSION` file is the single source of the version: `scripts/build-macos-app.sh` writes it (with the build
 number and git commit) into Info.plist, and the app shows it in Settings → About. The release job refuses a tag
@@ -291,7 +334,7 @@ in for the macOS open panel in **Who Is Using…**.
 
 | Spec item | Status |
 | --- | --- |
-| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done except network. `NtQuerySystemInformation` gives every process's counters without privileges, so nothing is `PC_PROC_RESTRICTED`; the path, user and "critical process" flag come from a limited-rights handle, which an unelevated Procyon cannot open for the OS's own processes (csrss, services, lsass, …): their user shows as unknown ("—") until Full Access. Memory is the private working set, like Task Manager. Per-process network comes from the `Microsoft-Windows-Kernel-Network` ETW provider in a real-time session of Procyon's own (`windows_network.cpp`): starting a session takes administrator rights, so `PC_CAP_PROCESS_NETWORK` and the network columns are on only with Full Access. |
+| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done. `NtQuerySystemInformation` gives every process's counters without privileges, so nothing is `PC_PROC_RESTRICTED`; the path, user and "critical process" flag come from a limited-rights handle, which an unelevated Procyon cannot open for the OS's own processes (csrss, services, lsass, …): their user shows as unknown ("—") until Full Access. Memory is the private working set, like Task Manager. Per-process network comes from the `Microsoft-Windows-Kernel-Network` ETW provider in a real-time session of Procyon's own (`windows_network.cpp`): starting a session takes administrator rights, so `PC_CAP_PROCESS_NETWORK` and the network columns are on only with Full Access. |
 | Flat / by app / tree views, search, sort, pin | Done (core). Apps are grouped by executable path; the app name is the executable's `FileDescription` ("Google Chrome"), what Task Manager shows. What lives under the Windows directory (svchost, dwm, …) is the OS, not an app: it groups by name, like the daemons of /System on macOS, and is not `PC_PROC_APP_BUNDLE`. **Pin to Top** keeps one app above the sorted rows in every view, as on macOS; a "top apps" row on Overview or a performance screen opens Processes on that app (by-app view, search cleared, the app pinned and selected), like the macOS `showInProcesses`. |
 | End task / force quit / end process tree | Done. End Task posts `WM_CLOSE` to a process's visible windows and terminates a process that has none; Force Quit and End Process Tree terminate. The idle process, `System`, processes flagged critical (`ProcessBreakOnTermination`) and, since that flag needs a handle an unelevated Procyon cannot get, the OS's own smss, csrss, wininit, winlogon, services, lsass, LsaIso, Registry, Memory Compression and Secure System by name are protected. End Process Tree follows the kernel's parent links only where the parent is older than the child: a reused parent pid adopts no strangers (macOS reparents orphans to launchd, so its tree never had this hole). |
 | Live charts, per-core usage, system info | Done. Hybrid cores (P/E) from `GetSystemCpuSetInformation`. |
@@ -332,3 +375,74 @@ unsigned, so a machine with Smart App Control on refuses to run them; CI runs th
 Two kernel quirks worth keeping in mind: `SystemProcessorPerformanceInformation` wants a buffer of exactly one record
 per processor (a larger one is refused), and the system tick must be computed as `kernel - idle` on the raw 100 ns
 values, because the difference of two separately rounded counters can go backwards and wrap the 32-bit tick delta.
+
+## Linux
+
+The Linux app is the Windows app's twin: the same core C ABI and the same shared UI (`apps/ui`), with a Linux
+adapter in the core and, in `apps/linux`, a GTK 4 window, a Cairo/Pango `Canvas` and `platform_linux.cpp`. GTK is
+used through its C API (no gtkmm), and only for the window, input, dialogs, menus and the clipboard: every
+screen is drawn by the shared `Renderer` into one `GtkDrawingArea`.
+
+**Canvas and text.** Cairo draws the paths (SVG endpoint arcs converted to centre form, quadratic curves raised to
+cubic), gradients and clips; a shadow is a rounded-rectangle alpha mask blurred by three box passes (a Gaussian of
+half the token's radius) and cached by size and scale, the counterpart of the Direct2D Shadow effect. Inter and
+Nunito are assembled into the executable (`fonts.cpp`, `.incbin`), written to anonymous `memfd`s at start and added
+to fontconfig as application fonts, so the binary needs no data files; the weight goes through Pango's variable-font
+support and the optical size as an `opsz` variation, as on Windows. Pango layouts are cached by text, style and box
+(the Direct2D canvas's reason applies: a table redraws hundreds of unchanged cells a second) and dropped after 120
+frames unused. Hinting of metrics is off, so a layout measured once draws the same at any scale.
+
+**Window.** The title bar is replaced by an invisible widget, which keeps GTK's client-side frame (shadow, resize
+edges, rounded corners); two `GtkWindowHandle`s over the page's top strip and the sidebar's brand block drag the
+window, and `GtkWindowControls` puts the desktop's own buttons, in the user's order, at the strip's right end. Dialogs
+(`GtkAlertDialog`, `GtkFileDialog`) and context menus (`GtkPopoverMenu` from a `GMenu`, checked items as boolean
+actions) are asynchronous in GTK 4, so the window waits for them in a nested main loop to keep `Host`'s synchronous
+contract. Snapshots reach the main loop through `g_main_context_invoke`. Dark mode follows
+`org.gnome.desktop.interface color-scheme`, else GTK's dark preference. App icons come from the desktop entries
+(`GDesktopAppInfo`: the executable, `StartupWMClass`, and the install directory a launcher points into, so
+`/opt/google/chrome/chrome` finds Google Chrome's entry) and the icon theme. Alerts are `GNotification`s.
+
+**Tray.** `tray_linux.cpp` exports a StatusNotifierItem (with GDBus; libappindicator is GTK 3 only) and its menu
+over `com.canonical.dbusmenu` (Open Procyon, Pause/Resume updates, Quit), registers with
+`org.kde.StatusNotifierWatcher` and again whenever a watcher appears; the icon is the brand mark rendered by the
+shared `Renderer` at 22, 32 and 48 px. The modules switched on in Settings (CPU, memory, network, GPU,
+temperature, battery: the macOS menu bar's) show beside it as the Ayatana label (`XAyatanaLabel`, one line in the
+panel's font, e.g. `CPU 12%  MEM 62%  ↓1.2M ↑40K`, with a widest-form guide so the panel keeps its width), which
+Ubuntu's AppIndicator extension draws; hosts without labels (KDE) keep the figures in the tooltip. A panel icon is
+drawn at 16 px, too small for the macOS two-line columns, hence one line of text. The icon stays while the window is
+open, as on Windows.
+`platform::tray_available()` follows the watcher, so Settings shows the notification-area section where a tray
+exists and a plain **Background** switch where it doesn't (plain GNOME); "keep running" defaults to on only with a
+tray. Without one, closing the window hides it and launching Procyon again brings it back (`GApplication` keeps one
+instance per session).
+
+| Spec item | Status |
+| --- | --- |
+| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done except network. `/proc/<pid>/stat` and `statm` are public, so CPU and memory are known for every process and nothing is `PC_PROC_RESTRICTED`; memory is resident minus shared pages (what the process holds itself). Disk I/O (`/proc/<pid>/io`, bytes that reached the block layer) and the executable path are the owner's only: other users' processes show "—" until Full Access, and their path falls back to an absolute `argv[0]`. Kernel threads are left out, like `kernel_task`'s threads on macOS. Per-process network (`linux_network.cpp`) sums the kernel's TCP byte counters per socket (`sock_diag` netlink, `tcp_info.tcpi_bytes_received`/`tcpi_bytes_acked`, unprivileged), matched to processes by socket inode from `/proc/<pid>/fd`, so only readable processes are counted (every process as root); loopback-only sockets are skipped, like `lo` in the machine totals. A dump walks the kernel's whole TCP hash (262,144 buckets on a 32 GB machine, about 4 ms per family), so it runs every 3 s and finds new sockets; in between each known socket is looked up by its id (a hash lookup, 128 per netlink send). A socket counts from the tick it is first seen (its earlier bytes would land in one tick as a rate it never had), and per-process totals add per-socket deltas, so a closing socket never makes a total run backwards. UDP has no per-socket counters: QUIC traffic isn't attributed, which the Network screen says under its top apps. |
+| Flat / by app / tree views | Done (core). An app is a `.desktop` entry: processes whose executable (or `StartupWMClass`, or the directory a launcher resolves into) matches an entry group under its name and are `PC_PROC_APP_BUNDLE`; everything else groups by name. |
+| End task / force quit / end process tree, suspend, signals | Done with POSIX signals. pid 1 (init), 2 (kthreadd) and Procyon are protected. |
+| Priority, CPU affinity | Done, applied to every thread (`/proc/<pid>/task`), as `renice` and `taskset -a` do, since Linux schedules threads. Raising priority needs root. |
+| Live charts, per-core usage, system info | Done: `/proc/stat` (iowait counts as idle, irq/softirq/steal as system), `/proc/cpuinfo`, the CPU topology for physical cores, Intel hybrid P/E cores from the `cpu_core`/`cpu_atom` PMUs, DMI for the model (placeholders such as "To Be Filled By O.E.M." are dropped). |
+| Memory composition, pressure, swap | Done from `/proc/meminfo`: used = total − available, cached = reclaimable page cache, wired = unreclaimable kernel memory, compressed = the zswap pool; pressure from PSI (`/proc/pressure/memory`, avg10: 5% warning, 25% critical). |
+| Disk and network totals, volumes | Done: physical disks only in `/proc/diskstats` (no partitions, loop, dm, md, zram), interfaces backed by a device in `/proc/net/dev`; volumes from `/proc/self/mounts`, one per device, labels from `/dev/disk/by-label`, removable from sysfs. |
+| GPU: usage, memory, temperature; per-process GPU | DRM cards in sysfs: `gpu_busy_percent` and VRAM on AMD, temperature from the card's hwmon, the name from `pci.ids`. Intel publishes busy time only through perf (root, or `perf_event_paranoid` ≤ 0); its GTs' idle residency is public (i915 `gt/gt*/rc6_residency_ms`, xe `tile*/gt*/gtidle/idle_residency_ms`), so utilization is the busiest GT's share of time out of RC6 since the previous sample: awake rather than busy, slightly high at light loads (7–8% against 5% of summed per-process engine time on the measuring machine). NVIDIA through NVML (`libnvidia-ml.so.1`, loaded when the driver is). Per-process GPU time from the DRM fdinfo engine counters (amdgpu, i915, nouveau, msm, panfrost, v3d; Linux 5.19+), the busiest engine kind per client, the descriptor list rescanned every 5 s; other users' processes are unreadable. |
+| Process details | Done: `cmdline`, `environ` (owner only), `cwd`, threads from `/proc/<pid>/task` with recent CPU per thread. |
+| Startup apps | Done: XDG autostart (`~/.config/autostart`, `$XDG_CONFIG_DIRS/autostart`), filtered as GNOME's Startup Applications does (session components with `X-GNOME-Autostart-Phase`, other desktops' entries and hidden system entries are left out). Switching writes `Hidden=` into the user's copy, creating an override of a system entry when needed, so no root is needed. |
+| Services | Done: every service unit of the system and user managers (`systemctl list-unit-files`, `list-units`, one `show` for all), aliases listed once; "part of the OS" means the unit file is under `/usr/lib/systemd`. Actions run `systemctl`, which asks polkit (the desktop's password dialog) for system units; a unit that doesn't exist is answered before polkit is asked. |
+| Files & Ports | Done: `/proc/<pid>/fd` links and working directories; sockets from `/proc/net/{tcp,tcp6,udp,udp6}` matched to processes by inode. Other users' descriptors need root. |
+| Battery, apps preventing sleep, temperatures | Battery from `/sys/class/power_supply` (energy or charge counters, health, cycles, adapter). Sleep: systemd-logind's `block` inhibitors (`busctl … ListInhibitors`) and GNOME's session inhibitors with the suspend or idle flag (`org.gnome.SessionManager.GetInhibitors`, where the Inhibit portal and `org.freedesktop.ScreenSaver` callers such as video players land); those carry an app id rather than a pid, so the pid comes from a registered session client, else the running process of the app's desktop entry. Temperatures from hwmon: `coretemp` package, `k10temp`/`zenpower` Tctl/Tdie, ARM thermal zones, ACPI as the fallback; NVMe/drivetemp for the disk. Fans: not yet. |
+| History, alerts, palette, settings | Shared with Windows: `~/.local/share/procyon/history.bin`, `GNotification` alerts, `Ctrl+K`, settings in `~/.config/procyon/settings.ini`. |
+| Energy, explanations for Linux processes, plugins | Not started (RAPL is root-only since 2020). |
+
+### Full access (pkexec)
+
+There is no helper on Linux either: `helper_supported()` is false (the POSIX `HelperClient` builds, with
+`SO_PEERCRED` for the peer check, but nothing launches a helper). **Unlock Full Access** runs
+`pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… procyon --page <current>`; the window hides while the
+root copy runs and comes back if authorization is dismissed. System services don't need it: polkit asks per action.
+
+### Measured (i7-11700, 16 threads, about 175 processes, 1 s updates, release build)
+
+- Core sampling: 0.58% of one core (`procyon-cli 10 1000`), 0.95% with per-process network (the 3 s TCP dump).
+- Whole app with the window open on Processes: about 1.1% of one core; 33 MB of private memory (RssAnon).
+

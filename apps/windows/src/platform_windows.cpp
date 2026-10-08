@@ -167,6 +167,8 @@ void sampler_thread_begin() {
 
 void sampler_thread_end() { CoUninitialize(); }
 
+bool tray_available() { return true; }  // the notification area is always there
+
 std::optional<int64_t> read_setting(std::wstring_view group, std::wstring_view name) {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, settings_key(group).c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)

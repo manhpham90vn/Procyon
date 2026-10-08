@@ -27,6 +27,10 @@ void create_parent_directories(std::wstring_view path);
 // The clipboard's text, empty when it holds none.
 std::wstring clipboard_text();
 
+// Whether closing the window can leave an icon to come back from (the notification area on Windows;
+// a StatusNotifierItem host on Linux, which not every desktop runs). Read on the UI thread.
+bool tray_available();
+
 // Called by the sampler thread as it starts and ends (COM apartments on Windows).
 void sampler_thread_begin();
 void sampler_thread_end();

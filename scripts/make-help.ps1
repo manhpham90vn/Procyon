@@ -1,9 +1,11 @@
 # `make help` on Windows: lists the Makefile targets with their `## ` descriptions.
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$seen = @{}
+# Only the Windows block (from "# ---- Windows" to the next "# ---- " marker).
+$inBlock = $false
 Get-Content (Join-Path $root "Makefile") | ForEach-Object {
-    if ($_ -match '^([a-z-]+):.*## (.*)$' -and -not $seen.ContainsKey($Matches[1])) {
-        $seen[$Matches[1]] = $true
+    if ($_ -match '^# ---- (\w+)') {
+        $inBlock = $Matches[1] -eq 'Windows'
+    } elseif ($inBlock -and $_ -match '^([a-z-]+):.*## (.*)$') {
         "  {0,-12} {1}" -f $Matches[1], $Matches[2]
     }
 }

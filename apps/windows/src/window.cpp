@@ -915,6 +915,10 @@ private:
                 tip += L" · ↓ " + fmt::rate(s.net_rx_bps) + L" ↑ " + fmt::rate(s.net_tx_bps);
             if ((settings_.tray_modules & 8) && !s.gpus.empty())
                 tip += L" · GPU " + fmt::percent(s.gpus[0].utilization);
+            if ((settings_.tray_modules & 16) && s.cpu_temperature >= 0)
+                tip += L" · " + fmt::temperature(s.cpu_temperature, settings_.fahrenheit);
+            if (settings_.tray_modules & 32)
+                if (auto b = store_.battery(); b && b->present) tip += L" · Battery " + fmt::percent(b->level);
         }
         wcsncpy_s(tray_.szTip, tip.c_str(), _TRUNCATE);
         tray_.uFlags = NIF_TIP;

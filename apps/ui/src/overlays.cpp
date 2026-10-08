@@ -1,7 +1,9 @@
 // Command palette (Ctrl+K) and the Get Info sheet.
 #include "overlays.hpp"
+#include "os.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include "widgets.hpp"
 
@@ -379,7 +381,7 @@ private:
         y = row(r, area, y, L"Started",
                 p.start_time > 0 ? fmt::date_time(p.start_time) : std::wstring(fmt::unavailable));
         if (p.flags & PC_PROC_SYSTEM)
-            y = row(r, area, y, L"Note", L"Windows system process: ending it needs confirmation.");
+            y = row(r, area, y, L"Note", std::wstring(os::name) + L" system process: ending it needs confirmation.");
         y += tokens::space::sm;
         if (details_) {
             y = row(r, area, y, L"Working dir", details_->cwd, true);
@@ -388,7 +390,7 @@ private:
             if (details_->info.arguments_known)
                 y = row(r, area, y, L"Command line", command, true);
             else
-                y = row(r, area, y, L"Command line", L"Not readable without administrator rights");
+                y = row(r, area, y, L"Command line", std::wstring(L"Not readable without ") + os::admin + L" rights");
             if (!details_->environment.empty()) {
                 r.panel_caption(Rect{area.x, y + 4, area.w, 20}, L"Environment");
                 y += 28;
@@ -462,8 +464,9 @@ private:
             return y;
         }
         if (!files_complete_) {
-            info_banner(r, Rect{area.x, y, area.w, 36}, L"Some handles could not be read without administrator rights.",
-                        L"", Renderer::Tone::Warning);
+            info_banner(r, Rect{area.x, y, area.w, 36},
+                        std::wstring(L"Some handles could not be read without ") + os::admin + L" rights.", L"",
+                        Renderer::Tone::Warning);
             y += 44;
         }
         for (const OpenFileCopy &f : files_) {

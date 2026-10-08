@@ -1,12 +1,36 @@
 // Startup (Run keys and Startup folders) and Services (Service Control Manager), laid out like
 // the macOS StartupView and ServicesView: header with controls, notice, table card, footnote.
 #include <algorithm>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 
+#include "os.hpp"
 #include "pages.hpp"
 #include "widgets.hpp"
 
 namespace procyon::ui {
 namespace {
+
+int compare_nocase(const char *a, const char *b) {
+#ifdef _WIN32
+    return _stricmp(a, b);
+#else
+    return strcasecmp(a, b);
+#endif
+}
+
+#if defined(_WIN32)
+const wchar_t *const kStartupSettingsUrl = L"ms-settings:startupapps";
+const wchar_t *const kStartupFootnote =
+    L"Turning an item off takes effect at the next sign-in; a running copy keeps running. Procyon writes the "
+    L"same StartupApproved setting as Task Manager, so both agree.";
+#else
+const wchar_t *const kStartupSettingsUrl = nullptr;
+const wchar_t *const kStartupFootnote =
+    L"Turning an item off takes effect at the next sign-in; a running copy keeps running. Procyon hides the entry "
+    L"in ~/.config/autostart, as GNOME and KDE settings do, so they agree.";
+#endif
 
 enum Columns { ColName = 1, ColStarts, ColStatus, ColImpact, ColEnabled, ColDomain, ColProgram };
 
@@ -90,17 +114,20 @@ public:
                            std::nullopt, &trailing);
         area.y -= kSectionGap - tokens::space::lg;
         area.h += kSectionGap - tokens::space::lg;
-        // Header controls: Task Manager's startup settings, refresh.
+        // Header controls: Windows Settings' startup apps (Linux desktops have no common page), refresh.
         refresh_button_ = Rect{trailing.right() - 28, trailing.y + 2, 28, 28};
         r.icon_button(refresh_button_, Renderer::Symbol::Refresh, theme.text_secondary(),
                       refresh_button_.contains(mx, my));
-        settings_button_ =
-            button(r, 0, trailing.y + 2, L"Startup Apps Settings…", false, false, settings_button_.contains(mx, my));
-        settings_button_ = button(r, refresh_button_.x - tokens::space::sm - settings_button_.w, trailing.y + 2,
-                                  L"Startup Apps Settings…", false, false, settings_button_.contains(mx, my));
+        settings_button_ = {};
+        if (kStartupSettingsUrl) {
+            settings_button_ = button(r, 0, trailing.y + 2, L"Startup Apps Settings…", false, false,
+                                      settings_button_.contains(mx, my));
+            settings_button_ = button(r, refresh_button_.x - tokens::space::sm - settings_button_.w, trailing.y + 2,
+                                      L"Startup Apps Settings…", false, false, settings_button_.contains(mx, my));
+        }
 
         banner_button_ = {};
-        if (!host.elevated()) {
+        if (os::machine_startup_needs_elevation && !host.elevated()) {
             const Banner b =
                 action_banner(r, area.take_top(kActionBannerHeight), L"Machine-wide startup entries are locked",
                               L"Entries for all users (HKLM and the common Startup folder) can only be switched with "
@@ -123,10 +150,8 @@ public:
         note.font = Font::Caption;
         note.wrap = true;
         note.valign = VAlign::Top;
-        r.text(
-            L"Turning an item off takes effect at the next sign-in; a running copy keeps running. Procyon writes the "
-            L"same StartupApproved setting as Task Manager, so both agree.",
-            Rect{area.x, area.bottom() + tokens::space::md, area.w, footnote}, note, theme.text_tertiary());
+        r.text(kStartupFootnote, Rect{area.x, area.bottom() + tokens::space::md, area.w, footnote}, note,
+               theme.text_tertiary());
     }
 
     void mouse_move(Host &, const MouseEvent &e) override { table_.mouse_move(e); }
@@ -136,8 +161,8 @@ public:
             activate(host);
             return;
         }
-        if (!right && settings_button_.contains(e.x, e.y)) {
-            host.open_url(L"ms-settings:startupapps");
+        if (!right && !settings_button_.empty() && settings_button_.contains(e.x, e.y)) {
+            host.open_url(kStartupSettingsUrl);
             return;
         }
         if (!banner_button_.empty() && banner_button_.contains(e.x, e.y)) {
@@ -242,9 +267,9 @@ private:
                     break;
                 }
                 case ColEnabled: order = (x.enabled ? 0 : 1) - (y.enabled ? 0 : 1); break;
-                default: order = _stricmp(x.name, y.name); break;
+                default: order = compare_nocase(x.name, y.name); break;
             }
-            if (order == 0) order = _stricmp(x.name, y.name);
+            if (order == 0) order = compare_nocase(x.name, y.name);
             return desc ? order > 0 : order < 0;
         });
         table_.select(std::min(table_.selected, static_cast<int>(filtered_.size()) - 1));
@@ -254,7 +279,7 @@ private:
         if (!host_ || row < 0 || row >= static_cast<int>(filtered_.size())) return;
         const pc_startup_item i = item(row);
         if (i.managed_by_os) {
-            host_->alert(L"Managed by Windows", L"This item can only be changed in Settings.");
+            host_->alert(std::wstring(L"Managed by ") + os::name, L"This item can only be changed in Settings.");
             return;
         }
         if (i.enabled && !host_->confirm(L"Turn off “" + fmt::from_utf8(i.name) + L"”?",
@@ -273,13 +298,16 @@ private:
         std::vector<MenuItem> items;
         items.push_back({i.enabled ? MenuDisable : MenuEnable, i.enabled ? L"Disable" : L"Enable", !i.managed_by_os});
         items.push_back({0, L"", true, false, true});
-        items.push_back({MenuOpenLocation, L"Show in Explorer", i.app_path[0] != 0});
+        items.push_back(
+            {MenuOpenLocation, std::wstring(L"Show in ") + os::file_manager, i.app_path[0] != 0 || i.program[0] != 0});
         items.push_back({MenuShowProcess, L"Show Process", i.pid > 0});
         items.push_back({MenuCopy, L"Copy Program Path"});
         switch (host_->popup_menu(items, x, y)) {
             case MenuEnable:
             case MenuDisable: toggle(row); break;
-            case MenuOpenLocation: host_->open_in_explorer(fmt::from_utf8(i.app_path)); break;
+            case MenuOpenLocation:
+                host_->open_in_explorer(fmt::from_utf8(i.app_path[0] ? i.app_path : i.program));
+                break;
             case MenuShowProcess: host_->show_info(i.pid); break;
             case MenuCopy: host_->copy_to_clipboard(fmt::from_utf8(i.program)); break;
             default: break;
@@ -363,11 +391,12 @@ public:
         area.take_top(tokens::space::lg);
 
         banner_button_ = {};
-        if (!host.elevated()) {
-            const Banner b = action_banner(
-                r, area.take_top(kActionBannerHeight), L"Services are read-only without full access",
-                L"Starting, stopping, restarting, enabling and disabling services need administrator access.",
-                L"Unlock Full Access", Renderer::Tone::Accent, banner_button_.contains(mx, my));
+        if (os::system_services_need_elevation && !host.elevated()) {
+            const Banner b =
+                action_banner(r, area.take_top(kActionBannerHeight), L"Services are read-only without full access",
+                              std::wstring(L"Starting, stopping, restarting, enabling and disabling services need ") +
+                                  os::admin + L" access.",
+                              L"Unlock Full Access", Renderer::Tone::Accent, banner_button_.contains(mx, my));
             banner_button_ = b.button;
             area.take_top(tokens::space::lg);
         }
@@ -509,10 +538,10 @@ private:
                 case ColStatus:
                     order = (x.pid > 0 ? 0 : x.enabled ? 1 : 2) - (y.pid > 0 ? 0 : y.enabled ? 1 : 2);
                     break;
-                case ColProgram: order = _stricmp(x.program, y.program); break;
-                default: order = _stricmp(x.name, y.name); break;
+                case ColProgram: order = compare_nocase(x.program, y.program); break;
+                default: order = compare_nocase(x.name, y.name); break;
             }
-            if (order == 0) order = _stricmp(x.name, y.name);
+            if (order == 0) order = compare_nocase(x.name, y.name);
             return desc ? order > 0 : order < 0;
         });
         table_.select(std::min(table_.selected, static_cast<int>(filtered_.size()) - 1));
@@ -522,8 +551,8 @@ private:
         if (!host_) return;
         if ((action == PC_SERVICE_STOP || action == PC_SERVICE_DISABLE) && s.apple &&
             !host_->confirm(std::wstring(verb) + L" " + fmt::from_utf8(s.name) + L"?",
-                            L"This service is part of Windows. Stopping it may make features unavailable until it is "
-                            L"started again.",
+                            std::wstring(L"This service is part of ") + os::name +
+                                L". Stopping it may make features unavailable until it is started again.",
                             verb, true))
             return;
         const pc_result result = host_->store().service_control(s.domain, s.label, action);
@@ -542,7 +571,7 @@ private:
             {s.enabled ? MenuDisable : MenuEnable, s.enabled ? L"Disable" : L"Enable"},
             {0, L"", true, false, true},
             {MenuShowProcess, L"Show Process", s.pid > 0},
-            {MenuOpenLocation, L"Show in Explorer", s.program[0] != 0},
+            {MenuOpenLocation, std::wstring(L"Show in ") + os::file_manager, s.program[0] != 0},
             {MenuCopy, L"Copy Service Name"},
         };
         switch (host_->popup_menu(items, x, y)) {

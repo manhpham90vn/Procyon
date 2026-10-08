@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.procyon.Procyon</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Procyon</name>
+  <summary>A lightweight task manager</summary>
+  <description>
+    <p>See what is using your CPU, memory, disk, network and GPU, find out what a process is, and
+    stop the ones you don't need. Processes, live charts, startup apps, systemd services, the last
+    24 hours of history, alerts, and the files and ports each app holds.</p>
+  </description>
+  <launchable type="desktop-id">dev.procyon.Procyon.desktop</launchable>
+  <url type="homepage">https://github.com/manhpham90vn/Procyon</url>
+  <content_rating type="oars-1.1"/>
+</component>

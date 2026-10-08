@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "os.hpp"
 #include "pages.hpp"
 
 namespace procyon::ui {
@@ -197,7 +198,9 @@ private:
             const bool hybrid = store.has(PC_CAP_HYBRID_CORES);
             std::vector<int> order(static_cast<size_t>(cores));
             for (int i = 0; i < cores; ++i) order[static_cast<size_t>(i)] = i;
-            const auto kind_of = [&](int i) { return i < 256 ? info.core_kinds[i] : PC_CORE_UNKNOWN; };
+            const auto kind_of = [&](int i) {
+                return i < 256 ? static_cast<int>(info.core_kinds[i]) : PC_CORE_UNKNOWN;
+            };
             const auto rank = [&](int i) {
                 return kind_of(i) == PC_CORE_PERFORMANCE ? 0 : kind_of(i) == PC_CORE_EFFICIENCY ? 1 : 2;
             };
@@ -555,10 +558,13 @@ private:
                                ? 0.0f
                                : static_cast<float>((row.net_rx_bps + std::max(0.0, row.net_tx_bps)) / peak);
                 });
+            if (os::process_network_note)
+                info_banner(r, stack.next(44), os::process_network_note, L"", Renderer::Tone::Neutral);
         } else {
             info_banner(r, stack.next(44),
-                        L"Procyon can't read per-app network usage on Windows yet, so it hides it instead of showing "
-                        L"estimates.",
+                        std::wstring(L"Procyon can't read per-app network usage on ") + os::name +
+                            L" yet, so it hides it instead of showing "
+                            L"estimates.",
                         L"", Renderer::Tone::Neutral);
         }
         finish(r, bounds, stack.y);
@@ -583,7 +589,7 @@ private:
                        L"%", Font::Display, theme.text(), HAlign::Right);
 
         if (s.gpus.empty()) {
-            empty_state(r, stack.next(200), L"No GPU", L"Windows reports no display adapter.");
+            empty_state(r, stack.next(200), L"No GPU", std::wstring(os::name) + L" reports no display adapter.");
         }
         for (size_t i = 0; i < s.gpus.size(); ++i) {
             const pc_gpu &g = s.gpus[i];
