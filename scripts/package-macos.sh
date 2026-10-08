@@ -18,7 +18,12 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 staging="$(mktemp -d)"
 cp -R "$APP" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname "Procyon ${VERSION}" -srcfolder "$staging" -ov -format UDZO "$DMG" >/dev/null
+# hdiutil now and then fails with "Resource busy" while something else holds the image; retry.
+for attempt in 1 2 3 4 5; do
+    hdiutil create -volname "Procyon ${VERSION}" -srcfolder "$staging" -ov -format UDZO "$DMG" >/dev/null && break
+    [ "$attempt" -lt 5 ] || exit 1
+    sleep $((attempt * 2))
+done
 rm -rf "$staging"
 
 if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ]; then

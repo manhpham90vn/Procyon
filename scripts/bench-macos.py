@@ -76,7 +76,17 @@ def dmg_size(tmp):
     staging.mkdir()
     run("cp", "-R", str(APP), str(staging))
     dmg = Path(tmp, "Procyon.dmg")
-    run("hdiutil", "create", "-volname", "Procyon", "-srcfolder", str(staging), "-format", "UDZO", str(dmg))
+    # hdiutil on CI runners now and then fails with "Resource busy" while something else holds the
+    # image; it goes through on a later try.
+    for attempt in range(5):
+        try:
+            run("hdiutil", "create", "-volname", "Procyon", "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg))
+            break
+        except subprocess.CalledProcessError as e:
+            print(f"hdiutil create failed: {e.stderr.strip()}", file=sys.stderr, flush=True)
+            if attempt == 4:
+                raise
+            time.sleep(2 * (attempt + 1))
     return dmg.stat().st_size
 
 
