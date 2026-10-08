@@ -45,7 +45,8 @@ struct AlertRule {
     bool operator!=(const AlertRule &o) const { return !(*this == o); }
 };
 
-// Every rule, persisted under HKCU\Software\Procyon\Alerts.
+// Every rule, persisted in the settings' "Alerts" group (HKCU\Software\Procyon\Alerts on Windows,
+// [Alerts] in ~/.config/procyon/settings.ini on Linux).
 struct AlertSettings {
     static constexpr double kDurations[] = {10, 30, 60, 300, 900};
 

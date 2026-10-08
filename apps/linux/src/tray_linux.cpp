@@ -99,7 +99,7 @@ constexpr const char *kMenuXml = R"xml(<node>
   </interface>
 </node>)xml";
 
-enum MenuId { MenuRoot = 0, MenuOpen = 1, MenuPause = 2, MenuSeparator = 3, MenuQuit = 4 };
+enum MenuId { MenuRoot = 0, MenuOpen = 1, MenuPause = 2, MenuSeparator = 3, MenuQuit = 4, MenuSettings = 5 };
 
 const GDBusInterfaceVTable kVTable = {&Tray::on_method, &Tray::on_property, nullptr, {}};
 
@@ -269,6 +269,7 @@ GVariant *Tray::layout() const {
     g_variant_builder_add(
         &children, "v",
         menu_item(MenuPause, {{"label", g_variant_new_string(paused_ ? "Resume updates" : "Pause updates")}}));
+    g_variant_builder_add(&children, "v", menu_item(MenuSettings, {{"label", g_variant_new_string("Settings…")}}));
     g_variant_builder_add(&children, "v", menu_item(MenuSeparator, {{"type", g_variant_new_string("separator")}}));
     g_variant_builder_add(&children, "v", menu_item(MenuQuit, {{"label", g_variant_new_string("Quit")}}));
     GVariantBuilder props;
@@ -333,6 +334,13 @@ GVariant *Tray::menu_property(const char *property) {
     return nullptr;
 }
 
+void Tray::clicked(int id) {
+    if (id == MenuOpen && callbacks_.activate) callbacks_.activate();
+    if (id == MenuPause && callbacks_.toggle_pause) callbacks_.toggle_pause();
+    if (id == MenuSettings && callbacks_.settings) callbacks_.settings();
+    if (id == MenuQuit && callbacks_.quit) callbacks_.quit();
+}
+
 void Tray::menu_method(const char *method, GVariant *parameters, GDBusMethodInvocation *invocation) {
     if (g_str_equal(method, "GetLayout")) {
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u@(ia{sv}av))", revision_, layout()));
@@ -343,9 +351,7 @@ void Tray::menu_method(const char *method, GVariant *parameters, GDBusMethodInvo
         g_dbus_method_invocation_return_value(invocation, nullptr);
         if (g_str_equal(event, "clicked")) {
             // After replying: Quit tears the object down.
-            if (id == MenuOpen && callbacks_.activate) callbacks_.activate();
-            if (id == MenuPause && callbacks_.toggle_pause) callbacks_.toggle_pause();
-            if (id == MenuQuit && callbacks_.quit) callbacks_.quit();
+            clicked(id);
         }
     } else if (g_str_equal(method, "EventGroup")) {
         GVariantIter *events = nullptr;
@@ -358,11 +364,7 @@ void Tray::menu_method(const char *method, GVariant *parameters, GDBusMethodInvo
         g_variant_iter_free(events);
         g_dbus_method_invocation_return_value(
             invocation, g_variant_new("(@ai)", g_variant_new_array(G_VARIANT_TYPE_INT32, nullptr, 0)));
-        for (int c : clicked) {
-            if (c == MenuOpen && callbacks_.activate) callbacks_.activate();
-            if (c == MenuPause && callbacks_.toggle_pause) callbacks_.toggle_pause();
-            if (c == MenuQuit && callbacks_.quit) callbacks_.quit();
-        }
+        for (int c : clicked) this->clicked(c);
     } else if (g_str_equal(method, "AboutToShow")) {
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", FALSE));
     } else if (g_str_equal(method, "AboutToShowGroup")) {

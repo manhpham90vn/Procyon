@@ -41,6 +41,10 @@ public:
     // when the device is lost (the window then repaints on the next frame).
     bool begin(Color background);
     bool end();
+    // The next end() also writes the frame to a PNG at `path` (--screenshot), opaque, at the
+    // window's pixel size. captured() says whether that worked.
+    void capture_next_frame(std::wstring path) { capture_path_ = std::move(path); }
+    bool captured() const { return captured_; }
 
     // ---- Canvas ----
     float dpi() const override { return dpi_; }
@@ -76,6 +80,7 @@ private:
         }
     };
 
+    bool save_back_buffer(const std::wstring &path);
     bool create_device();
     bool create_swap_chain();
     bool bind_back_buffer();
@@ -136,6 +141,8 @@ private:
     ComPtr<IDWriteTypography> tabular_;                              // tabular figures, shared by every layout
     std::unordered_map<LayoutKey, CachedLayout, LayoutKeyHash> layouts_;
     uint32_t frame_ = 0;  // counts begin(); stamps the layouts a frame used
+    std::wstring capture_path_;
+    bool captured_ = false;
     std::wstring ui_family_, display_family_, mono_family_;
     ComPtr<IDWriteFactory6> dwrite6_;                // variable-font text formats (Windows 10 1809+)
     ComPtr<IDWriteFontCollection2> embedded_fonts_;  // the bundled Inter and Nunito; null when they could not load

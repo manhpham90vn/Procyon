@@ -2,12 +2,17 @@
 // colour scheme, XDG folders for data and settings, the GDK clipboard.
 #include <gio/gdesktopappinfo.h>
 #include <gtk/gtk.h>
+#include <pwd.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "platform.hpp"
 #include "platform_linux.hpp"
@@ -15,11 +20,41 @@
 namespace procyon::ui::platform {
 namespace {
 
+// The user this copy works for: the one who unlocked full access when pkexec started it as root
+// (PKEXEC_UID), so the root copy keeps their settings and history; else the real user.
+const passwd *pkexec_caller() {
+    static passwd entry{};
+    static char buffer[4096];
+    static const passwd *caller = []() -> const passwd * {
+        if (::geteuid() != 0) return nullptr;
+        const char *value = std::getenv("PKEXEC_UID");
+        if (!value || !*value) return nullptr;
+        char *end = nullptr;
+        const unsigned long uid = std::strtoul(value, &end, 10);
+        if (!end || *end != '\0' || uid == 0) return nullptr;
+        passwd *result = nullptr;
+        return ::getpwuid_r(static_cast<uid_t>(uid), &entry, buffer, sizeof(buffer), &result) == 0 ? result : nullptr;
+    }();
+    return caller;
+}
+
+std::string home_folder() {
+    if (const passwd *caller = pkexec_caller(); caller && caller->pw_dir) return caller->pw_dir;
+    const char *home = std::getenv("HOME");
+    return home ? home : "/tmp";
+}
+
 std::string xdg_dir(const char *variable, const char *fallback) {
+    // pkexec passes the caller's XDG_CONFIG_HOME/XDG_DATA_HOME through when they set them.
     const char *value = std::getenv(variable);
     if (value && *value == '/') return value;
-    const char *home = std::getenv("HOME");
-    return std::string(home ? home : "/tmp") + "/" + fallback;
+    return home_folder() + "/" + fallback;
+}
+
+void give_back(const std::string &path) {
+    // Best effort: a file the user can't own stays root's and is rewritten next time as a new file.
+    const passwd *caller = pkexec_caller();
+    if (caller && ::lchown(path.c_str(), caller->pw_uid, caller->pw_gid) != 0) return;
 }
 
 std::string settings_path() { return xdg_dir("XDG_CONFIG_HOME", ".config") + "/procyon/settings.ini"; }
@@ -44,6 +79,17 @@ struct AppIcons {
 std::string lower(std::string s) {
     for (char &c : s) c = static_cast<char>(g_ascii_tolower(c));
     return s;
+}
+
+// Programs that run many different apps' code: their name alone says nothing about which app a
+// process is, so it never picks an icon (a desktop entry running "python3 tool.py" would otherwise
+// give every Python process its icon).
+bool interpreter(const std::string &name) {
+    if (name.rfind("python", 0) == 0) return true;
+    for (const char *i : {"sh", "bash", "dash", "zsh", "env", "perl", "ruby", "node", "java", "electron", "flatpak",
+                          "snap", "gjs", "wine", "mono", "dotnet"})
+        if (name == i) return true;
+    return false;
 }
 
 const AppIcons &app_icons() {
@@ -71,11 +117,13 @@ const AppIcons &app_icons() {
                 }
             }
             char *base = g_path_get_basename(program.c_str());
-            add(lower(base));
+            if (!interpreter(lower(base))) add(lower(base));
             g_free(base);
             if (const char *wm = g_desktop_app_info_get_startup_wm_class(G_DESKTOP_APP_INFO(info))) add(lower(wm));
             if (char *found = g_find_program_in_path(program.c_str())) {
                 if (char *resolved = realpath(found, nullptr)) {
+                    if (!interpreter(lower(program.substr(program.find_last_of('/') + 1))))
+                        add(std::string("path:") + resolved);
                     char *dir = g_path_get_dirname(resolved);
                     const std::string d = dir;
                     if (d != "/usr/bin" && d != "/bin" && d != "/usr/local/bin" && d != "/usr/sbin" && d != "/snap/bin")
@@ -123,13 +171,18 @@ std::shared_ptr<const Image> app_icon(std::wstring_view path, int pixels) {
     if (path.empty() || pixels <= 0) return nullptr;
     const std::string file = fmt::to_utf8(path);
     const auto &icons = app_icons().by_key;
-    char *base = g_path_get_basename(file.c_str());
-    auto it = icons.find(lower(base));
-    g_free(base);
+    // The executable itself first, then the folder an app is installed in, then its name.
+    auto it = icons.find("path:" + file);
     if (it == icons.end()) {
         char *dir = g_path_get_dirname(file.c_str());
         it = icons.find(std::string("dir:") + dir);
         g_free(dir);
+    }
+    if (it == icons.end()) {
+        char *base = g_path_get_basename(file.c_str());
+        const std::string name = lower(base);
+        g_free(base);
+        if (!interpreter(name)) it = icons.find(name);
     }
     if (it == icons.end()) return nullptr;
     GdkDisplay *display = gdk_display_get_default();
@@ -154,8 +207,10 @@ std::shared_ptr<const Image> app_icon(std::wstring_view path, int pixels) {
     return image;
 }
 
-bool system_prefers_dark() {
-    // GNOME (and the desktops that follow its setting): org.gnome.desktop.interface color-scheme.
+namespace {
+
+// org.gnome.desktop.interface, where it has the color-scheme key (GNOME and the desktops that follow it).
+GSettings *interface_settings() {
     static GSettings *interface = []() -> GSettings * {
         GSettingsSchemaSource *source = g_settings_schema_source_get_default();
         GSettingsSchema *schema =
@@ -165,7 +220,45 @@ bool system_prefers_dark() {
         g_settings_schema_unref(schema);
         return has_key ? g_settings_new("org.gnome.desktop.interface") : nullptr;
     }();
-    if (interface) {
+    return interface;
+}
+
+// GTK's dark preference as the desktop set it, before set_gtk_dark changed it for Procyon's windows.
+std::optional<bool> desktop_prefers_dark_gtk;
+
+bool gtk_prefers_dark(GtkSettings *settings) {
+    if (desktop_prefers_dark_gtk) return *desktop_prefers_dark_gtk;
+    gboolean prefer_dark = FALSE;
+    g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, nullptr);
+    return prefer_dark;
+}
+
+}  // namespace
+
+void set_gtk_dark(bool dark) {
+    GtkSettings *settings = gtk_settings_get_default();
+    if (!settings) return;
+    if (!desktop_prefers_dark_gtk) desktop_prefers_dark_gtk = gtk_prefers_dark(settings);
+    gboolean current = FALSE;
+    g_object_get(settings, "gtk-application-prefer-dark-theme", &current, nullptr);
+    if (static_cast<bool>(current) != dark)
+        g_object_set(settings, "gtk-application-prefer-dark-theme", dark ? TRUE : FALSE, nullptr);
+}
+
+void watch_color_scheme(std::function<void()> changed) {
+    static std::function<void()> callback;
+    callback = std::move(changed);
+    const auto notify = +[](gpointer, gpointer, gpointer) {
+        if (callback) callback();
+    };
+    if (GSettings *interface = interface_settings())
+        g_signal_connect(interface, "changed::color-scheme", G_CALLBACK(notify), nullptr);
+    if (GtkSettings *settings = gtk_settings_get_default())
+        g_signal_connect(settings, "notify::gtk-theme-name", G_CALLBACK(notify), nullptr);
+}
+
+bool system_prefers_dark() {
+    if (GSettings *interface = interface_settings()) {
         gchar *scheme = g_settings_get_string(interface, "color-scheme");
         const bool dark = scheme && g_strcmp0(scheme, "prefer-dark") == 0;
         const bool light = scheme && g_strcmp0(scheme, "prefer-light") == 0;
@@ -174,10 +267,9 @@ bool system_prefers_dark() {
     }
     // Elsewhere: GTK's own preference, or a theme named "…-dark".
     if (GtkSettings *settings = gtk_settings_get_default()) {
-        gboolean prefer_dark = FALSE;
         gchar *theme = nullptr;
-        g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, "gtk-theme-name", &theme, nullptr);
-        const bool dark = prefer_dark || (theme && g_str_has_suffix(theme, "-dark"));
+        g_object_get(settings, "gtk-theme-name", &theme, nullptr);
+        const bool dark = gtk_prefers_dark(settings) || (theme && g_str_has_suffix(theme, "-dark"));
         g_free(theme);
         return dark;
     }
@@ -190,9 +282,20 @@ std::wstring data_file(std::wstring_view name) {
 
 void create_parent_directories(std::wstring_view path) {
     char *dir = g_path_get_dirname(fmt::to_utf8(path).c_str());
+    // The folders this call creates, outermost last, to hand back to the pkexec caller.
+    std::vector<std::string> created;
+    for (std::string d = dir; !d.empty() && d != "/" && !g_file_test(d.c_str(), G_FILE_TEST_EXISTS);) {
+        created.push_back(d);
+        char *parent = g_path_get_dirname(d.c_str());
+        d = parent;
+        g_free(parent);
+    }
     g_mkdir_with_parents(dir, 0700);
+    for (const std::string &d : created) give_back(d);
     g_free(dir);
 }
+
+void file_written(std::wstring_view path) { give_back(fmt::to_utf8(path)); }
 
 std::wstring clipboard_text() {
     GdkDisplay *display = gdk_display_get_default();
@@ -250,7 +353,7 @@ void write_setting(std::wstring_view group, std::wstring_view name, int64_t valu
     g_key_file_set_int64(file, g.c_str(), key.c_str(), value);
     const std::string path = settings_path();
     create_parent_directories(fmt::from_utf8(path));
-    g_key_file_save_to_file(file, path.c_str(), nullptr);
+    if (g_key_file_save_to_file(file, path.c_str(), nullptr)) give_back(path);
 }
 
 }  // namespace procyon::ui::platform

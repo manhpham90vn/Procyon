@@ -14,6 +14,7 @@ public:
     struct Callbacks {
         std::function<void()> activate;  // left click: open or hide the window
         std::function<void()> toggle_pause;
+        std::function<void()> settings;  // Settings…: the window on its Settings page
         std::function<void()> quit;
     };
 
@@ -40,6 +41,7 @@ public:
                                  const char *property, GError **, gpointer self);
 
 private:
+    void clicked(int id);  // a menu item, by its MenuId
     void item_method(const char *method, GVariant *parameters, GDBusMethodInvocation *invocation);
     void menu_method(const char *method, GVariant *parameters, GDBusMethodInvocation *invocation);
     GVariant *item_property(const char *property);

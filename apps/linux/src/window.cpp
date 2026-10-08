@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <vector>
 
@@ -88,8 +89,13 @@ public:
         int width = 1280, height = 800;
     };
 
-    MainWindow(GtkApplication *app, std::optional<PageId> initial, bool persist, std::optional<Screenshot> screenshot)
-        : app_(app), initial_page_(initial), persist_(persist), screenshot_(std::move(screenshot)) {}
+    MainWindow(GtkApplication *app, std::optional<PageId> initial, bool persist, std::optional<Screenshot> screenshot,
+               bool background = false)
+        : app_(app),
+          initial_page_(initial),
+          persist_(persist),
+          screenshot_(std::move(screenshot)),
+          start_in_background_(background) {}
 
     ~MainWindow() override { *alive_ = false; }
 
@@ -183,32 +189,54 @@ public:
             return true;
         });
         navigate(initial_page_.value_or(PageId::Overview));
-        if (!screenshot_) {
-            tray_ = std::make_unique<Tray>(
-                Tray::Callbacks{[this] { hidden_ ? present() : gtk_window_present(GTK_WINDOW(window_)); },
-                                [this] { set_paused(!store_.paused()); }, [this] { quit(); }});
-        }
+        if (!screenshot_) make_tray();
+        // A "System" appearance follows the desktop at once, also while paused and idle.
+        if (!screenshot_) platform::watch_color_scheme([this] { repaint(); });
         if (screenshot_) {
             settings_.theme = screenshot_->theme;
             g_application_hold(G_APPLICATION(app_));
             held_ = true;
             return;
         }
+        // --background: running without a window from the start, as when it was closed (the macOS app's
+        // -launchInMenuBar); measured by scripts/bench-linux.py.
+        if (start_in_background_) {
+            hide_window();
+            return;
+        }
         gtk_window_present(GTK_WINDOW(window_));
         gtk_widget_grab_focus(area_);
     }
 
-    // A second launch while Procyon runs in the background brings the window back.
+    void make_tray() {
+        tray_ = std::make_unique<Tray>(
+            Tray::Callbacks{[this] { hidden_ ? present() : gtk_window_present(GTK_WINDOW(window_)); },
+                            [this] { set_paused(!store_.paused()); },
+                            [this] {
+                                present();
+                                navigate(PageId::Settings);
+                            },
+                            [this] { quit(); }});
+        if (store_.paused()) tray_->set_paused(true);
+    }
+
+    bool failed() const { return failed_; }
+
+    // A second launch while Procyon runs in the background brings the window back. While the root
+    // copy runs in this one's place, that copy's window is the one to use: this one stays hidden.
     void present() {
+        if (handed_over_) return;
         if (hidden_) show_again();
         gtk_window_present(GTK_WINDOW(window_));
     }
 
     void shutdown() {
         if (!window_) return;
-        save_settings();
+        // After the root copy took over, its settings and history are the current ones: this copy
+        // writes neither.
+        if (!handed_over_) save_settings();
         store_.stop();
-        store_.flush_history();  // the minute in progress would otherwise go with the process
+        if (!handed_over_) store_.flush_history();  // the minute in progress would otherwise go with the process
         if (held_) g_application_release(G_APPLICATION(app_));
         held_ = false;
         tray_.reset();
@@ -245,6 +273,11 @@ public:
     float mouse_y() override { return overlays_.empty() ? mouse_y_ : -1; }
 
     void navigate(PageId id) override {
+        // A screen this machine doesn't have (a shortcut, --page): stay, or start on Overview.
+        if (!page_available(store_, id)) {
+            if (current_) return;
+            id = PageId::Overview;
+        }
         for (auto &page : pages_) {
             if (page->id() != id) continue;
             current_ = page.get();
@@ -345,7 +378,10 @@ public:
         if (n <= 0) return;
         exe[n] = '\0';
         std::vector<std::string> args{"pkexec", "env"};
-        for (const char *name : {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP"})
+        // The display, and the user's own config and data folders: the root copy reads the same
+        // settings and keeps the same history (pkexec resets HOME; PKEXEC_UID names the user).
+        for (const char *name : {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP",
+                                 "XDG_CONFIG_HOME", "XDG_DATA_HOME"})
             if (const char *value = g_getenv(name)) args.push_back(std::string(name) + "=" + value);
         args.emplace_back(exe);
         args.emplace_back("--page");
@@ -354,6 +390,7 @@ public:
         for (auto &a : args) argv.push_back(a.data());
         argv.push_back(nullptr);
         save_settings();
+        store_.flush_history();
         GPid child = 0;
         GError *error = nullptr;
         if (!g_spawn_async(nullptr, argv.data(), nullptr,
@@ -363,17 +400,30 @@ public:
             if (error) g_error_free(error);
             return;
         }
+        // Hand over to the root copy: one tray icon, one sampler, one writer of the settings and the
+        // history. This copy waits hidden, without updates, until the root copy ends.
+        handed_over_ = true;
+        paused_before_handover_ = store_.paused();
+        store_.set_paused(true);
+        store_.set_records_history(false);
+        tray_.reset();
         hide_window();
+        handover_started_ = g_get_monotonic_time();
         g_child_watch_add(
             child,
             [](GPid pid, gint status, gpointer self) {
                 g_spawn_close_pid(pid);
                 auto *w = static_cast<MainWindow *>(self);
-                // 126: the authorization dialog was dismissed; 127: not authorized.
+                // 126: the authorization dialog was dismissed; 127: not authorized. A root copy that
+                // fails within seconds of starting didn't get to show a window either.
                 const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-                if (code == 126 || code == 127) {
-                    w->show_again();
-                    gtk_window_present(GTK_WINDOW(w->window_));
+                const bool early = g_get_monotonic_time() - w->handover_started_ < 5 * G_USEC_PER_SEC;
+                if (code == 126 || code == 127 || (code != 0 && early)) {
+                    w->take_back();
+                    if (code != 126 && code != 127)
+                        w->alert(L"Couldn't run Procyon as root", L"The root copy stopped as it started (exit status " +
+                                                                      std::to_wstring(code) +
+                                                                      L"). Procyon keeps running as your user.");
                 } else {
                     w->quit();
                 }
@@ -536,9 +586,9 @@ private:
 
         GtkEventController *keys = gtk_event_controller_key_new();
         g_signal_connect(keys, "key-pressed",
-                         G_CALLBACK(+[](GtkEventControllerKey *, guint keyval, guint, GdkModifierType state,
+                         G_CALLBACK(+[](GtkEventControllerKey *, guint keyval, guint keycode, GdkModifierType state,
                                         gpointer self) -> gboolean {
-                             return static_cast<MainWindow *>(self)->on_key(keyval, state);
+                             return static_cast<MainWindow *>(self)->on_key(keyval, keycode, state);
                          }),
                          this);
         gtk_widget_add_controller(area_, keys);
@@ -648,14 +698,19 @@ private:
     }
 
     // The accelerator table of the Windows app (res/Procyon.rc), plus Ctrl+Q.
-    int shortcut(guint keyval, bool ctrl, bool shift, bool alt) const {
+    int shortcut(guint keyval, guint keycode, bool ctrl, bool shift, bool alt) const {
         const guint key = gdk_keyval_to_lower(keyval);
         if (ctrl && !alt && !shift) {
-            if (key >= GDK_KEY_1 && key <= GDK_KEY_9) {
+            // Ctrl+1…9 by the key's place on the number row, like the Windows app's virtual keys: on
+            // layouts whose digits need Shift (AZERTY) the unshifted keyval is "&", "é", ….
+            // XKB keycodes 10-18 are the row's 1-9 keys whatever the layout.
+            guint digit = key >= GDK_KEY_1 && key <= GDK_KEY_9 ? key - GDK_KEY_1 : 9;
+            if (digit == 9 && keycode >= 10 && keycode <= 18) digit = keycode - 10;
+            if (digit < 9) {
                 static const int pages[] = {IDM_PAGE_OVERVIEW, IDM_PAGE_PROCESSES, IDM_PAGE_CPU,
                                             IDM_PAGE_MEMORY,   IDM_PAGE_GPU,       IDM_PAGE_DISK,
                                             IDM_PAGE_NETWORK,  IDM_PAGE_STARTUP,   IDM_PAGE_SERVICES};
-                return pages[key - GDK_KEY_1];
+                return pages[digit];
             }
             switch (key) {
                 case GDK_KEY_k: return IDM_PALETTE;
@@ -675,7 +730,7 @@ private:
         return 0;
     }
 
-    gboolean on_key(guint keyval, GdkModifierType state) {
+    gboolean on_key(guint keyval, guint keycode, GdkModifierType state) {
         const bool ctrl = (state & GDK_CONTROL_MASK) != 0, shift = (state & GDK_SHIFT_MASK) != 0,
                    alt = (state & GDK_ALT_MASK) != 0;
         KeyEvent e;
@@ -687,11 +742,12 @@ private:
         e.shift = shift;
         e.alt = alt;
 
-        // A search field keeps Delete, Backspace and Return for itself.
+        // A search field keeps Delete, Backspace and Return for itself, also with Ctrl (Ctrl+Backspace
+        // deletes a word there), as the macOS app turns End Task off while its search field has focus.
         const bool text_input = !overlays_.empty() || (current_ && current_->search_focused());
         const bool editing_key = e.key == Key::Delete || e.key == Key::Back || e.key == Key::Return;
-        if (!(text_input && editing_key && !ctrl)) {
-            if (const int command = shortcut(keyval, ctrl, shift, alt)) {
+        if (!(text_input && editing_key)) {
+            if (const int command = shortcut(keyval, keycode, ctrl, shift, alt)) {
                 on_command(command);
                 repaint();
                 return TRUE;
@@ -768,15 +824,11 @@ private:
             case IDM_PAGE_PROCESSES: navigate(PageId::Processes); break;
             case IDM_PAGE_CPU: navigate(PageId::Cpu); break;
             case IDM_PAGE_MEMORY: navigate(PageId::Memory); break;
-            case IDM_PAGE_GPU:
-                if (store_.has(PC_CAP_GPU)) navigate(PageId::Gpu);
-                break;
+            case IDM_PAGE_GPU: navigate(PageId::Gpu); break;
             case IDM_PAGE_DISK: navigate(PageId::Disk); break;
             case IDM_PAGE_NETWORK: navigate(PageId::Network); break;
             case IDM_PAGE_STARTUP: navigate(PageId::Startup); break;
-            case IDM_PAGE_SERVICES:
-                if (store_.has(PC_CAP_SERVICES)) navigate(PageId::Services);
-                break;
+            case IDM_PAGE_SERVICES: navigate(PageId::Services); break;
             case IDM_PAGE_HISTORY: navigate(PageId::History); break;
             case IDM_PAGE_INSPECT: navigate(PageId::Inspect); break;
             case IDM_PAGE_SYSTEM: navigate(PageId::System); break;
@@ -809,22 +861,37 @@ private:
     }
 
     void open_palette() {
+        // Ctrl+K again closes it, as ⌘K toggles the macOS palette.
+        bool was_open = false;
+        for (auto &overlay : overlays_)
+            if (overlay->is_palette() && !overlay->closed()) {
+                overlay->close();
+                was_open = true;
+            }
+        if (was_open) {
+            overlays_.erase(
+                std::remove_if(overlays_.begin(), overlays_.end(), [](const auto &o) { return o->closed(); }),
+                overlays_.end());
+            repaint();
+            return;
+        }
         std::vector<PaletteItem> items;
         auto screen = [&](PageId id, const wchar_t *title, const wchar_t *shortcut) {
+            if (!page_available(store_, id)) return;
             items.push_back({PaletteItem::Kind::Screen, title, L"", shortcut, [this, id] { navigate(id); }});
         };
         screen(PageId::Overview, L"Overview", L"Ctrl+1");
         screen(PageId::Processes, L"Processes", L"Ctrl+2");
         screen(PageId::Cpu, L"CPU", L"Ctrl+3");
         screen(PageId::Memory, L"Memory", L"Ctrl+4");
-        if (store_.has(PC_CAP_GPU)) screen(PageId::Gpu, L"GPU", L"Ctrl+5");
+        screen(PageId::Gpu, L"GPU", L"Ctrl+5");
         screen(PageId::Disk, L"Disk", L"Ctrl+6");
         screen(PageId::Network, L"Network", L"Ctrl+7");
         screen(PageId::Startup, L"Startup", L"Ctrl+8");
-        if (store_.has(PC_CAP_SERVICES)) screen(PageId::Services, L"Services", L"Ctrl+9");
+        screen(PageId::Services, L"Services", L"Ctrl+9");
         screen(PageId::History, L"History", L"");
         screen(PageId::Inspect, L"Files & Ports", L"");
-        if (store_.has(PC_CAP_BATTERY)) screen(PageId::Battery, L"Battery", L"");
+        screen(PageId::Battery, L"Battery", L"");
         screen(PageId::System, L"System", L"");
         screen(PageId::Settings, L"Settings", L"Ctrl+,");
         items.push_back({PaletteItem::Kind::Command, store_.paused() ? L"Resume updates" : L"Pause updates", L"",
@@ -859,9 +926,10 @@ private:
                                                      : L"";
             const int32_t pid = row.is_group() ? row.group_pid : p ? p->pid : 0;
             if (name.empty() || pid <= 0) continue;
+            // Opens the app's actions, the macOS palette's second level.
             PaletteItem item{PaletteItem::Kind::App, name,
-                             L"CPU " + fmt::cpu(row.cpu_percent) + L" · " + fmt::bytes(row.memory_bytes), L"",
-                             [this, pid] { show_info(pid); }};
+                             L"CPU " + fmt::cpu(row.cpu_percent) + L" · " + fmt::bytes(row.memory_bytes), L"", nullptr};
+            item.children = app_palette_actions(*this, row, p, name, [this](int id) { on_command(id); });
             item.icon_path = app_icon_path(row, p, s);
             item.icon_system = p && (p->flags & PC_PROC_SYSTEM) != 0;
             items.push_back(std::move(item));
@@ -901,19 +969,19 @@ private:
         section(L"Performance");
         metric(PageId::Cpu, L"CPU", MetricKind::Cpu);
         metric(PageId::Memory, L"Memory", MetricKind::Memory);
-        if (store_.has(PC_CAP_GPU)) metric(PageId::Gpu, L"GPU", MetricKind::Gpu);
+        if (page_available(store_, PageId::Gpu)) metric(PageId::Gpu, L"GPU", MetricKind::Gpu);
         metric(PageId::Disk, L"Disk", MetricKind::Disk);
         metric(PageId::Network, L"Network", MetricKind::Network);
-        if (store_.has(PC_CAP_STARTUP) || store_.has(PC_CAP_SERVICES)) {
+        if (page_available(store_, PageId::Startup) || page_available(store_, PageId::Services)) {
             section(L"Manage");
-            if (store_.has(PC_CAP_STARTUP)) page(PageId::Startup, L"Startup", Renderer::Symbol::Power);
-            if (store_.has(PC_CAP_SERVICES)) page(PageId::Services, L"Services", Renderer::Symbol::Gears);
+            if (page_available(store_, PageId::Startup)) page(PageId::Startup, L"Startup", Renderer::Symbol::Power);
+            if (page_available(store_, PageId::Services)) page(PageId::Services, L"Services", Renderer::Symbol::Gears);
         }
         section(L"Analyze");
         page(PageId::History, L"History", Renderer::Symbol::Clock);
-        if (store_.has(PC_CAP_CONNECTIONS)) page(PageId::Inspect, L"Files & Ports", Renderer::Symbol::Ports);
+        if (page_available(store_, PageId::Inspect)) page(PageId::Inspect, L"Files & Ports", Renderer::Symbol::Ports);
         section(L"Machine");
-        if (store_.has(PC_CAP_BATTERY)) page(PageId::Battery, L"Battery", Renderer::Symbol::Gauge);
+        if (page_available(store_, PageId::Battery)) page(PageId::Battery, L"Battery", Renderer::Symbol::Gauge);
         page(PageId::System, L"System", Renderer::Symbol::Info);
     }
 
@@ -924,19 +992,17 @@ private:
             case PageId::Overview: return display_model(info);
             case PageId::Processes: return store_.has_snapshot() ? fmt::count(s.process_count) + L" running" : L" ";
             case PageId::Startup: return L"Apps that start at login";
-            case PageId::Services: return L"systemd services";
+            case PageId::Services: return L"Background services";
             case PageId::History: return store_.records_history() ? L"The last 24 hours" : L"Off";
             case PageId::Inspect: return L"Who uses a port or a file";
             case PageId::Battery: {
-                if (auto b = store_.battery())
-                    return fmt::percent(b->level) + L" · " +
-                           (b->charging      ? L"Charging"
-                            : b->on_ac_power ? L"On AC power"
-                                             : L"On battery");
+                if (auto b = store_.battery()) return fmt::percent(b->level) + L" · " + battery_state(*b);
                 return L"";
             }
             case PageId::System: return fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version);
-            case PageId::Settings: return L"Updates, alerts, appearance";
+            case PageId::Settings:
+                return platform::tray_available() ? L"Updates, tray, alerts, appearance"
+                                                  : L"Updates, alerts, appearance";
             default: return L"";
         }
     }
@@ -944,6 +1010,15 @@ private:
     void paint(cairo_t *cr, int width, int height, float scale = 0) {
         const bool dark = settings_.theme == 2 || (settings_.theme == 0 && platform::system_prefers_dark());
         theme_.dark = dark;
+        if (!screenshot_) platform::set_gtk_dark(dark);
+        // PROCYON_BENCH: tell the benchmark when the first frame is drawn (its startup measurement).
+        if (!first_frame_reported_ && !screenshot_) {
+            first_frame_reported_ = true;
+            if (g_getenv("PROCYON_BENCH")) {
+                std::fputs("procyon: first frame\n", stderr);
+                std::fflush(stderr);
+            }
+        }
         renderer_.set_theme(theme_);
         if (scale <= 0) {
             scale = 1;
@@ -1105,14 +1180,14 @@ private:
                 options.end_dot = false;
                 options.halo = false;
                 options.line_width = 1.25f;
-                r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, series->data(), series->size(), kHistoryWindow,
-                            max, item.metric, options);
+                r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, series->data(), series->size(),
+                            history_window(), max, item.metric, options);
                 if (secondary && secondary->size() > 1) {
                     options.area = false;
                     Color end = rgba(metric_style(item.metric).end);
                     options.color_override = &end;
                     r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, secondary->data(), secondary->size(),
-                                kHistoryWindow, max, item.metric, options);
+                                history_window(), max, item.metric, options);
                 }
             }
         }
@@ -1149,7 +1224,10 @@ private:
         cairo_destroy(cr);
         const cairo_status_t status = cairo_surface_write_to_png(surface, shot.path.c_str());
         cairo_surface_destroy(surface);
-        if (status != CAIRO_STATUS_SUCCESS) g_printerr("procyon: couldn't write %s\n", shot.path.c_str());
+        if (status != CAIRO_STATUS_SUCCESS) {
+            g_printerr("procyon: couldn't write %s\n", shot.path.c_str());
+            failed_ = true;  // a non-zero exit status, so CI notices
+        }
         quit();
     }
 
@@ -1184,14 +1262,12 @@ private:
             tip += (tip.empty() ? L"" : L" · ") + long_form;
         };
         const int modules = settings_.tray_modules;
-        if (store_.paused()) {
-            tip = L"Paused";
-        } else if (store_.has_snapshot()) {
+        // Paused, the last figures stay (as the macOS menu bar keeps them) and the tooltip says so.
+        if (store_.has_snapshot()) {
             if (modules & 1) add(L"CPU " + fmt::percent(s.cpu_usage), L"CPU 100%", L"CPU " + fmt::percent(s.cpu_usage));
             if (modules & 2) {
                 const double used = s.memory_total ? static_cast<double>(s.memory_used) / s.memory_total : 0;
-                add(L"MEM " + fmt::percent(used), L"MEM 100%",
-                    L"Memory " + fmt::bytes(static_cast<int64_t>(s.memory_used)));
+                add(L"MEM " + fmt::percent(used), L"MEM 100%", L"Memory " + fmt::percent(used));
             }
             if (modules & 4)
                 add(L"↓" + compact_rate(s.net_rx_bps) + L" ↑" + compact_rate(s.net_tx_bps), L"↓888M ↑888M",
@@ -1207,6 +1283,7 @@ private:
                 if (auto b = store_.battery(); b && b->present)
                     add(L"BAT " + fmt::percent(b->level), L"BAT 100%", L"Battery " + fmt::percent(b->level));
         }
+        if (store_.paused()) tip = tip.empty() ? L"Paused" : L"Paused · " + tip;
         tray_->set_label(fmt::to_utf8(label), fmt::to_utf8(guide));
         tray_->set_tooltip(fmt::to_utf8(tip));
     }
@@ -1216,7 +1293,11 @@ private:
         GNotification *notification = g_notification_new(fmt::to_utf8(event.title).c_str());
         g_notification_set_body(notification, fmt::to_utf8(event.message).c_str());
         g_notification_set_priority(notification, G_NOTIFICATION_PRIORITY_HIGH);
-        g_application_send_notification(G_APPLICATION(app_), "procyon-alert", notification);
+        // One notification per rule (and app): different alerts stand side by side, as on macOS and
+        // Windows, while a rule that fires again after its cooldown replaces its own older one.
+        const std::string id = "alert-" + std::to_string(static_cast<int>(event.kind)) +
+                               (event.app_id.empty() ? std::string() : "-" + event.app_id);
+        g_application_send_notification(G_APPLICATION(app_), id.c_str(), notification);
         g_object_unref(notification);
         repaint();
     }
@@ -1258,6 +1339,17 @@ private:
     void quit() {
         quit_ = true;
         shutdown();
+    }
+
+    // The root copy didn't take over (authorization dismissed, or it failed to start): this copy
+    // resumes as it was.
+    void take_back() {
+        handed_over_ = false;
+        store_.set_records_history(settings_.records_history);
+        store_.set_paused(paused_before_handover_);
+        if (!screenshot_) make_tray();
+        show_again();
+        gtk_window_present(GTK_WINDOW(window_));
     }
 
     static bool can_elevate() {
@@ -1322,7 +1414,13 @@ private:
     bool persist_ = true;
     std::optional<Screenshot> screenshot_;
     int screenshot_samples_ = 0;
+    bool failed_ = false;
+    bool start_in_background_ = false;
+    bool first_frame_reported_ = false;
     std::unique_ptr<Tray> tray_;
+    bool handed_over_ = false;  // a root copy runs in this one's place
+    bool paused_before_handover_ = false;
+    gint64 handover_started_ = 0;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     GtkWidget *window_ = nullptr;
     GtkWidget *area_ = nullptr;
@@ -1352,6 +1450,7 @@ private:
 struct App {
     std::optional<PageId> initial;
     bool persist = true;
+    bool background = false;
     std::optional<MainWindow::Screenshot> screenshot;
     std::unique_ptr<MainWindow> window;
 };
@@ -1367,6 +1466,8 @@ int run_app(int argc, char **argv) {
             app.initial = page_from_name(argv[++i]);
         else if (arg == "--no-settings")
             app.persist = false;
+        else if (arg == "--background")
+            app.background = true;
         else if (arg == "--screenshot" && i + 1 < argc) {
             if (!app.screenshot) app.screenshot.emplace();
             app.screenshot->path = argv[++i];
@@ -1381,8 +1482,9 @@ int run_app(int argc, char **argv) {
     }
     g_set_prgname(kAppId);
     g_set_application_name("Procyon");
-    // One instance per user session; the root copy (Full access) and screenshots run beside it.
-    const bool separate = ::geteuid() == 0 || (app.screenshot && !app.screenshot->path.empty());
+    // One instance per user session; the root copy (Full access), screenshots and measurements
+    // (--no-settings) run beside it.
+    const bool separate = ::geteuid() == 0 || (app.screenshot && !app.screenshot->path.empty()) || !app.persist;
     GtkApplication *gtk_app =
         gtk_application_new(kAppId, separate ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(gtk_app, "activate", G_CALLBACK(+[](GtkApplication *a, gpointer data) {
@@ -1391,13 +1493,14 @@ int run_app(int argc, char **argv) {
                              state->window->present();
                              return;
                          }
-                         state->window =
-                             std::make_unique<MainWindow>(a, state->initial, state->persist, state->screenshot);
+                         state->window = std::make_unique<MainWindow>(a, state->initial, state->persist,
+                                                                      state->screenshot, state->background);
                          state->window->create();
                      }),
                      &app);
     char *gtk_argv[] = {argv[0], nullptr};
-    const int status = g_application_run(G_APPLICATION(gtk_app), 1, gtk_argv);
+    int status = g_application_run(G_APPLICATION(gtk_app), 1, gtk_argv);
+    if (app.window && app.window->failed() && status == 0) status = 1;
     if (app.window) app.window->shutdown();
     app.window.reset();
     g_object_unref(gtk_app);

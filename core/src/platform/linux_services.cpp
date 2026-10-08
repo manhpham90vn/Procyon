@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -29,7 +30,11 @@ const std::string &systemctl() {
 
 std::vector<std::string> systemctl_args(int32_t domain, std::initializer_list<std::string> args) {
     std::vector<std::string> argv{systemctl()};
-    if (domain == PC_DOMAIN_USER) argv.emplace_back("--user");
+    if (domain == PC_DOMAIN_USER) {
+        argv.emplace_back("--user");
+        // The root copy (pkexec) manages the desktop user's manager, not root's.
+        if (acting_for_session_user()) argv.emplace_back("--machine=" + session_user_name() + "@.host");
+    }
     argv.insert(argv.end(), args);
     return argv;
 }
@@ -44,13 +49,6 @@ std::string exec_program(const std::string &exec) {
 
 bool unit_enabled(const std::string &state) {
     return state != "disabled" && state != "masked" && state != "masked-runtime" && state != "bad" && !state.empty();
-}
-
-// Units the distribution ships (/usr/lib/systemd, /lib/systemd) are part of the OS; units in /etc
-// and the user's ~/.config were added by an administrator, a package's postinst or the user.
-bool os_unit(const std::string &fragment) {
-    return starts_with(fragment, "/usr/lib/systemd/") || starts_with(fragment, "/lib/systemd/") ||
-           starts_with(fragment, "/usr/share/systemd/") || starts_with(fragment, "/run/systemd/generator");
 }
 
 void add_services(std::vector<pc_service> &out, int32_t domain) {
@@ -97,7 +95,7 @@ void add_services(std::vector<pc_service> &out, int32_t domain) {
         s.last_exit = static_cast<int32_t>(std::strtol(get("ExecMainStatus").c_str(), nullptr, 10));
         const std::string state = get("UnitFileState");
         s.enabled = state.empty() ? s.pid > 0 : unit_enabled(state);
-        s.apple = os_unit(get("FragmentPath"));
+        s.apple = systemd_os_unit(get("Id"), get("FragmentPath"), s.program);
         out.push_back(s);
     }
 }
@@ -115,14 +113,12 @@ pc_result systemctl_result(int status, const std::string &err) {
 
 // ---- XDG autostart ----
 
-std::string home_directory() {
-    const char *home = std::getenv("HOME");
-    return home ? home : "";
-}
+std::string home_directory() { return session_home(); }
 
 std::string user_autostart_dir() {
     const char *config = std::getenv("XDG_CONFIG_HOME");
-    return (config && *config ? std::string(config) : home_directory() + "/.config") + "/autostart";
+    // XDG_CONFIG_HOME is the caller's own (pkexec passes it through only when set).
+    return (config && *config == '/' ? std::string(config) : home_directory() + "/.config") + "/autostart";
 }
 
 std::vector<std::string> system_autostart_dirs() {
@@ -217,16 +213,67 @@ pc_result set_autostart(const std::string &file_id, bool enabled) {
             }
         if (!found) return PC_ERR_NOT_FOUND;
         if (enabled) return PC_OK;  // only the system entry exists, and it isn't hidden by us
-        ::mkdir((home_directory() + "/.config").c_str(), 0700);
-        ::mkdir(user_autostart_dir().c_str(), 0700);
+        const std::string config = home_directory() + "/.config";
+        if (::mkdir(config.c_str(), 0700) == 0) give_to_session_user(config);
+        if (::mkdir(user_autostart_dir().c_str(), 0700) == 0) give_to_session_user(user_autostart_dir());
     }
     std::map<std::string, std::string> keys{{"Hidden", enabled ? "false" : "true"}};
     if (enabled && text.find("X-GNOME-Autostart-enabled=false") != std::string::npos)
         keys["X-GNOME-Autostart-enabled"] = "true";
-    return write_atomically(user_path, set_desktop_keys(text, keys)) ? PC_OK : PC_ERR_PERMISSION;
+    if (!write_atomically(user_path, set_desktop_keys(text, keys))) return PC_ERR_PERMISSION;
+    give_to_session_user(user_path);
+    return PC_OK;
+}
+
+// The pid of a startup entry's program, 0 when it isn't running. An interpreter (python3, sh) runs
+// many scripts: which process is the entry's can't be told from its executable, so none is.
+int32_t running_pid(const std::string &program, const std::unordered_map<std::string, int32_t> &by_path,
+                    const std::unordered_map<std::string, int32_t> &by_name) {
+    if (program.empty()) return 0;
+    char resolved[PATH_MAX];
+    const std::string real = ::realpath(program.c_str(), resolved) ? std::string(resolved) : program;
+    const std::string name = basename_of(real);
+    if (is_interpreter(name)) return 0;
+    if (auto it = by_path.find(real); it != by_path.end()) return it->second;
+    if (auto it = by_name.find(name); it != by_name.end()) return it->second;
+    return 0;
 }
 
 }  // namespace
+
+// "Part of the OS", the counterpart of Apple's own launchd jobs on macOS and the services under the
+// Windows directory: a unit the distribution ships (unit file under /usr/lib/systemd and the like)
+// that belongs to the system itself (systemd's own units and helpers, D-Bus, logins, the session's
+// plumbing in /usr/libexec), not every daemon a package installed (docker, nginx, sshd, cups).
+bool systemd_os_unit(const std::string &id, const std::string &fragment, const std::string &program) {
+    const bool shipped = starts_with(fragment, "/usr/lib/systemd/") || starts_with(fragment, "/lib/systemd/") ||
+                         starts_with(fragment, "/usr/share/systemd/") ||
+                         starts_with(fragment, "/run/systemd/generator");
+    if (!shipped) return false;
+    for (const char *prefix : {"systemd-",
+                               "dbus",
+                               "getty@",
+                               "serial-getty@",
+                               "autovt@",
+                               "user@",
+                               "user-runtime-dir@",
+                               "modprobe@",
+                               "emergency.",
+                               "rescue.",
+                               "polkit",
+                               "NetworkManager",
+                               "display-manager",
+                               "gdm",
+                               "sddm",
+                               "lightdm",
+                               "accounts-daemon",
+                               "udisks2",
+                               "upower",
+                               "wpa_supplicant"})
+        if (starts_with(id, prefix)) return true;
+    return starts_with(program, "/usr/lib/systemd/") || starts_with(program, "/lib/systemd/") ||
+           starts_with(program, "/usr/libexec/") || starts_with(program, "/usr/lib/polkit");
+}
 
 std::vector<std::map<std::string, std::string>> parse_systemctl_show(const std::string &text) {
     std::vector<std::map<std::string, std::string>> units;
@@ -282,6 +329,16 @@ DesktopEntry parse_desktop_entry(const std::string &text) {
 
 bool valid_service_label(const std::string &label) {
     if (label.empty() || label.size() >= 256 || label[0] == '-') return false;
+    // Autostart entries are named after their .desktop file, which may hold spaces and UTF-8
+    // ("My App.desktop"): any printable byte but '/' and a leading '.'. The file is opened under the
+    // autostart folders only, never passed to a program.
+    if (label.rfind("xdg:", 0) == 0) {
+        const std::string file = label.substr(4);
+        if (file.empty() || file[0] == '.') return false;
+        for (char c : file)
+            if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f || c == '/') return false;
+        return true;
+    }
     // Unit names: ASCII letters, digits, ":-_.\" and "@" for instances; "xdg:<file>.desktop" for
     // autostart entries. Nothing reaches a shell, but a label is passed as one argument after "--".
     for (char c : label)
@@ -366,14 +423,21 @@ std::vector<pc_startup_item> startup_items() {
         }
     }
 
-    // Running instances: processes of this user whose program matches the entry's.
-    std::unordered_map<std::string, int32_t> running;
-    const uid_t me = ::getuid();
+    // Running instances: processes of the session user whose executable is the entry's, by full
+    // path first (as Windows matches its startup items), by name second; the lowest pid of an app's
+    // processes, its first. /proc lists pids in no particular order.
+    std::unordered_map<std::string, int32_t> by_path, by_name;
+    const uid_t me = session_uid();
     for (int32_t pid : list_pids()) {
         struct stat info{};
         if (::stat(("/proc/" + std::to_string(pid)).c_str(), &info) != 0 || info.st_uid != me) continue;
-        const std::string exe = basename_of(read_link("/proc/" + std::to_string(pid) + "/exe"));
-        if (!exe.empty() && !running.count(exe)) running[exe] = pid;
+        const std::string exe = read_link("/proc/" + std::to_string(pid) + "/exe");
+        if (exe.empty()) continue;
+        for (auto *map : {&by_path, &by_name}) {
+            const std::string key = map == &by_path ? exe : basename_of(exe);
+            auto [it, inserted] = map->emplace(key, pid);
+            if (!inserted) it->second = std::min(it->second, pid);
+        }
     }
 
     for (const auto &[file, found] : entries) {
@@ -396,8 +460,7 @@ std::vector<pc_startup_item> startup_items() {
         copy_string(item.program, sizeof(item.program), program);
         copy_string(item.config_path, sizeof(item.config_path), found.path);
         item.scope = found.scope;
-        auto pid = running.find(basename_of(program));
-        item.pid = pid == running.end() ? 0 : pid->second;
+        item.pid = running_pid(program, by_path, by_name);
         item.enabled = !e.hidden && e.autostart_enabled;
         item.run_at_load = true;
         result.push_back(item);

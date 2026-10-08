@@ -114,10 +114,19 @@ jobs:
           call scripts\build-windows.cmd release
           if errorlevel 1 exit /b 1
           build\windows\procyon-cli.exe 1 300
+      - name: Render a screen offscreen
+        # The app's own --screenshot mode (as in the Linux job): draws the Overview after a few
+        # samples into a PNG and exits, which exercises Direct2D, DirectWrite, the fonts and the sampler.
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\windows\Procyon.exe -ArgumentList '--screenshot', 'dist\windows\overview.png', '--page', 'overview' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or -not (Test-Path dist\windows\overview.png)) { exit 1 }
       - uses: actions/upload-artifact@v7
         with:
           name: Procyon-windows-${{ github.sha }}
-          path: dist\windows\Procyon.exe
+          path: |
+            dist\windows\Procyon.exe
+            dist\windows\overview.png
           retention-days: 7
 
   windows-performance:
@@ -181,3 +190,36 @@ jobs:
             dist/linux/procyon
             dist/linux/overview.png
           retention-days: 7
+
+  linux-performance:
+    name: Linux · Performance (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build tools and GTK 4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build pkg-config \
+            libgtk-4-dev xvfb
+      - name: Build the app and the CLI
+        run: scripts/build-linux.sh release --no-tests
+      - name: Performance targets
+        # The Linux counterpart of the macOS and Windows jobs: its screens plus the background only
+        # state, measured from /proc on a virtual X display. Fails the build on a missed target.
+        # Xvfb has no GPU: GTK's GL renderer would run on Mesa's llvmpipe, whose buffers count as the
+        # app's private memory (3-4x its own), so the Cairo renderer measures Procyon itself.
+        run: >-
+          xvfb-run -a scripts/bench-linux.py --attempts 3 --renderer cairo
+          --shard ${{ matrix.shard }}/${{ strategy.job-total }} --output dist/bench-linux-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-linux-${{ matrix.shard }}-${{ github.sha }}
+          path: dist/bench-linux-${{ matrix.shard }}.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -265,13 +265,19 @@ std::vector<pc_gpu> gpus() {
         if (busy >= 0 && busy <= 100) g.utilization = busy / 100.0;
         if (g.utilization < 0) g.utilization = intel_awake_share(card, index);
         ++index;
+        const int64_t used = read_int(card.device + "/mem_info_vram_used", -1);
+        const int64_t total = read_int(card.device + "/mem_info_vram_total", -1);
         if (!card.integrated) {
-            const int64_t used = read_int(card.device + "/mem_info_vram_used", -1);
-            const int64_t total = read_int(card.device + "/mem_info_vram_total", -1);
             if (used >= 0 && total > 0) {
                 g.memory_used = used;
                 g.memory_total = total;
             }
+        } else if (used >= 0) {
+            // An APU's carve-out plus what it maps from system memory (GTT): the memory it uses, as
+            // macOS and Windows report a unified GPU's. No total: it shares the system's. i915/xe
+            // publish no such figure.
+            const int64_t gtt = read_int(card.device + "/mem_info_gtt_used", 0);
+            g.memory_used = used + std::max<int64_t>(gtt, 0);
         }
         if (!card.hwmon.empty()) {
             const int64_t milli = read_int(card.hwmon + "/temp1_input", -1);

@@ -23,19 +23,26 @@
 
 namespace procyon::ui {
 
-// One sample a tick for every live chart: the last 60 seconds are visible.
-constexpr size_t kHistoryWindow = 60;
+// One sample a tick for every live chart; the charts show the last 60 seconds (as the macOS app's
+// time-based window does), which is 60 samples at 1 s updates, 120 at 0.5 s and 12 at 5 s.
+constexpr double kHistorySeconds = 60;
+constexpr size_t kHistoryMaxSamples = 120;  // 60 s at the fastest update speed, 0.5 s
+// The samples that span kHistorySeconds at the current update speed (set by Store::set_interval).
+size_t history_window();
+void set_history_interval(double seconds);
 
 class Series {
 public:
     void push(float value) {
         values_.push_back(value);
-        if (values_.size() > kHistoryWindow * 4) values_.erase(values_.begin(), values_.begin() + kHistoryWindow);
+        if (values_.size() > kHistoryMaxSamples * 4)
+            values_.erase(values_.begin(), values_.begin() + kHistoryMaxSamples);
     }
     const float *data() const { return values_.data(); }
     size_t size() const { return values_.size(); }
     float last() const { return values_.empty() ? 0 : values_.back(); }
-    float max_recent(size_t window = kHistoryWindow) const {
+    float max_recent(size_t window = 0) const {
+        if (window == 0) window = history_window();
         float m = 0;
         const size_t start = values_.size() > window ? values_.size() - window : 0;
         for (size_t i = start; i < values_.size(); ++i) m = std::max(m, values_[i]);
@@ -183,6 +190,7 @@ public:
     pc_result suspend(int32_t pid);
     pc_result resume(int32_t pid);
     pc_result set_priority(int32_t pid, int32_t nice);
+    pc_result send_signal(int32_t pid, int32_t signal);
     pc_result set_affinity(int32_t pid, uint64_t mask);
     std::optional<DetailsCopy> details(int32_t pid);
     std::vector<OpenFileCopy> open_files(int32_t pid, bool &complete);

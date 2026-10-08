@@ -290,6 +290,8 @@ bool HistoryDatabase::append(const MinuteRecord &record) {
     const auto length = static_cast<uint32_t>(w.bytes.size());
     file.write(reinterpret_cast<const char *>(&length), sizeof(length));
     file.write(w.bytes.data(), static_cast<std::streamsize>(w.bytes.size()));
+    file.close();
+    if (fresh) platform::file_written(path_);
     return static_cast<bool>(file);
 }
 
@@ -315,6 +317,7 @@ void HistoryDatabase::rewrite() {
     }
     std::error_code error;
     std::filesystem::rename(std::filesystem::path(temp), std::filesystem::path(path_), error);  // replaces
+    if (!error) platform::file_written(path_);
 }
 
 void HistoryDatabase::write(const MinuteRecord &record) {

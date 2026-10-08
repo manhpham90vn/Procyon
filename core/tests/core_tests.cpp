@@ -28,6 +28,10 @@
 
 #include "helper_protocol.hpp"
 #if defined(__linux__)
+#include <sys/wait.h>
+
+#include <csignal>
+
 #include "platform/linux_internal.hpp"
 #endif
 #include "monitor.hpp"
@@ -386,7 +390,7 @@ void inhibitor_parsing() {
     check(locks.size() == 2 && locks[0].pid == 4242 && locks[0].kind == PC_ASSERT_SYSTEM_SLEEP &&
               locks[0].reason == "Firefox · Playing video",
           "sleep lock");
-    check(locks.size() == 2 && locks[1].kind == PC_ASSERT_DISPLAY_SLEEP &&
+    check(locks.size() == 2 && locks[1].kind == (PC_ASSERT_DISPLAY_SLEEP | PC_ASSERT_SYSTEM_SLEEP) &&
               locks[1].reason == "GNOME Videos · Playing \"Movie\"",
           "idle lock keeps the display on, escapes read");
     check(platform::parse_inhibitors("").empty() && platform::parse_inhibitors("{\"data\":[[]]}").empty(), "no locks");
@@ -398,6 +402,39 @@ void inhibitor_parsing() {
     check(flags.size() == 1 && flags[0] == "12", "a number read");
     check(platform::busctl_values("{\"type\":\"s\",\"data\":[\"\"]}") == std::vector<std::string>{""},
           "an empty string is still a value");
+}
+
+// Suspend and resume through the native signal numbers (SIGSTOP 19 and SIGCONT 18 on Linux, not
+// macOS's 17 and 19): a child stops and continues.
+// The machine's memory parts partition its total (the composition bar's proportions rely on it).
+void memory_partition() {
+    platform::Memory m;
+    check(platform::memory(m), "memory read");
+    const uint64_t parts = m.app + m.wired + m.compressed + m.cached + m.free;
+    check(parts <= m.total && m.total - parts <= m.total / 100, "memory parts add up to the total");
+}
+
+void native_signals() {
+    const pid_t child = ::fork();
+    if (child == 0) {
+        ::pause();
+        ::_exit(0);
+    }
+    check(child > 0, "child started");
+    if (child <= 0) return;
+    const auto state = [child] {
+        platform::linux_internal::ProcStat stat;
+        for (int i = 0; i < 100; ++i) {
+            if (platform::linux_internal::read_stat(child, stat) && stat.state != 'S' && stat.state != 'R')
+                return stat.state;
+            ::usleep(10000);
+        }
+        return platform::linux_internal::read_stat(child, stat) ? stat.state : '?';
+    };
+    check(platform::send_signal(child, SIGSTOP) == PC_OK && state() == 'T', "SIGSTOP stops");
+    check(platform::send_signal(child, SIGCONT) == PC_OK, "SIGCONT continues");
+    (void)::kill(child, SIGKILL);
+    (void)::waitpid(child, nullptr, 0);
 }
 
 void systemd_parsing() {
@@ -419,6 +456,47 @@ void systemd_parsing() {
               platform::valid_service_label("xdg:org.gnome.Foo.desktop") &&
               platform::valid_service_label("dev-disk-by\\x2duuid.swap"),
           "unit and autostart labels accepted");
+    check(platform::valid_service_label("xdg:My App.desktop") && platform::valid_service_label("xdg:\xc3\x9c"
+                                                                                               "bersicht.desktop"),
+          "autostart labels with spaces and UTF-8 accepted");
+    check(!platform::valid_service_label("xdg:../x.desktop") && !platform::valid_service_label("xdg:a/b.desktop") &&
+              !platform::valid_service_label("xdg:") && !platform::valid_service_label("xdg:a\nb.desktop") &&
+              !platform::valid_service_label("my unit.service"),
+          "autostart labels with a path, control byte or nothing rejected; units keep their rule");
+
+    using platform::HwmonInput;
+    const auto cpu = [](std::vector<HwmonInput> inputs) { return platform::cpu_sensor_inputs(inputs); };
+    check(cpu({{"coretemp", "Core 0", "c0"}, {"coretemp", "Package id 0", "p"}, {"acpitz", "", "a"}}) ==
+              std::vector<std::string>{"p"},
+          "coretemp package sensor preferred");
+    check(cpu({{"coretemp", "Core 0", "c0"}, {"coretemp", "Core 1", "c1"}, {"acpitz", "", "a"}}) ==
+              std::vector<std::string>{"c0", "c1"},
+          "coretemp cores without a package sensor, not ACPI");
+    check(cpu({{"k10temp", "Tctl", "tctl"}, {"k10temp", "Tdie", "tdie"}}) == std::vector<std::string>{"tdie"},
+          "k10temp Tdie preferred over the offset Tctl");
+    check(cpu({{"k10temp", "Tctl", "tctl"}}) == std::vector<std::string>{"tctl"}, "k10temp Tctl alone");
+    check(cpu({{"acpitz", "", "a"}, {"nvme", "Composite", "n"}}) == std::vector<std::string>{"a"},
+          "ACPI zone as the last resort");
+    check(platform::battery_condition("Good", 0.5) == "Normal" &&
+              platform::battery_condition("Dead", 1) == "Service Recommended" &&
+              platform::battery_condition("Overheat", 1) == "Overheat" &&
+              platform::battery_condition("Unknown", 0.79) == "Service Recommended" &&
+              platform::battery_condition("", 0.9) == "Normal" && platform::battery_condition("", -1).empty(),
+          "battery condition in macOS's words");
+    check(platform::linux_internal::arch_name("aarch64") == "arm64" &&
+              platform::linux_internal::arch_name("i686") == "x86" &&
+              platform::linux_internal::arch_name("x86_64") == "x86_64",
+          "architecture names as procyon.h spells them");
+    check(platform::systemd_os_unit("systemd-journald.service", "/usr/lib/systemd/system/systemd-journald.service",
+                                    "/usr/lib/systemd/systemd-journald") &&
+              platform::systemd_os_unit("accounts-daemon.service", "/usr/lib/systemd/system/accounts-daemon.service",
+                                        "/usr/libexec/accounts-daemon"),
+          "systemd's and the session's own units are part of the OS");
+    check(!platform::systemd_os_unit("docker.service", "/usr/lib/systemd/system/docker.service", "/usr/bin/dockerd") &&
+              !platform::systemd_os_unit("nginx.service", "/lib/systemd/system/nginx.service", "/usr/sbin/nginx") &&
+              !platform::systemd_os_unit("systemd-custom.service", "/etc/systemd/system/systemd-custom.service",
+                                         "/usr/lib/systemd/x"),
+          "packaged daemons and administrators' units are third-party");
 }
 #endif  // __linux__
 
@@ -677,6 +755,8 @@ int main() {
         drm_fdinfo_parsing();
         inhibitor_parsing();
         systemd_parsing();
+        native_signals();
+        memory_partition();
 #endif
         tick_wrap();
         handle_denial();

@@ -16,6 +16,7 @@
 #include <winioctl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -332,7 +333,8 @@ int32_t state_of(const ProcessEntry &entry) {
     bool all_suspended = true;
     for (ULONG i = 0; i < entry.NumberOfThreads; ++i) {
         const ThreadEntry &t = entry.Threads[i];
-        if (t.ThreadState == kThreadRunning) return PC_STATE_RUNNING;
+        // Running, ready or standby: on a CPU or about to be, as thread_state reports a thread.
+        if (t.ThreadState == kThreadRunning || t.ThreadState == 1 || t.ThreadState == 3) return PC_STATE_RUNNING;
         if (!(t.ThreadState == kThreadWaiting && t.WaitReason == kWaitSuspended)) all_suspended = false;
     }
     return all_suspended ? PC_STATE_STOPPED : PC_STATE_SLEEPING;
@@ -1023,7 +1025,10 @@ bool is_system_process(const RawProcess &process) {
     if (process.uid < kFirstRegularUser) return true;  // SYSTEM and the service accounts
     // A process whose token we can't read belongs to another user or is protected: treat it
     // with the same care as a system one.
-    return process.uid == kUnknownUser;
+    if (process.uid == kUnknownUser) return true;
+    // The OS's own programs in the user's session (explorer, sihost, RuntimeBroker, ctfmon), like
+    // Finder and the Dock under /System on macOS: ending one needs confirmation.
+    return under_windows_directory(process.path);
 }
 
 int32_t self_pid() { return static_cast<int32_t>(GetCurrentProcessId()); }
@@ -1108,14 +1113,17 @@ pc_result signal_process(int32_t pid, bool force) { return send_signal(pid, forc
 pc_result set_priority(int32_t pid, int32_t nice) {
     if (nice < -20 || nice > 20) return PC_ERR_INVALID;
     // Realtime is left out on purpose: it starves the system and needs a privilege anyway.
+    // Each class covers the nice values nearest the one nice_of reports for it (-15, -8, 0, 8, 15), so
+    // a value read back sets the same class, and macOS's steps (-10, -5, 0, 5, 10, 20) land on the
+    // class of the same name: High, Above normal, Normal, Below normal, Low.
     DWORD priority_class = NORMAL_PRIORITY_CLASS;
-    if (nice <= -11)
+    if (nice <= -10)
         priority_class = HIGH_PRIORITY_CLASS;
     else if (nice < 0)
         priority_class = ABOVE_NORMAL_PRIORITY_CLASS;
     else if (nice == 0)
         priority_class = NORMAL_PRIORITY_CLASS;
-    else if (nice <= 10)
+    else if (nice < 10)
         priority_class = BELOW_NORMAL_PRIORITY_CLASS;
     else
         priority_class = IDLE_PRIORITY_CLASS;
@@ -1300,7 +1308,20 @@ std::string thread_name(DWORD thread_id) {
     return name;
 }
 
+// Each thread's CPU time at the previous details read, by thread id and creation time (ids are
+// reused): the next read turns the difference into a recent CPU share, as on macOS and Linux.
+struct ThreadSample {
+    int64_t created = 0;
+    uint64_t cpu_ns = 0;
+    double at = 0;
+};
+std::mutex thread_mutex;
+std::unordered_map<uint64_t, ThreadSample> thread_samples;
+
 void read_threads(int32_t pid, Details &out) {
+    using namespace std::chrono;
+    const double now = duration<double>(steady_clock::now().time_since_epoch()).count();
+    std::lock_guard lock(thread_mutex);
     std::vector<char> buffer;
     if (!query_system(kSystemProcessInformation, buffer)) return;
     for (const ProcessEntry *entry : process_entries(buffer)) {
@@ -1313,10 +1334,18 @@ void read_threads(int32_t pid, Details &out) {
             thread.cpu_percent = -1;
             thread.user_time_ns = static_cast<uint64_t>(t.UserTime.QuadPart) * 100;
             thread.system_time_ns = static_cast<uint64_t>(t.KernelTime.QuadPart) * 100;
+            const uint64_t cpu = thread.user_time_ns + thread.system_time_ns;
+            const auto previous = thread_samples.find(thread.id);
+            if (previous != thread_samples.end() && previous->second.created == t.CreateTime.QuadPart &&
+                now > previous->second.at && cpu >= previous->second.cpu_ns)
+                thread.cpu_percent =
+                    static_cast<double>(cpu - previous->second.cpu_ns) / 1e7 / (now - previous->second.at);
+            thread_samples[thread.id] = {t.CreateTime.QuadPart, cpu, now};
             thread.priority = t.Priority;
             thread.state = thread_state(t);
             out.threads.push_back(std::move(thread));
         }
+        if (thread_samples.size() > 20000) thread_samples.clear();
         out.threads_known = true;
         return;
     }

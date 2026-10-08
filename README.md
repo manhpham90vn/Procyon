@@ -171,10 +171,10 @@ Pick a screen in the sidebar, or use the keyboard:
 | `⇧⌘P` | Pause or resume updates |
 | `⌘,` | Settings |
 
-On Windows, `Ctrl` stands in for `⌘`: `Ctrl+1`…`Ctrl+9` for the screens, `Ctrl+K` for the palette, `Ctrl+F`
-to find, `Ctrl+I` for Get Info, `Delete` or `Ctrl+Backspace` for End Task, `Shift+Delete` or
-`Ctrl+Alt+Backspace` for Force Quit, `Ctrl+Shift+Alt+Backspace` for End Process Tree, `Ctrl+Shift+P` to pause
-and `Ctrl+,` for Settings.
+On Windows and Linux, `Ctrl` stands in for `⌘`: `Ctrl+1`…`Ctrl+9` for the screens, `Ctrl+K` for the palette,
+`Ctrl+F` to find, `Ctrl+I` for Get Info, `Delete` or `Ctrl+Backspace` for End Task, `Shift+Delete` or
+`Ctrl+Alt+Backspace` for Force Quit, `Ctrl+Shift+Alt+Backspace` for End Process Tree, `Ctrl+Shift+P` to pause,
+`Ctrl+,` for Settings and `Ctrl+Q` to quit.
 
 ### Ending a process
 

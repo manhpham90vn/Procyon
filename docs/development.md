@@ -85,6 +85,8 @@ scripts/
   build-macos-app.sh        builds dist/Procyon.app
   build-windows.cmd         builds build\windows (core, CLI, tests, app) and dist\windows\Procyon.exe
   build-linux.sh            builds build/linux (core, CLI, tests, app) and dist/linux/procyon
+  bench-linux.py            measures dist/linux/procyon against the spec's targets from /proc (bench-windows.py's twin)
+  screenshots-windows.ps1   renders the main screens with Procyon.exe --screenshot (make screenshots on Windows)
   package-linux.sh          dist/Procyon-<version>-linux-<arch>.tar.gz (cmake --install into a staging prefix)
   make-icon.swift           renders the app icon; make-icon-windows.ps1 converts it to Procyon.ico
 ```
@@ -111,6 +113,7 @@ make run          rem release build, dist\windows\Procyon.exe, open it
 make test         rem release build + core tests (make core is the same)
 make build        rem debug build into build\windows-debug
 make bench        rem measure every screen and the tray state against the spec's targets (scripts\bench-windows.py)
+make screenshots  rem render the main screens, light and dark, into dist\windows\screenshots
 make lint         rem clang-format --dry-run, generated files and python checks (the last two need python)
 make format       rem clang-format in place
 make ci           rem lint + test + app, what the Windows CI job runs
@@ -120,7 +123,11 @@ make help         rem everything else
 Underneath, `scripts\build-windows.cmd [release|debug] [--no-tests]` finds Visual Studio through `vswhere`, runs
 `vcvars64.bat`, puts `build\tools` first on PATH, then falls back to the CMake and Ninja of the *C++ CMake tools*
 component or PATH. Everything builds from `core/CMakeLists.txt`, which adds `apps/windows` on Windows. Headless:
-`build\windows\procyon-cli.exe 3 1000`; a screen at launch: `dist\windows\Procyon.exe --page processes`.
+`build\windows\procyon-cli.exe 3 1000`; a screen at launch: `dist\windows\Procyon.exe --page processes`; a screen
+as a PNG without showing a window: `dist\windows\Procyon.exe --screenshot out.png --page cpu --dark` (the window's
+pixel size, after six samples; exit status 1 when the file can't be written); `Procyon.exe --version` prints the
+version to the console it was started from. A second launch brings the running Procyon up instead of starting
+another (a `Local\Procyon.Instance` mutex; `--no-settings` and `--screenshot` runs stay separate).
 `scripts\lint-windows.ps1` and `scripts\format-windows.ps1` are the Windows counterparts of `lint.sh`/`format.sh`
 (no Swift, no clang-tidy, no shellcheck); `scripts\tools-windows.ps1` fetches the pinned tool versions.
 
@@ -142,6 +149,7 @@ make run          # release build, dist/linux/procyon, open it
 make test         # release build + core tests (make core is the same)
 make build        # debug build into build/linux-debug
 make screenshots  # render the main screens, light and dark, into dist/linux/screenshots
+make bench        # measure every screen and the background state against the spec's targets (needs a display)
 make install      # cmake --install into PREFIX (default ~/.local)
 make package      # dist/Procyon-<version>-linux-<arch>.tar.gz + .sha256
 make lint         # generated files, clang-format, clang-tidy (SKIP_TIDY=1 skips it), shellcheck, python
@@ -150,7 +158,16 @@ make help         # everything else
 
 Headless: `build/linux/procyon-cli 3 1000`; a screen at launch: `dist/linux/procyon --page processes`; any screen
 as a PNG without opening a window: `dist/linux/procyon --screenshot out.png --page cpu --dark` (2x, after six
-samples; it needs a display, `xvfb-run -a` provides one in CI).
+samples; it needs a display, `xvfb-run -a` provides one in CI; exit status 1 when the file can't be written).
+`--background` starts without a window, as when it was closed (the macOS app's `-launchInMenuBar`).
+
+`scripts/bench-linux.py` is the counterpart of `bench-windows.py`, without a probe binary: it launches
+`dist/linux/procyon --no-settings --page <page>` with `PROCYON_BENCH=1` (the app then prints a line when it draws its
+first frame, which times startup), samples CPU time from `/proc/<pid>/stat` and private memory (`RssAnon`) once a
+second, and measures `background` with `--background`. The CLI's numbers are compared with `/proc/stat`,
+`/proc/meminfo` and the process list. Output: `dist/bench-linux.json`. The same options as the Windows script, plus
+`--renderer`: on Xvfb, which has no GPU, GTK's GL renderer runs on Mesa's llvmpipe, whose buffers count as the app's
+private memory (110-180 MB against about 35 MB of Procyon's own), so CI measures with `--renderer cairo`.
 
 ## Development
 
@@ -168,8 +185,9 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
 ### CI/CD (GitHub Actions)
 
 - **`ci.yml`** runs on every push to `main` and every PR. Every OS has the same two kinds of job, all started at
-  once: **`<OS> · Lint, build & test`** (the quick answer, 2–5 minutes) and, on macOS and Windows,
-  **`<OS> · Performance (K/3)`**, the spec's targets measured by `scripts/bench-macos.py` / `bench-windows.py`
+  once: **`<OS> · Lint, build & test`** (the quick answer, 2–5 minutes) and
+  **`<OS> · Performance (K/3)`**, the spec's targets measured by `scripts/bench-macos.py` / `bench-windows.py` /
+  `bench-linux.py`
   with the screens split across three runners (`--shard K/3`, each builds the release app itself, so none waits
   for another; shard 1 also measures startup, installer size and accuracy). Measuring every screen on one runner
   took 7–11 minutes and was most of the run; split, the run takes about as long as one shard plus a build.
@@ -178,12 +196,13 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
     shards upload `dist/bench-K.json`.
   - Windows (`windows-latest`): `scripts\lint-windows.ps1` (after `scripts\tools-windows.ps1` fetched
     clang-format 19.1.0; the runner's Python checks the generated token header), `scripts\build-windows.cmd`
-    (core tests included), a `procyon-cli.exe` smoke run, `Procyon.exe` uploaded; the performance shards upload
-    `dist\bench-windows-K.json`.
+    (core tests included), a `procyon-cli.exe` smoke run, the Overview rendered with `--screenshot`, `Procyon.exe`
+    and the PNG uploaded; the performance shards upload `dist\bench-windows-K.json`.
   - Linux (`ubuntu-24.04`, the oldest supported base, so the binary's glibc and GTK requirements stay low):
     `SKIP_TIDY=1 scripts/lint.sh` with clang-format 19.1.0 from pipx, `scripts/build-linux.sh release` (core tests
     included), a `procyon-cli` smoke run, the Overview rendered offscreen under `xvfb-run` with `--screenshot`, the
-    binary and the PNG uploaded. No performance job yet (no `bench-linux.py`).
+    binary and the PNG uploaded; the performance shards run `bench-linux.py` under `xvfb-run` and upload
+    `dist/bench-linux-K.json`.
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID
@@ -342,7 +361,7 @@ in for the macOS open panel in **Who Is Using…**.
 
 | Spec item | Status |
 | --- | --- |
-| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done. `NtQuerySystemInformation` gives every process's counters without privileges, so nothing is `PC_PROC_RESTRICTED`; the path, user and "critical process" flag come from a limited-rights handle, which an unelevated Procyon cannot open for the OS's own processes (csrss, services, lsass, …): their user shows as unknown ("—") until Full Access. Memory is the private working set, like Task Manager. Per-process network comes from the `Microsoft-Windows-Kernel-Network` ETW provider in a real-time session of Procyon's own (`windows_network.cpp`): starting a session takes administrator rights, so `PC_CAP_PROCESS_NETWORK` and the network columns are on only with Full Access. |
+| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done. `NtQuerySystemInformation` gives every process's counters without privileges, so nothing is `PC_PROC_RESTRICTED`; the path, user and "critical process" flag come from a limited-rights handle, which an unelevated Procyon cannot open for the OS's own processes (csrss, services, lsass, …): their user shows as unknown ("—") until Full Access. Memory is the private working set, like Task Manager. Per-process network comes from the `Microsoft-Windows-Kernel-Network` ETW provider in a real-time session of Procyon's own (`windows_network.cpp`): starting a session takes administrator rights, so `PC_CAP_PROCESS_NETWORK` and the network columns are on only with Full Access, and the Network screen offers **Unlock Full Access** in their place. Programs under the Windows directory running in the user's session (explorer, sihost, RuntimeBroker) are `PC_PROC_SYSTEM`, like Finder and the Dock on macOS: ending one asks first. |
 | Flat / by app / tree views, search, sort, pin | Done (core). Apps are grouped by executable path; the app name is the executable's `FileDescription` ("Google Chrome"), what Task Manager shows. What lives under the Windows directory (svchost, dwm, …) is the OS, not an app: it groups by name, like the daemons of /System on macOS, and is not `PC_PROC_APP_BUNDLE`. **Pin to Top** keeps one app above the sorted rows in every view, as on macOS; a "top apps" row on Overview or a performance screen opens Processes on that app (by-app view, search cleared, the app pinned and selected), like the macOS `showInProcesses`. |
 | End task / force quit / end process tree | Done. End Task posts `WM_CLOSE` to a process's visible windows and terminates a process that has none; Force Quit and End Process Tree terminate. The idle process, `System`, processes flagged critical (`ProcessBreakOnTermination`) and, since that flag needs a handle an unelevated Procyon cannot get, the OS's own smss, csrss, wininit, winlogon, services, lsass, LsaIso, Registry, Memory Compression and Secure System by name are protected. End Process Tree follows the kernel's parent links only where the parent is older than the child: a reused parent pid adopts no strangers (macOS reparents orphans to launchd, so its tree never had this hole). |
 | Live charts, per-core usage, system info | Done. Hybrid cores (P/E) from `GetSystemCpuSetInformation`. |
@@ -353,7 +372,7 @@ in for the macOS open panel in **Who Is Using…**.
 | Process details: path, command line, environment, threads | Done: command line through `ProcessCommandLineInformation` (works for every bitness), working directory and environment from the PEB of 64-bit processes, threads from the system process table with names from `GetThreadDescription`. Other users' processes need administrator rights. |
 | Startup apps with impact, enable/disable | Done for the Run keys (user, machine, 32-bit) and both Startup folders, with the enabled state Task Manager keeps under `StartupApproved`; entries are named after their executable's `FileDescription` ("Microsoft Edge"), not the registry value. Task Scheduler tasks with a logon or boot trigger outside `\Microsoft` (the OS's own) are listed too, through the Task Scheduler COM API, with their `Enabled` flag switched from the Startup screen; their label is `task:` plus the task path with `|` for `\`. |
 | Services: start/stop/restart, enable/disable | Done through the Service Control Manager. Disable remembers the start type (Automatic, Manual) under `HKCU\Software\Procyon\ServiceStartTypes` and Enable puts it back (Automatic when nothing was remembered), the way `launchctl enable` restores a job's definition. "Part of the OS" means the binary lives under the Windows directory. |
-| Command palette, tray icon | Done: `Ctrl+K`; closing or minimizing the window keeps Procyon in the notification area (per-process sampling is skipped meanwhile, unless an alert rule watches apps; the Direct2D/DirectWrite stack and the embedded fonts are released and the working set trimmed, so the private working set in the tray is a few MB, well under the spec's 30 MB, and recreated when the window opens again), the tooltip shows the modules switched on in Settings (CPU, memory, network, GPU, like the macOS menu bar modules). Settings is the macOS form (at most 720 wide): Updates, Full access with its status and explanation, Notification area, Alerts (an enabled rule unfolds its threshold and duration), Appearance, Processes (default view), About with links. System has the hero card, Hardware and Software side by side, Kernel and Volumes. |
+| Command palette, tray icon | Done: `Ctrl+K` (again to close it); an app's row opens its actions (End Task, Force Quit, Suspend, Set Priority, Get Info, Show in Processes, Open File Location, Copy Path, Copy PID), as on macOS; every word of the query must match. `Ctrl+Q` quits. The icon stays in the notification area while the window is open too (alerts are its notifications; clicking one opens the window), and is added again when Explorer restarts. Closing or minimizing the window (also with the drawn minimize button) keeps Procyon in the notification area (per-process sampling is skipped meanwhile, unless an alert rule watches apps; the Direct2D/DirectWrite stack and the embedded fonts are released and the working set trimmed, so the private working set in the tray is a few MB, well under the spec's 30 MB, and recreated when the window opens again), the tooltip shows the modules switched on in Settings (CPU, memory, network, GPU, like the macOS menu bar modules). Settings is the macOS form (at most 720 wide): Updates, Full access with its status and explanation, Notification area, Alerts (an enabled rule unfolds its threshold and duration), Appearance, Processes (default view), About with links. System has the hero card, Hardware and Software side by side, Kernel and Volumes. |
 | Battery | Done: level and times from `GetSystemPowerStatus`, capacity, cycles, rate and temperature from the battery class driver. Apps preventing sleep are read from `powercfg /requests` (run hidden, 5 s timeout; the kernel's `GetPowerRequestList` has no public layout and answers STATUS_INVALID_PARAMETER on Windows 11 25H2), parsed by section order (Display, System, Away mode, Execution, …) so localized headers don't matter; `[PROCESS]` entries are mapped from their NT path to a running pid, `[DRIVER]` entries carry the device description. powercfg needs administrator rights, so the list is empty without Full Access. |
 | Temperatures | ACPI thermal zones through the `Thermal Zone Information` performance counters (readable by every user; `MSAcpi_ThermalZoneTemperature` over WMI is the fallback, but it refuses non-administrators on most machines). Those are the firmware's zones, not the CPU die: die temperature is only reachable through a signed kernel driver reading MSRs. Many desktop boards publish a zone with a fixed placeholder (27.8 °C is common) and nothing behind it: a zone that has moved is preferred, and when none has, the CPU screen shows the board's reading labelled "Board zone (fixed reading)" rather than hiding the panel. The first physical drive through `IOCTL_STORAGE_QUERY_PROPERTY`: the generic temperature property, then the NVMe SMART / Health Information log page (the inbox NVMe driver rejects the generic property but serves the log page to any user). SATA SMART needs an administrator and is not read. Fans: not yet. |
 | Files & Ports | Done: listening ports, connections and **Who Is Using…** from the system handle table (named pipes are skipped before `NtQueryObject`, which would block on them); working directories are read from each process's PEB alone. IPv4 peers of dual-stack sockets (`::ffff:a.b.c.d` in the IPv6 table) are reported as IPv4, like macOS. Other users' processes need administrator rights. |
@@ -426,7 +445,7 @@ instance per session).
 
 | Spec item | Status |
 | --- | --- |
-| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done except network. `/proc/<pid>/stat` and `statm` are public, so CPU and memory are known for every process and nothing is `PC_PROC_RESTRICTED`; memory is resident minus shared pages (what the process holds itself). Disk I/O (`/proc/<pid>/io`, bytes that reached the block layer) and the executable path are the owner's only: other users' processes show "—" until Full Access, and their path falls back to an absolute `argv[0]`. Kernel threads are left out, like `kernel_task`'s threads on macOS. Per-process network (`linux_network.cpp`) sums the kernel's TCP byte counters per socket (`sock_diag` netlink, `tcp_info.tcpi_bytes_received`/`tcpi_bytes_acked`, unprivileged), matched to processes by socket inode from `/proc/<pid>/fd`, so only readable processes are counted (every process as root); loopback-only sockets are skipped, like `lo` in the machine totals. A dump walks the kernel's whole TCP hash (262,144 buckets on a 32 GB machine, about 4 ms per family), so it runs every 3 s and finds new sockets; in between each known socket is looked up by its id (a hash lookup, 128 per netlink send). A socket counts from the tick it is first seen (its earlier bytes would land in one tick as a rate it never had), and per-process totals add per-socket deltas, so a closing socket never makes a total run backwards. UDP has no per-socket counters: QUIC traffic isn't attributed, which the Network screen says under its top apps. |
+| Process list: name, PID, user, CPU, RAM, disk I/O, network | Done except network. `/proc/<pid>/stat` and `statm` are public, so CPU and memory are known for every process and nothing is `PC_PROC_RESTRICTED`; memory is resident minus shared pages (what the process holds itself). Disk I/O (`/proc/<pid>/io`, bytes that reached the block layer) and the executable path are the owner's only: other users' processes show "—" until Full Access, and their path falls back to an absolute `argv[0]`. Kernel threads are left out, like `kernel_task`'s threads on macOS. Per-process network (`linux_network.cpp`) sums the kernel's TCP byte counters per socket (`sock_diag` netlink, `tcp_info.tcpi_bytes_received`/`tcpi_bytes_acked`, unprivileged), matched to processes by socket inode from `/proc/<pid>/fd`, so only readable processes are counted (every process as root); loopback sockets count, as on macOS and Windows (the machine totals still skip `lo`). A dump walks the kernel's whole TCP hash (262,144 buckets on a 32 GB machine, about 4 ms per family), so it runs every 3 s and finds new sockets; in between each known socket is looked up by its id (a hash lookup, 128 per netlink send). A socket counts from the tick it is first seen (its earlier bytes would land in one tick as a rate it never had), and per-process totals add per-socket deltas, so a closing socket never makes a total run backwards. UDP has no per-socket counters: QUIC traffic isn't attributed, which the Network screen says under its top apps. |
 | Flat / by app / tree views | Done (core). An app is a `.desktop` entry: processes whose executable (or `StartupWMClass`, or the directory a launcher resolves into) matches an entry group under its name and are `PC_PROC_APP_BUNDLE`; everything else groups by name. |
 | End task / force quit / end process tree, suspend, signals | Done with POSIX signals. pid 1 (init), 2 (kthreadd) and Procyon are protected. |
 | Priority, CPU affinity | Done, applied to every thread (`/proc/<pid>/task`), as `renice` and `taskset -a` do, since Linux schedules threads. Raising priority needs root. |
@@ -436,9 +455,9 @@ instance per session).
 | GPU: usage, memory, temperature; per-process GPU | DRM cards in sysfs: `gpu_busy_percent` and VRAM on AMD, temperature from the card's hwmon, the name from `pci.ids`. Intel publishes busy time only through perf (root, or `perf_event_paranoid` ≤ 0); its GTs' idle residency is public (i915 `gt/gt*/rc6_residency_ms`, xe `tile*/gt*/gtidle/idle_residency_ms`), so utilization is the busiest GT's share of time out of RC6 since the previous sample: awake rather than busy, slightly high at light loads (7–8% against 5% of summed per-process engine time on the measuring machine). NVIDIA through NVML (`libnvidia-ml.so.1`, loaded when the driver is). Per-process GPU time from the DRM fdinfo engine counters (amdgpu, i915, nouveau, msm, panfrost, v3d; Linux 5.19+), the busiest engine kind per client, the descriptor list rescanned every 5 s; other users' processes are unreadable. |
 | Process details | Done: `cmdline`, `environ` (owner only), `cwd`, threads from `/proc/<pid>/task` with recent CPU per thread. |
 | Startup apps | Done: XDG autostart (`~/.config/autostart`, `$XDG_CONFIG_DIRS/autostart`), filtered as GNOME's Startup Applications does (session components with `X-GNOME-Autostart-Phase`, other desktops' entries and hidden system entries are left out). Switching writes `Hidden=` into the user's copy, creating an override of a system entry when needed, so no root is needed. |
-| Services | Done: every service unit of the system and user managers (`systemctl list-unit-files`, `list-units`, one `show` for all), aliases listed once; "part of the OS" means the unit file is under `/usr/lib/systemd`. Actions run `systemctl`, which asks polkit (the desktop's password dialog) for system units; a unit that doesn't exist is answered before polkit is asked. |
+| Services | Done: every service unit of the system and user managers (`systemctl list-unit-files`, `list-units`, one `show` for all), aliases listed once; "part of the OS" (the counterpart of Apple's own jobs) means a unit the distribution ships under `/usr/lib/systemd` that belongs to the system itself: systemd's own units, D-Bus, logins and gettys, the session's plumbing (a program under `/usr/lib/systemd` or `/usr/libexec`, polkit, NetworkManager, display managers, udisks, upower). Packaged daemons such as docker, nginx, sshd and cups are third-party. Actions run `systemctl`, which asks polkit (the desktop's password dialog) for system units; a unit that doesn't exist is answered before polkit is asked. |
 | Files & Ports | Done: `/proc/<pid>/fd` links and working directories; sockets from `/proc/net/{tcp,tcp6,udp,udp6}` matched to processes by inode. Other users' descriptors need root. |
-| Battery, apps preventing sleep, temperatures | Battery from `/sys/class/power_supply` (energy or charge counters, health, cycles, adapter). Sleep: systemd-logind's `block` inhibitors (`busctl … ListInhibitors`) and GNOME's session inhibitors with the suspend or idle flag (`org.gnome.SessionManager.GetInhibitors`, where the Inhibit portal and `org.freedesktop.ScreenSaver` callers such as video players land); those carry an app id rather than a pid, so the pid comes from a registered session client, else the running process of the app's desktop entry. Temperatures from hwmon: `coretemp` package, `k10temp`/`zenpower` Tctl/Tdie, ARM thermal zones, ACPI as the fallback; NVMe/drivetemp for the disk. Fans: not yet. |
+| Battery, apps preventing sleep, temperatures | Battery from `/sys/class/power_supply` (energy or charge counters, health capped at 100%, cycles, adapter); the condition in macOS's words (`Good` is Normal, a failing battery Service Recommended, else from the health). Sleep: systemd-logind's `block` inhibitors (`busctl … ListInhibitors`) and GNOME's session inhibitors with the suspend or idle flag (`org.gnome.SessionManager.GetInhibitors`, where the Inhibit portal and `org.freedesktop.ScreenSaver` callers such as video players land); those carry an app id rather than a pid, so the pid comes from a registered session client, else the running process of the app's desktop entry. A display inhibitor counts as keeping the system awake too, as on macOS and Windows. Temperatures from hwmon: `coretemp` package (its cores without one), `k10temp`/`zenpower` Tdie (Tctl, which carries an offset on early Zen, only without it), ARM thermal zones, ACPI as the fallback; NVMe/drivetemp for the disk. `PC_CAP_TEMPERATURE` means a CPU sensor, as on macOS and Windows. Fans: not yet. |
 | History, alerts, palette, settings | Shared with Windows: `~/.local/share/procyon/history.bin`, `GNotification` alerts, `Ctrl+K`, settings in `~/.config/procyon/settings.ini`. |
 | Energy, explanations for Linux processes, plugins | Not started (RAPL is root-only since 2020). |
 
@@ -447,7 +466,11 @@ instance per session).
 There is no helper on Linux either: `helper_supported()` is false (the POSIX `HelperClient` builds, with
 `SO_PEERCRED` for the peer check, but nothing launches a helper). **Unlock Full Access** runs
 `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… procyon --page <current>`; the window hides while the
-root copy runs and comes back if authorization is dismissed. System services don't need it: polkit asks per action.
+root copy runs and comes back if authorization is dismissed, or with an alert if the root copy fails as it starts.
+The root copy serves the user who asked (`PKEXEC_UID`; `XDG_CONFIG_HOME`/`XDG_DATA_HOME` are passed through): it reads
+and writes their `settings.ini` and `history.bin` (handing new files back to them), lists their autostart entries
+and user units (`systemctl --user --machine=<user>@.host`). Meanwhile the original copy is paused without a tray
+icon, so one sampler, one tray icon and one writer remain. System services don't need it: polkit asks per action.
 
 ### Measured (i7-11700, 16 threads, about 175 processes, 1 s updates, release build)
 

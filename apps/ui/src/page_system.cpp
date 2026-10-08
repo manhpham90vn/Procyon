@@ -254,12 +254,7 @@ public:
                 r.badge(row.right() - bw, row.cy() - 8.5f, on ? L"On" : L"Off",
                         on ? Renderer::Tone::Success : Renderer::Tone::Neutral);
                 caption(inner,
-                        std::wstring(L"Full access runs Procyon as ") + os::admin +
-                            L". It lets Processes read and manage "
-                            L"system processes, Files & Ports list every process's files and connections, Startup and "
-                            L"Services switch machine-wide entries, and shows which apps keep the PC awake and how "
-                            L"much network each process uses. Without it, those rows show a lock.",
-                        3);
+                        std::wstring(L"Full access runs Procyon as ") + os::admin + L". " + os::full_access_caption, 3);
                 inner.take_top(tokens::space::sm);
                 row = inner.take_top(kRow);
                 if (on) {

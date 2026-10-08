@@ -276,7 +276,7 @@ private:
             Renderer::SparklineOptions options;
             options.end_dot = true;
             options.halo = true;
-            r.sparkline(spark.inset(0, 4), spec.series->data(), spec.series->size(), kHistoryWindow, spec.series_max,
+            r.sparkline(spark.inset(0, 4), spec.series->data(), spec.series->size(), history_window(), spec.series_max,
                         spec.kind, options);
         }
         if (spec.secondary && spec.secondary->size() > 1) {
@@ -285,7 +285,7 @@ private:
             options.halo = false;
             Color end = rgba(metric_style(spec.kind).end);
             options.color_override = &end;
-            r.sparkline(spark.inset(0, 4), spec.secondary->data(), spec.secondary->size(), kHistoryWindow,
+            r.sparkline(spark.inset(0, 4), spec.secondary->data(), spec.secondary->size(), history_window(),
                         spec.series_max, spec.kind, options);
         }
         r.pop_clip();

@@ -37,7 +37,8 @@ typedef enum {
     PC_CAP_SUSPEND = 1u << 9,      /* pc_process_suspend / pc_process_resume */
     PC_CAP_SIGNALS = 1u << 10,     /* pc_process_signal with POSIX signal numbers */
     PC_CAP_CPU_AFFINITY = 1u << 11,
-    PC_CAP_TEMPERATURE = 1u << 12,    /* pc_snapshot.cpu_temperature, disk_temperature where a sensor exists */
+    PC_CAP_TEMPERATURE = 1u << 12,    /* a CPU sensor: pc_snapshot.cpu_temperature, and disk_temperature
+                                         where the drive has a sensor too */
     PC_CAP_BATTERY = 1u << 13,        /* pc_battery_get */
     PC_CAP_SERVICES = 1u << 14,       /* pc_monitor_services, pc_service_control */
     PC_CAP_STARTUP = 1u << 15,        /* pc_monitor_startup_items, pc_startup_set_enabled */
@@ -305,7 +306,10 @@ pc_result pc_process_end(pc_monitor *monitor, int32_t pid, bool force);
 /* Force-kills pid and all its descendants (children first). */
 pc_result pc_process_end_tree(pc_monitor *monitor, int32_t pid);
 
-/* Sends a POSIX signal number (PC_CAP_SIGNALS). Protected processes refuse every signal. */
+/* Sends a POSIX signal (PC_CAP_SIGNALS). The number is the running OS's own, from its <signal.h>:
+ * they differ between macOS and Linux (SIGSTOP is 17 on macOS, 19 on Linux; SIGUSR1 30 and 10), so a
+ * caller uses the SIG* constants of the platform it runs on, never hard-coded numbers.
+ * Protected processes refuse every signal. */
 pc_result pc_process_signal(pc_monitor *monitor, int32_t pid, int32_t signal);
 
 /* Stops / continues every thread of the process (PC_CAP_SUSPEND). */

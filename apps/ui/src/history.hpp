@@ -92,8 +92,8 @@ private:
 enum class AppOrder { Cpu, Memory, Disk, Network, Gpu };
 
 // The history on disk: one record per minute with the busy apps of that minute, appended to a
-// file under %LOCALAPPDATA%\Procyon and compacted now and then. Everything is also kept in memory
-// (a day is 1,440 minutes), so queries don't touch the disk.
+// file in the data folder (%LOCALAPPDATA%\Procyon, ~/.local/share/procyon) and compacted now and then. Everything is
+// also kept in memory (a day is 1,440 minutes), so queries don't touch the disk.
 class HistoryDatabase {
 public:
     static constexpr int64_t kRetention = 24 * 3600;  // how far back the history goes, seconds

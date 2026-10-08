@@ -59,6 +59,11 @@ std::wstring bytes(int64_t value) {
     return bytes(static_cast<double>(value));
 }
 
+std::wstring endpoint(std::wstring_view address, int port) {
+    const std::wstring a(address);
+    return (a.find(L':') != std::wstring::npos ? L"[" + a + L"]" : a) + L":" + std::to_wstring(port);
+}
+
 std::wstring rate(double value) {
     if (!std::isfinite(value) || value < 0) return unavailable;
     if (value < 1024) return fixed(std::floor(value), 0) + L" B/s";

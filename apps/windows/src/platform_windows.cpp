@@ -147,6 +147,9 @@ std::shared_ptr<const Image> app_icon(std::wstring_view path, int pixels) {
     return image;
 }
 
+// The elevated copy runs as the same user, so its files are already theirs.
+void file_written(std::wstring_view) {}
+
 std::wstring clipboard_text() {
     std::wstring out;
     if (!OpenClipboard(nullptr)) return out;
