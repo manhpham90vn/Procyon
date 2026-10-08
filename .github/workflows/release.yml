@@ -33,6 +33,7 @@ concurrency:
 
 jobs:
   release:
+    name: macOS package & GitHub release
     runs-on: xcode-27
     timeout-minutes: 45
     outputs:
