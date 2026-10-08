@@ -165,7 +165,9 @@ samples; it needs a display, `xvfb-run -a` provides one in CI; exit status 1 whe
 `dist/linux/procyon --no-settings --page <page>` with `PROCYON_BENCH=1` (the app then prints a line when it draws its
 first frame, which times startup), samples CPU time from `/proc/<pid>/stat` and private memory (`RssAnon`) once a
 second, and measures `background` with `--background`. The CLI's numbers are compared with `/proc/stat`,
-`/proc/meminfo` and the process list. Output: `dist/bench-linux.json`. The same options as the Windows script.
+`/proc/meminfo` and the process list. Output: `dist/bench-linux.json`. The same options as the Windows script, plus
+`--renderer`: on Xvfb, which has no GPU, GTK's GL renderer runs on Mesa's llvmpipe, whose buffers count as the app's
+private memory (110-180 MB against about 35 MB of Procyon's own), so CI measures with `--renderer cairo`.
 
 ## Development
 

@@ -14,6 +14,11 @@ on every screen and running in the background only (--background), the release t
 far the numbers are from the kernel's own counters. Writes dist/bench-linux.json and, on GitHub
 Actions, a summary table. Needs a display: on CI, run it under xvfb-run.
 
+On a display without a GPU (Xvfb on a CI runner) GTK draws through Mesa's software OpenGL (llvmpipe),
+whose buffers and JIT land in the app's private memory: 110-180 MB where the same screen holds about
+35 MB on a desktop, whose GL buffers live in GPU memory. --renderer cairo (GSK_RENDERER) measures
+Procyon's own footprint there; CI passes it.
+
 Shared CI runners are noisy: a fixed piece of work is timed alongside each measurement; its slowdown
 against the fastest one of the run says how slow the runner was. A missed CPU or startup target whose
 every attempt ran on a slow runner is reported as NOISY and does not fail.
@@ -39,6 +44,7 @@ BUILD = ROOT / "build/linux"
 CLI = BUILD / "procyon-cli"
 MB = 1024 * 1024
 TICKS = os.sysconf("SC_CLK_TCK")
+RENDERER = None  # GSK_RENDERER for the app (--renderer), None: GTK's choice
 
 # Every screen of the main window; `background` is the window closed, Procyon sampling in the
 # background (tray or not), which has its own targets.
@@ -98,6 +104,8 @@ def probe(page, warmup, duration):
     args = [str(APP), "--no-settings"]
     args += ["--background"] if page == "background" else ["--page", page]
     env = dict(os.environ, PROCYON_BENCH="1")
+    if RENDERER:
+        env["GSK_RENDERER"] = RENDERER
     calibration = calibrate()
     started = time.monotonic()
     process = subprocess.Popen(args, env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
@@ -254,8 +262,11 @@ def main():
                         "accuracy are measured by shard 1 only")
     parser.add_argument("--known-misses", nargs="+", default=[], metavar="PAGE",
                         help="screens whose missed targets are reported but don't fail the run")
+    parser.add_argument("--renderer", help="GSK_RENDERER for the app (cairo on a display without a GPU, see above)")
     parser.add_argument("--output", type=Path, default=ROOT / "dist/bench-linux.json")
     args = parser.parse_args()
+    global RENDERER
+    RENDERER = args.renderer
     try:
         shard, shards = (int(n) for n in args.shard.split("/"))
         assert 1 <= shard <= shards
@@ -364,6 +375,8 @@ def main():
         {"sizes": sizes, "screens": screens, "attempts": attempts, "startup": batches, "calibration_baseline_ns": baseline,
          "accuracy": acc, "checks": [{"name": n, "value": s, "target": l, "result": r} for n, s, l, r in rows]},
         indent=2), encoding="utf-8")
+    if RENDERER:
+        print(f"\nGTK renderer: {RENDERER}")
     print(f"\nWrote {os.path.relpath(args.output, ROOT)}")
 
     noisy = [r for r in rows if r[3] == "NOISY"]

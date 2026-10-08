@@ -211,8 +211,10 @@ jobs:
       - name: Performance targets
         # The Linux counterpart of the macOS and Windows jobs: its screens plus the background only
         # state, measured from /proc on a virtual X display. Fails the build on a missed target.
+        # Xvfb has no GPU: GTK's GL renderer would run on Mesa's llvmpipe, whose buffers count as the
+        # app's private memory (3-4x its own), so the Cairo renderer measures Procyon itself.
         run: >-
-          xvfb-run -a scripts/bench-linux.py --attempts 3
+          xvfb-run -a scripts/bench-linux.py --attempts 3 --renderer cairo
           --shard ${{ matrix.shard }}/${{ strategy.job-total }} --output dist/bench-linux-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v7
         if: always()
