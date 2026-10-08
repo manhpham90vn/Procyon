@@ -383,6 +383,10 @@ public:
         for (const char *name : {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP",
                                  "XDG_CONFIG_HOME", "XDG_DATA_HOME"})
             if (const char *value = g_getenv(name)) args.push_back(std::string(name) + "=" + value);
+        // The desktop's light or dark preference as this copy reads it. The root copy can't: dconf finds
+        // the user's database through HOME, which pkexec sets to root's, so it would read no dark
+        // preference and turn a "System" appearance light.
+        args.push_back(std::string("PROCYON_DESKTOP_DARK=") + (platform::system_prefers_dark() ? "1" : "0"));
         args.emplace_back(exe);
         args.emplace_back("--page");
         args.emplace_back(current_ ? page_name(current_->id()) : "overview");

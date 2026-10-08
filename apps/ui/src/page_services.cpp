@@ -357,14 +357,25 @@ public:
     PageId id() const override { return PageId::Services; }
     std::wstring title() const override { return L"Services"; }
 
+    // The list comes from the store's worker (about a second on Linux): the screen opens at once with
+    // the last list and takes the new one on the tick after it arrives.
     void activate(Host &host) override {
         host_ = &host;
-        services_ = host.store().services();
-        loaded_ = true;
-        sort();
+        host.store().request_services();
+        take_services(host);
     }
     void tick(Host &host) override {
-        if (host.store().ticks() % 5 == 0) activate(host);
+        if (host.store().ticks() % 5 == 0) host.store().request_services();
+        take_services(host);
+    }
+    void take_services(Host &host) {
+        uint64_t generation = 0;
+        std::vector<pc_service> list = host.store().services(&generation);
+        if (generation == 0 || generation == generation_) return;
+        generation_ = generation;
+        services_ = std::move(list);
+        loaded_ = true;
+        sort();
     }
 
     void paint(Host &host, const Rect &bounds) override {
@@ -613,6 +624,7 @@ private:
     int filter_ = 1;  // Running, like the macOS default
     int domain_ = 0;
     bool loaded_ = false;
+    uint64_t generation_ = 0;  // the store's service listing this list came from
     std::vector<pc_service> services_;
     std::vector<size_t> filtered_;
 };

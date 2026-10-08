@@ -729,14 +729,25 @@ float D2DCanvas::draw_text(std::wstring_view value, const Rect &r, const TextSty
     return metrics.widthIncludingTrailingWhitespace;
 }
 
-float D2DCanvas::measure_text(std::wstring_view value, Font font, float tracking) {
+float D2DCanvas::measure_text(std::wstring_view value, Font font, float tracking, bool tabular) {
     if (value.empty()) return 0;
     TextStyle style;
     style.font = font;
     style.trim = false;
     style.tracking = tracking;
+    style.tabular = tabular;
     const CachedLayout *l = layout(value, style, 10000, 10000);
     return l ? l->metrics.widthIncludingTrailingWhitespace : 0;
+}
+
+float D2DCanvas::baseline(Font font) {
+    TextStyle style;
+    style.font = font;
+    const CachedLayout *l = layout(L"Ag", style, 1000, 1000);
+    DWRITE_LINE_METRICS line{};
+    UINT32 lines = 0;
+    if (!l || FAILED(l->layout->GetLineMetrics(&line, 1, &lines)) || lines == 0) return font_spec(font).size;
+    return line.baseline;
 }
 
 float D2DCanvas::line_height(Font font) {

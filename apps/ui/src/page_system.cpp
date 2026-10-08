@@ -57,8 +57,10 @@ public:
             TextStyle os;
             os.font = Font::Body;
             os.valign = VAlign::Top;
-            r.text(fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version) + L" (" +
-                       fmt::from_utf8(info.os_build) + L") · " + fmt::from_utf8(info.hostname),
+            // The build in brackets only where the OS has one (Linux distributions mostly don't).
+            const std::wstring build = info.os_build[0] ? L" (" + fmt::from_utf8(info.os_build) + L")" : L"";
+            r.text(fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version) + build + L" · " +
+                       fmt::from_utf8(info.hostname),
                    Rect{inner.x, inner.y + 80, inner.w, 20}, os, theme.text_secondary());
             y = card.bottom() + kSectionGap;
         }
@@ -75,7 +77,7 @@ public:
             hardware.push_back({L"Frequency", fmt::number(info.cpu_frequency_hz / 1e9, 2) + L" GHz", L""});
         const std::vector<Stat> software = {
             {L"Operating system", fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version),
-             L"Build " + fmt::from_utf8(info.os_build)},
+             info.os_build[0] ? L"Build " + fmt::from_utf8(info.os_build) : std::wstring()},
             {L"Hostname", fmt::from_utf8(info.hostname), L""},
             {L"Uptime", fmt::duration(uptime), L"Since " + fmt::date_time(info.boot_time)},
             {L"Processes", fmt::count(s.process_count), fmt::count(s.thread_count) + L" threads"},

@@ -236,12 +236,18 @@ private:
         TextStyle body;
         body.font = Font::Body;
         body.valign = VAlign::Top;
-        r.text(fmt::from_utf8(info.cpu_brand) + L" · " + fmt::bytes(static_cast<int64_t>(info.memory_total)) + L" · " +
-                   fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version),
-               Rect{text.x, text.y + 40 + tokens::space::xs, text.w, 18}, body, theme.text_secondary());
+        // The chip, memory and OS on one line, or two where they don't fit (as the macOS hero wraps),
+        // the badges below whichever it took.
+        const std::wstring summary = fmt::from_utf8(info.cpu_brand) + L" · " +
+                                     fmt::bytes(static_cast<int64_t>(info.memory_total)) + L" · " +
+                                     fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version);
+        const bool two_lines = r.measure(summary, Font::Body) > text.w;
+        body.wrap = two_lines;
+        const float summary_h = two_lines ? 36 : 18;
+        r.text(summary, Rect{text.x, text.y + 40 + tokens::space::xs, text.w, summary_h}, body, theme.text_secondary());
         const double uptime = s.timestamp > 0 && info.boot_time > 0 ? s.timestamp - info.boot_time : 0;
         float bx = text.x;
-        const float by = text.y + 40 + tokens::space::xs + 18 + tokens::space::xs + 4;
+        const float by = text.y + 40 + tokens::space::xs + summary_h + tokens::space::xs + 4;
         bx += r.badge(bx, by, L"Up " + fmt::duration(uptime), Renderer::Tone::Accent) + tokens::space::xs + 2;
         bx += r.badge(bx, by, fmt::count(s.process_count) + L" processes", Renderer::Tone::Neutral) +
               tokens::space::xs + 2;
