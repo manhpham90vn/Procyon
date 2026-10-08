@@ -121,6 +121,15 @@ Control, where it is on, refuses unsigned apps altogether.
 
 ### Linux
 
+On Debian, Ubuntu and their derivatives, download the latest `procyon_x.y.z_amd64.deb` from the
+[Releases page](https://github.com/manhpham90vn/Procyon/releases/latest) and install it; apt pulls in GTK 4:
+
+```sh
+sudo apt install ./procyon_x.y.z_amd64.deb
+```
+
+On other distributions:
+
 1. Download the latest `Procyon-x.y.z-linux-x86_64.tar.gz` from the [Releases page](https://github.com/manhpham90vn/Procyon/releases/latest).
 2. Unpack it into `~/.local` (or `/usr/local` with `sudo`): the binary goes to `bin`, the desktop entry, icon
    and licenses to `share`, and Procyon appears in your app grid.
@@ -235,9 +244,10 @@ On macOS:
 On Windows, quit Procyon (right-click its tray icon → Quit), delete the folder you unzipped it into, and
 optionally delete the settings key `HKEY_CURRENT_USER\Software\Procyon`.
 
-On Linux, quit Procyon (`Ctrl+Q`), delete `bin/procyon`, `share/applications/dev.procyon.Procyon.desktop`,
+On Linux, quit Procyon (`Ctrl+Q`) and run `sudo apt remove procyon` if you installed the .deb. From the
+tarball, delete `bin/procyon`, `share/applications/dev.procyon.Procyon.desktop`,
 `share/metainfo/dev.procyon.Procyon.metainfo.xml`, `share/icons/hicolor/512x512/apps/dev.procyon.Procyon.png`
-and `share/licenses/procyon` from where you unpacked it, and optionally `~/.config/procyon` and
+and `share/licenses/procyon` from where you unpacked it. Optionally delete `~/.config/procyon` and
 `~/.local/share/procyon`.
 
 ## Known limitations

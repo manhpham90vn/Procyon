@@ -140,8 +140,8 @@ jobs:
           $tag = "${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.release.outputs.version) }}"
           gh release upload $tag "dist\Procyon-$v-windows-x64.zip" "dist\Procyon-$v-windows-x64.sha256" --clobber
 
-  # Linux: a tarball with the binary (fonts embedded), desktop entry, icon and the licenses of what it
-  # embeds, attached to the same release. Built on the oldest supported base for a portable glibc.
+  # Linux: a tarball and a .deb with the binary (fonts embedded), desktop entry, icon and the licenses of
+  # what it embeds, attached to the same release. Built on the oldest supported base for a portable glibc.
   linux:
     name: Linux package
     needs: release
@@ -163,4 +163,5 @@ jobs:
         run: |
           v="${{ needs.release.outputs.version }}"
           tag="${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.release.outputs.version) }}"
-          gh release upload "$tag" "dist/Procyon-$v-linux-x86_64.tar.gz" "dist/Procyon-$v-linux-x86_64.sha256" --clobber
+          gh release upload "$tag" "dist/Procyon-$v-linux-x86_64.tar.gz" dist/procyon_*_amd64.deb \
+            "dist/Procyon-$v-linux-x86_64.sha256" --clobber

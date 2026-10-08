@@ -116,7 +116,7 @@ tools: ## Print the packages the Linux build needs
 install: app ## Install into PREFIX (default ~/.local): binary, desktop entry, icon, licenses
 	cmake --install build/linux --prefix "$(PREFIX)"
 
-package: app ## dist/Procyon-<version>-linux-<arch>.tar.gz and its SHA-256
+package: app ## dist/Procyon-<version>-linux-<arch>.tar.gz, a .deb (with dpkg-deb) and their SHA-256
 	scripts/package-linux.sh
 
 clean: ## Remove build outputs
