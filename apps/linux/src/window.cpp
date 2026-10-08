@@ -1214,6 +1214,10 @@ private:
         if (current_) current_->tick(*this);
         for (auto &overlay : overlays_) overlay->tick(*this);
         if (screenshot_ && ++screenshot_samples_ == 6) take_screenshot();
+        // In the background, return what the samples freed: the first ones read every desktop entry,
+        // GPU and sensor once, and glibc keeps freed pages of the sampler's arena otherwise. Then once
+        // a minute, which costs a few microseconds.
+        if (hidden_ && (++hidden_samples_ == 3 || hidden_samples_ % 60 == 0)) malloc_trim(0);
         update_tray();
         repaint();
     }
@@ -1331,6 +1335,7 @@ private:
         // freed pages, so the background footprint is the sampler's, not the window's.
         canvas_.trim();
         malloc_trim(0);
+        hidden_samples_ = 0;
     }
 
     void show_again() {
@@ -1420,6 +1425,7 @@ private:
     int screenshot_samples_ = 0;
     bool failed_ = false;
     bool start_in_background_ = false;
+    int hidden_samples_ = 0;  // samples since the window was hidden
     bool first_frame_reported_ = false;
     std::unique_ptr<Tray> tray_;
     bool handed_over_ = false;  // a root copy runs in this one's place

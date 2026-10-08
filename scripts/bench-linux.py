@@ -134,12 +134,14 @@ def probe(page, warmup, duration):
             memory.append(private_bytes(process.pid))
             time.sleep(1)
         ticks1, t1 = cpu_ticks(process.pid), time.monotonic()
+        samples = list(memory)  # in time order, for the JSON: shows growth or a startup peak
         memory.sort()
         result.update(
             cpu_percent_of_core=(ticks1 - ticks0) / TICKS / (t1 - t0) * 100,
             memory_p90_bytes=memory[min(len(memory) - 1, int(len(memory) * 0.9))],
             memory_peak_bytes=memory[-1],
             memory_average_bytes=statistics.mean(memory),
+            memory_samples_bytes=samples,
         )
         return result
     finally:
