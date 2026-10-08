@@ -108,9 +108,10 @@ icon: ## (macOS and Windows) re-render the app icon; Linux installs the shared P
 	@echo "Linux uses apps/macos/Resources/AppIcon.png as is (make icon on macOS re-renders it)"
 
 tools: ## Print the packages the Linux build needs
-	@echo "Debian/Ubuntu: sudo apt install build-essential cmake ninja-build pkg-config libgtk-4-dev clang-format clang-tidy shellcheck"
+	@echo "Debian/Ubuntu: sudo apt install build-essential cmake ninja-build pkg-config libgtk-4-dev clang-tidy shellcheck"
 	@echo "Fedora:        sudo dnf install gcc-c++ cmake ninja-build pkgconf gtk4-devel clang-tools-extra ShellCheck"
 	@echo "Arch:          sudo pacman -S base-devel cmake ninja pkgconf gtk4 clang shellcheck"
+	@echo "clang-format:  19 or later (CI pins 19.1.0: pipx install clang-format==19.1.0); older ones format differently"
 
 install: app ## Install into PREFIX (default ~/.local): binary, desktop entry, icon, licenses
 	cmake --install build/linux --prefix "$(PREFIX)"

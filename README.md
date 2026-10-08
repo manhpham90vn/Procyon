@@ -298,7 +298,8 @@ You need a C++20 compiler, CMake, Ninja and GTK 4 (`make tools` prints the packa
 and Arch):
 
 ```sh
-sudo apt install build-essential cmake ninja-build pkg-config libgtk-4-dev clang-format
+sudo apt install build-essential cmake ninja-build pkg-config libgtk-4-dev
+pipx install clang-format==19.1.0   # for make lint/format: 19 or later (Ubuntu 24.04's apt package is 18)
 git clone https://github.com/manhpham90vn/Procyon.git
 cd Procyon
 make run       # build dist/linux/procyon and open it

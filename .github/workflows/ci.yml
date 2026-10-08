@@ -124,7 +124,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build pkg-config \
-            libgtk-4-dev clang-format shellcheck xvfb
+            libgtk-4-dev shellcheck xvfb
+      - name: Install clang-format 19.1.0
+        # The version the Windows job pins (scripts/tools-windows.ps1): apt's clang-format 18 lays out
+        # `struct stat info{};` differently from 19 and later, which the sources follow.
+        run: pipx install clang-format==19.1.0
       - name: Lint (generated files, clang-format, shellcheck, python)
         # clang-tidy runs in the macOS job; the Linux sources are formatted and built here.
         run: SKIP_TIDY=1 scripts/lint.sh
