@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
 
+#include "commands.hpp"
 #include "widgets.hpp"
 
 namespace procyon::ui {
@@ -36,7 +38,7 @@ void floating_panel(Renderer &r, const Rect &panel) {
 class CommandPalette : public Overlay {
 public:
     explicit CommandPalette(std::vector<PaletteItem> items) : items_(std::move(items)) {
-        field_.placeholder = L"Jump to a screen, run a command, or find an app";
+        field_.placeholder = kPlaceholder;
         field_.keycap = L"";
         field_.focused = true;
         filter();
@@ -123,7 +125,18 @@ public:
 
     bool key(Host &host, const KeyEvent &e) override {
         switch (e.key) {
-            case Key::Escape: close(); return true;
+            case Key::Escape:
+                if (!levels_.empty())
+                    back();
+                else
+                    close();
+                return true;
+            case Key::Back:
+                if (field_.text.empty() && !levels_.empty()) {
+                    back();
+                    return true;
+                }
+                break;
             case Key::Down:
                 selected_ = std::min(static_cast<int>(std::min<size_t>(matches_.size(), 9)) - 1, selected_ + 1);
                 return true;
@@ -144,15 +157,32 @@ public:
         return false;
     }
 
+    bool is_palette() const override { return true; }
+
 private:
+    static constexpr const wchar_t *kPlaceholder = L"Jump to a screen, run a command, or find an app";
+
+    // Every word of the query appears in the title or subtitle, in any order ("chrome end").
+    static bool matches(const PaletteItem &item, const std::vector<std::wstring> &words) {
+        const std::wstring text = lower(item.title) + L" " + lower(item.subtitle);
+        for (const std::wstring &word : words)
+            if (text.find(word) == std::wstring::npos) return false;
+        return true;
+    }
+
     void filter() {
         matches_.clear();
         const std::wstring needle = lower(field_.text);
+        std::vector<std::wstring> words;
+        for (size_t start = 0; start < needle.size();) {
+            const size_t end = std::min(needle.find(L' ', start), needle.size());
+            if (end > start) words.push_back(needle.substr(start, end - start));
+            start = end + 1;
+        }
         for (size_t i = 0; i < items_.size(); ++i) {
-            if (needle.empty() && items_[i].kind == PaletteItem::Kind::App) continue;  // apps only on demand
-            if (needle.empty() || lower(items_[i].title).find(needle) != std::wstring::npos ||
-                lower(items_[i].subtitle).find(needle) != std::wstring::npos)
-                matches_.push_back(i);
+            // At the top level apps appear only on demand.
+            if (needle.empty() && levels_.empty() && items_[i].kind == PaletteItem::Kind::App) continue;
+            if (words.empty() || matches(items_[i], words)) matches_.push_back(i);
         }
         // Screens, then commands, then apps; apps with more CPU first stay in their given order.
         std::stable_sort(matches_.begin(), matches_.end(), [&](size_t a, size_t b) {
@@ -166,11 +196,32 @@ private:
 
     void run(Host &, int index) {
         if (index < 0 || index >= static_cast<int>(matches_.size())) return;
-        const PaletteItem item = items_[matches_[static_cast<size_t>(index)]];
+        PaletteItem item = items_[matches_[static_cast<size_t>(index)]];
+        if (!item.children.empty()) {
+            levels_.push_back({std::move(items_), field_.placeholder});
+            items_ = std::move(item.children);
+            field_.placeholder = item.title;
+            field_.text.clear();
+            filter();
+            return;
+        }
         close();
         if (item.run) item.run();
     }
 
+    void back() {
+        items_ = std::move(levels_.back().items);
+        field_.placeholder = levels_.back().placeholder;
+        levels_.pop_back();
+        field_.text.clear();
+        filter();
+    }
+
+    struct Level {
+        std::vector<PaletteItem> items;
+        std::wstring placeholder;
+    };
+    std::vector<Level> levels_;  // the levels above this one
     std::vector<PaletteItem> items_;
     std::vector<size_t> matches_;
     TextField field_;
@@ -239,7 +290,7 @@ public:
         r.push_clip(content_);
         float y = content_.y - scroll_.offset;
         switch (tab_) {
-            case 0: y = paint_info(r, content_, y); break;
+            case 0: y = paint_info(r, content_, y, host.elevated()); break;
             case 1: y = paint_threads(r, content_, y); break;
             case 2: y = paint_files(r, content_, y); break;
             case 3: y = paint_network(r, content_, y); break;
@@ -352,7 +403,7 @@ private:
         return y + height + tokens::space::sm;
     }
 
-    float paint_info(Renderer &r, const Rect &area, float y) {
+    float paint_info(Renderer &r, const Rect &area, float y, bool elevated) {
         const Theme &theme = r.theme();
         const pc_process &p = process_;
         y = row(r, area, y, L"Name", name_);
@@ -366,12 +417,11 @@ private:
                 : p.state == PC_STATE_ZOMBIE   ? L"Exited"
                 : p.state == PC_STATE_SLEEPING ? L"Waiting"
                                                : L"Unknown");
+        // The Processes menu's steps; a nice value between them is shown as well (Linux).
+        const PriorityStep &step = priority_step(p.nice);
         y = row(r, area, y, L"Priority",
-                p.nice <= -15 ? L"High"
-                : p.nice < 0  ? L"Above normal"
-                : p.nice == 0 ? L"Normal"
-                : p.nice <= 8 ? L"Below normal"
-                              : L"Low");
+                std::wstring(step.title) +
+                    (os::nice_is_exact && step.nice != p.nice ? L" (nice " + std::to_wstring(p.nice) + L")" : L""));
         y = row(r, area, y, L"CPU", fmt::cpu(p.cpu_percent));
         y = row(r, area, y, L"Memory", fmt::bytes(p.memory_bytes));
         y = row(r, area, y, L"Disk",
@@ -391,7 +441,10 @@ private:
                 y = row(r, area, y, L"Command line", command, true);
             else
                 y = row(r, area, y, L"Command line", std::wstring(L"Not readable without ") + os::admin + L" rights");
-            if (!details_->environment.empty()) {
+            // Every process has some environment: none read means it is another user's.
+            if (details_->environment.empty() && !elevated)
+                y = row(r, area, y, L"Environment", std::wstring(L"Not readable without ") + os::admin + L" rights");
+            else if (!details_->environment.empty()) {
                 r.panel_caption(Rect{area.x, y + 4, area.w, 20}, L"Environment");
                 y += 28;
                 TextStyle mono;
@@ -406,10 +459,16 @@ private:
         return y;
     }
 
+    static std::wstring need_rights() {
+        std::wstring text = std::wstring(os::admin) + L" rights are needed for this process.";
+        text[0] = static_cast<wchar_t>(towupper(text[0]));
+        return text;
+    }
+
     float paint_threads(Renderer &r, const Rect &area, float y) {
         const Theme &theme = r.theme();
         if (!details_ || !details_->info.threads_known) {
-            empty_state(r, area, L"Threads not readable", L"Administrator rights are needed for this process.");
+            empty_state(r, area, L"Threads not readable", need_rights());
             return y;
         }
         Rect head{area.x, y, area.w, 22};
@@ -460,7 +519,7 @@ private:
         if (!handles_loaded_) return y;
         if (files_.empty()) {
             empty_state(r, area, files_complete_ ? L"No files open" : L"Not readable",
-                        files_complete_ ? L"" : L"Administrator rights are needed for this process.");
+                        files_complete_ ? std::wstring() : need_rights());
             return y;
         }
         if (!files_complete_) {
@@ -502,9 +561,9 @@ private:
                 const std::wstring proto = c.protocol == PC_PROTOCOL_TCP ? (c.family == 6 ? L"TCP6" : L"TCP")
                                                                          : (c.family == 6 ? L"UDP6" : L"UDP");
                 r.text(proto, Rect{area.x, y, 56, 22}, b, theme.text_secondary());
-                r.text(fmt::from_utf8(c.local_address) + L":" + std::to_wstring(c.local_port),
-                       Rect{area.x + 56, y, 190, 22}, b, theme.text());
-                r.text(c.remote_address[0] ? fmt::from_utf8(c.remote_address) + L":" + std::to_wstring(c.remote_port)
+                r.text(fmt::endpoint(fmt::from_utf8(c.local_address), c.local_port), Rect{area.x + 56, y, 190, 22}, b,
+                       theme.text());
+                r.text(c.remote_address[0] ? fmt::endpoint(fmt::from_utf8(c.remote_address), c.remote_port)
                                            : std::wstring(fmt::unavailable),
                        Rect{area.x + 250, y, area.w - 350, 22}, b,
                        c.remote_address[0] ? theme.text() : theme.text_tertiary());
@@ -512,7 +571,7 @@ private:
                                        : c.state == PC_TCP_ESTABLISHED ? L"Established"
                                        : c.state == PC_TCP_TIME_WAIT   ? L"Time wait"
                                        : c.state == PC_TCP_CLOSE_WAIT  ? L"Close wait"
-                                       : c.state == PC_TCP_NONE        ? L""
+                                       : c.state == PC_TCP_NONE        ? (c.remote_address[0] ? L"" : L"Listening")
                                                                        : L"Closing";
                 b.halign = HAlign::Right;
                 r.text(state, Rect{area.right() - 100, y, 100, 22}, b, theme.text_secondary());
@@ -551,6 +610,78 @@ private:
 
 std::unique_ptr<Overlay> make_command_palette(std::vector<PaletteItem> items) {
     return std::make_unique<CommandPalette>(std::move(items));
+}
+
+std::vector<PaletteItem> app_palette_actions(Host &host, const Row &row, const pc_process *process,
+                                             const std::wstring &name, std::function<void(int)> command) {
+    using Kind = PaletteItem::Kind;
+    const int32_t pid = row.is_group() ? row.group_pid : process ? process->pid : 0;
+    const std::string app_id = row.is_group() ? row.group_id : process ? std::string(process->app_id) : std::string();
+    const bool locked = process && (process->flags & PC_PROC_PROTECTED);
+    const bool system = process && (process->flags & PC_PROC_SYSTEM);
+    const std::wstring path = process ? fmt::from_utf8(process->path) : std::wstring();
+    Store &store = host.store();
+    std::vector<PaletteItem> items;
+    auto add = [&items](std::wstring title, std::wstring subtitle, std::function<void()> run) {
+        items.push_back({Kind::Command, std::move(title), std::move(subtitle), L"", std::move(run)});
+    };
+    // Ending goes through the Processes screen with the app selected: the same confirmations and
+    // the same protection as its End Task button.
+    if (!locked) {
+        const std::wstring members =
+            row.process_count > 1 ? L"End " + std::to_wstring(row.process_count) + L" Processes" : L"End Task";
+        add(members, name, [&host, app_id, pid, command] {
+            host.show_in_processes(app_id, pid);
+            command(IDM_END_TASK);
+        });
+        add(L"Force Quit", name, [&host, app_id, pid, command] {
+            host.show_in_processes(app_id, pid);
+            command(IDM_FORCE_QUIT);
+        });
+    }
+    if (!locked && store.has(PC_CAP_SUSPEND) && pid > 0) {
+        if (process && process->state == PC_STATE_STOPPED)
+            add(L"Resume", name, [&host, pid] {
+                if (const pc_result result = host.store().resume(pid); result != PC_OK)
+                    host.report(result, L"resume the process");
+                host.store().refresh_now();
+            });
+        else
+            add(L"Suspend", name, [&host, pid, name] {
+                if (!host.confirm(L"Suspend " + name + L"?",
+                                  L"The process stops running until you resume it. Apps may become unresponsive.",
+                                  L"Suspend", false))
+                    return;
+                if (const pc_result result = host.store().suspend(pid); result != PC_OK)
+                    host.report(result, L"suspend the process");
+                host.store().refresh_now();
+            });
+    }
+    if (!locked && store.has(PC_CAP_PRIORITY) && pid > 0) {
+        PaletteItem priority{Kind::Command, L"Set Priority", name, L"", nullptr};
+        for (const PriorityStep &step : priority_steps())
+            priority.children.push_back(
+                {Kind::Command, step.title, L"", L"", [&host, pid, name, system, nice = step.nice, title = step.title] {
+                     if (system && !host.confirm(L"Change the priority of “" + name + L"”?",
+                                                 std::wstring(L"This is a ") + os::name +
+                                                     L" system process. Changing its priority can make " + os::name +
+                                                     L" slower or less responsive.",
+                                                 std::wstring(L"Set to ") + title, false))
+                         return;
+                     if (const pc_result result = host.store().set_priority(pid, nice); result != PC_OK)
+                         host.report(result, L"change the priority");
+                     host.store().refresh_now();
+                 }});
+        items.push_back(std::move(priority));
+    }
+    if (pid > 0) add(L"Get Info", name, [&host, pid] { host.show_info(pid); });
+    add(L"Show in Processes", name, [&host, app_id, pid] { host.show_in_processes(app_id, pid); });
+    if (!path.empty()) {
+        add(L"Open File Location", path, [&host, path] { host.open_in_explorer(path); });
+        add(L"Copy Path", path, [&host, path] { host.copy_to_clipboard(path); });
+    }
+    if (pid > 0) add(L"Copy PID", std::to_wstring(pid), [&host, pid] { host.copy_to_clipboard(std::to_wstring(pid)); });
+    return items;
 }
 
 std::unique_ptr<Overlay> make_info_sheet(int32_t pid) { return std::make_unique<InfoSheet>(pid); }

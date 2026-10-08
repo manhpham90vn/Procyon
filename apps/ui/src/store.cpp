@@ -1,6 +1,7 @@
 #include "store.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -51,8 +52,21 @@ void Store::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
+namespace {
+std::atomic<size_t> history_samples{60};
+}  // namespace
+
+size_t history_window() { return history_samples.load(std::memory_order_relaxed); }
+
+void set_history_interval(double seconds) {
+    const double samples = std::round(kHistorySeconds / std::clamp(seconds, 0.5, 5.0));
+    history_samples.store(std::clamp<size_t>(static_cast<size_t>(samples), 2, kHistoryMaxSamples),
+                          std::memory_order_relaxed);
+}
+
 void Store::set_interval(double seconds) {
     interval_ = std::clamp(seconds, 0.5, 5.0);
+    set_history_interval(interval_);
     wake_.notify_all();
 }
 
@@ -325,6 +339,11 @@ pc_result Store::end_process(int32_t pid, bool force) {
 pc_result Store::end_tree(int32_t pid) {
     std::lock_guard lock(monitor_mutex_);
     return pc_process_end_tree(monitor_, pid);
+}
+
+pc_result Store::send_signal(int32_t pid, int32_t signal) {
+    std::lock_guard lock(monitor_mutex_);
+    return pc_process_signal(monitor_, pid, signal);
 }
 
 pc_result Store::suspend(int32_t pid) {

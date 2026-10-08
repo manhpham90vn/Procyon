@@ -1,4 +1,4 @@
-// Shared UI foundation for the non-Apple Procyon apps (Windows today, Linux next): geometry,
+// Shared UI foundation for the non-Apple Procyon apps (Windows and Linux): geometry,
 // colors, the theme (design tokens resolved for light or dark), formatting, the vector path and
 // Canvas interface each platform implements, and the Renderer that draws every component of
 // design/components.md on top of a Canvas. Nothing in here includes a platform header.
@@ -118,6 +118,7 @@ std::wstring cpu(double percent);                                            // 
 std::wstring bytes(double value);                                            // base 1024
 std::wstring bytes(int64_t value);                                           // -1 unknown
 std::wstring rate(double bytes_per_second);                                  // "1.2 MB/s"
+std::wstring endpoint(std::wstring_view address, int port);                  // "[::1]:443", "1.2.3.4:443"
 std::wstring count(int64_t value);                                           // "1,234"
 std::wstring duration(double seconds);                                       // "2h 15m"
 std::wstring temperature(double celsius, bool fahrenheit);                   // "61°C"

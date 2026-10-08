@@ -1,5 +1,6 @@
-// Startup (Run keys and Startup folders) and Services (Service Control Manager), laid out like
-// the macOS StartupView and ServicesView: header with controls, notice, table card, footnote.
+// Startup (Run keys, Startup folders and logon tasks on Windows; XDG autostart on Linux) and Services
+// (Service Control Manager; systemd units), laid out like the macOS StartupView and ServicesView: header with controls,
+// notice, table card, footnote.
 #include <algorithm>
 #ifndef _WIN32
 #include <strings.h>
@@ -242,8 +243,7 @@ private:
             }
             case ColEnabled:
                 c.toggle = i.enabled;
-                c.toggle_enabled =
-                    !i.managed_by_os && (host_ && (host_->elevated() || i.scope == PC_STARTUP_USER_AGENT));
+                c.toggle_enabled = can_switch(i);
                 break;
             default: break;
         }
@@ -275,6 +275,14 @@ private:
         table_.select(std::min(table_.selected, static_cast<int>(filtered_.size()) - 1));
     }
 
+    // Whether this Procyon can switch the item: the OS's own items never, machine-wide ones only
+    // where that needs no elevation (a per-user override on Linux) or Procyon is elevated.
+    bool can_switch(const pc_startup_item &i) const {
+        if (i.managed_by_os) return false;
+        if (i.scope == PC_STARTUP_USER_AGENT || !os::machine_startup_needs_elevation) return true;
+        return host_ && host_->elevated();
+    }
+
     void toggle(int row) {
         if (!host_ || row < 0 || row >= static_cast<int>(filtered_.size())) return;
         const pc_startup_item i = item(row);
@@ -296,7 +304,7 @@ private:
         if (!host_) return;
         const pc_startup_item i = item(row);
         std::vector<MenuItem> items;
-        items.push_back({i.enabled ? MenuDisable : MenuEnable, i.enabled ? L"Disable" : L"Enable", !i.managed_by_os});
+        items.push_back({i.enabled ? MenuDisable : MenuEnable, i.enabled ? L"Disable" : L"Enable", can_switch(i)});
         items.push_back({0, L"", true, false, true});
         items.push_back(
             {MenuOpenLocation, std::wstring(L"Show in ") + os::file_manager, i.app_path[0] != 0 || i.program[0] != 0});

@@ -2,6 +2,8 @@
 // (the Shadow effect of a device context), clipping and text in the bundled Inter and Nunito.
 #include "canvas_d2d.hpp"
 
+#include <wincodec.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -12,6 +14,7 @@
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "windowscodecs.lib")
 
 namespace procyon::ui {
 
@@ -262,12 +265,65 @@ bool D2DCanvas::end() {
     while (!transforms_.empty()) pop_transform();
     prune_layouts();
     HRESULT hr = target_->EndDraw();
+    // Before Present: a flip-model swap chain's buffer 0 is the frame just drawn only until then.
+    if (SUCCEEDED(hr) && !capture_path_.empty()) {
+        captured_ = save_back_buffer(capture_path_);
+        capture_path_.clear();
+    }
     if (SUCCEEDED(hr)) hr = swap_chain_->Present(1, 0);
     if (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         release_device();
         return false;
     }
     return SUCCEEDED(hr);
+}
+
+// Copies the back buffer into a CPU-readable texture and encodes it as a PNG with WIC. The buffer is
+// premultiplied BGRA; the PNG gets straight alpha, which is opaque wherever the page drew.
+bool D2DCanvas::save_back_buffer(const std::wstring &path) {
+    ComPtr<ID3D11Texture2D> buffer;
+    if (FAILED(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&buffer)))) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    buffer->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(d3d_->CreateTexture2D(&desc, nullptr, &staging))) return false;
+    ComPtr<ID3D11DeviceContext> context;
+    d3d_->GetImmediateContext(&context);
+    context->CopyResource(staging.Get(), buffer.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+    const UINT stride = desc.Width * 4;
+    std::vector<BYTE> pixels(static_cast<size_t>(stride) * desc.Height);
+    for (UINT y = 0; y < desc.Height; ++y) {
+        const BYTE *from = static_cast<const BYTE *>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch;
+        BYTE *to = pixels.data() + static_cast<size_t>(y) * stride;
+        for (UINT x = 0; x < desc.Width; ++x, from += 4, to += 4) {
+            const BYTE a = from[3];
+            for (int c = 0; c < 3; ++c) to[c] = a ? static_cast<BYTE>(std::min(255, from[c] * 255 / a)) : 0;
+            to[3] = a;
+        }
+    }
+    context->Unmap(staging.Get(), 0);
+
+    ComPtr<IWICImagingFactory> wic;
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) ||
+        FAILED(wic->CreateStream(&stream)) || FAILED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) ||
+        FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) ||
+        FAILED(encoder->CreateNewFrame(&frame, nullptr)) || FAILED(frame->Initialize(nullptr)) ||
+        FAILED(frame->SetSize(desc.Width, desc.Height)))
+        return false;
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    if (FAILED(frame->SetPixelFormat(&format)) || format != GUID_WICPixelFormat32bppBGRA) return false;
+    return SUCCEEDED(frame->WritePixels(desc.Height, stride, static_cast<UINT>(pixels.size()), pixels.data())) &&
+           SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -118,8 +118,8 @@ void run_key_items(const RunSource &source, std::vector<pc_startup_item> &out) {
         if (display.empty() || GetFileAttributesW(wide(executable).c_str()) == INVALID_FILE_ATTRIBUTES)
             display = utf8(value_name);
         copy_string(item.name, sizeof(item.name), display);
-        copy_string(item.program, sizeof(item.program), command);
-        copy_string(item.app_path, sizeof(item.app_path), executable);
+        // program is the executable (procyon.h), as on macOS and Linux; app_path is for app bundles.
+        copy_string(item.program, sizeof(item.program), executable.empty() ? command : executable);
         copy_string(item.config_path, sizeof(item.config_path),
                     std::string(source.root == HKEY_CURRENT_USER ? "HKCU\\" : "HKLM\\") + utf8(source.key) +
                         (source.view == KEY_WOW64_32KEY ? " (32-bit)" : ""));
@@ -190,7 +190,6 @@ void folder_items(const std::string &folder, HKEY root, const char *tag, int32_t
         if (const auto dot = display.find_last_of('.'); dot != std::string::npos && dot > 0) display.resize(dot);
         copy_string(item.name, sizeof(item.name), display);
         copy_string(item.program, sizeof(item.program), target);
-        copy_string(item.app_path, sizeof(item.app_path), target);
         copy_string(item.config_path, sizeof(item.config_path), full);
         item.scope = scope;
         item.pid = target.empty() ? 0 : pid_of_executable(target);
@@ -372,8 +371,7 @@ void add_task(IRegisteredTask *task, std::vector<pc_startup_item> &out) {
     std::string display = executable.empty() ? std::string() : product_name(executable);
     if (display.empty() || GetFileAttributesW(wide(executable).c_str()) == INVALID_FILE_ATTRIBUTES) display = task_name;
     copy_string(item.name, sizeof(item.name), display);
-    copy_string(item.program, sizeof(item.program), command);
-    copy_string(item.app_path, sizeof(item.app_path), executable);
+    copy_string(item.program, sizeof(item.program), executable.empty() ? command : executable);
     copy_string(item.config_path, sizeof(item.config_path), "Task Scheduler " + task_path);
     item.scope = scope;
     item.pid = executable.empty() ? 0 : pid_of_executable(executable);
@@ -594,8 +592,9 @@ std::vector<pc_service> services() {
             service.enabled = cfg->dwStartType != SERVICE_DISABLED;
             if (cfg->lpBinaryPathName) {
                 const std::string command = utf8(cfg->lpBinaryPathName, wcslen(cfg->lpBinaryPathName));
-                copy_string(service.program, sizeof(service.program), command);
-                service.apple = under_windows_directory(executable_of_command(command));
+                const std::string executable = executable_of_command(command);
+                copy_string(service.program, sizeof(service.program), executable.empty() ? command : executable);
+                service.apple = under_windows_directory(executable);
             }
         }
         result.push_back(service);

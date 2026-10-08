@@ -18,6 +18,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -285,19 +286,34 @@ double nvme_smart_temperature(HANDLE disk) {
     return celsius > -40 && celsius < 150 ? celsius : -1;
 }
 
-// The first physical drive's temperature from the storage stack (NVMe; SATA drives only when their
-// driver answers the temperature property, since SMART pass-through needs an administrator).
+// The hottest physical drive's temperature from the storage stack (NVMe; SATA drives only when
+// their driver answers the temperature property, since SMART pass-through needs an administrator),
+// as macOS reports its hottest NAND sensor and Linux its hottest drive. The drives that answer are
+// found once; later reads open only those.
 double drive_temperature() {
-    for (int drive = 0; drive < 4; ++drive) {
+    static const std::vector<int> drives = [] {
+        std::vector<int> found;
+        for (int drive = 0; drive < 8; ++drive) {
+            wchar_t path[32];
+            (void)swprintf_s(path, L"\\\\.\\PhysicalDrive%d", drive);
+            Handle disk(CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
+            if (!disk) continue;
+            if (drive_property_temperature(disk.get()) >= 0 || nvme_smart_temperature(disk.get()) >= 0)
+                found.push_back(drive);
+        }
+        return found;
+    }();
+    double hottest = -1;
+    for (int drive : drives) {
         wchar_t path[32];
         (void)swprintf_s(path, L"\\\\.\\PhysicalDrive%d", drive);
         Handle disk(CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
         if (!disk) continue;
         double celsius = drive_property_temperature(disk.get());
         if (celsius < 0) celsius = nvme_smart_temperature(disk.get());
-        if (celsius >= 0) return celsius;
+        hottest = std::max(hottest, celsius);
     }
-    return -1;
+    return hottest;
 }
 
 // Performance counters first; WMI only when the counter set is missing altogether (it is the same
@@ -567,12 +583,7 @@ std::vector<PowerAssertion> power_assertions() {
     const std::string report = run_hidden(std::wstring(L"\"") + system32 + L"\\powercfg.exe\" /requests", 5000);
     if (report.empty()) return {};
     std::vector<PowerAssertion> result = parse_power_requests(report);
-    const int64_t now = filetime_to_unix([] {
-        FILETIME ft{};
-        GetSystemTimeAsFileTime(&ft);
-        return filetime_value(ft);
-    }());
-    for (PowerAssertion &a : result) a.created = now;  // powercfg doesn't say when it was taken
+    // powercfg doesn't say when a request was taken: created stays 0 ("unknown", procyon.h), as on Linux.
     return result;
 }
 

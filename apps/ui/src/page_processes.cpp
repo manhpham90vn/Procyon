@@ -23,15 +23,9 @@ enum MenuIds {
     MenuCopyPath,
     MenuCopyPid,
     MenuPin,
-    MenuPriorityBase = 100,  // + index into kPriorities
+    MenuPriorityBase = 100,  // + index into priority_steps()
+    MenuSignalBase = 200,    // + index into signal_choices()
 };
-
-struct Priority {
-    const wchar_t *label;
-    int32_t nice;
-};
-const Priority kPriorities[] = {
-    {L"High", -15}, {L"Above normal", -8}, {L"Normal", 0}, {L"Below normal", 8}, {L"Low", 15}};
 
 // Column ids are pc_column values; the name column is PC_COLUMN_NAME.
 class ProcessesPage : public Page {
@@ -145,7 +139,7 @@ public:
         area.take_top(tokens::space::lg);
 
         banner_button_ = {};
-        if (!host.elevated()) {
+        if (!host.elevated() && locked_processes(host.store().snapshot()) > 0) {
             const Banner b =
                 action_banner(r, area.take_top(kActionBannerHeight), L"Processes of other users are locked",
                               std::wstring(L"Their command lines, open files and End Task need ") + os::admin +
@@ -464,7 +458,8 @@ private:
                 }
                 c.icon = true;
                 c.icon_path = app_icon_path(r, p, s);
-                c.icon_system = p ? (p->flags & PC_PROC_SYSTEM) != 0 : r.is_group() && r.group_id.rfind("exe:", 0) == 0;
+                c.icon_system = p ? (p->flags & PC_PROC_SYSTEM) != 0
+                                  : app_is_system(host_->store().snapshot(), r.group_id, r.group_pid);
                 c.pinned = pinned(r);
                 break;
             case PC_COLUMN_PID:
@@ -593,26 +588,63 @@ private:
         store.refresh_now();
     }
 
+    // Processes this Procyon can't fully read: restricted ones (macOS without the helper), and, where
+    // every process is listed, those whose user (Windows) or disk use (Linux) is hidden from it. The
+    // banner shows only when there are some, as macOS shows it only while restrictedCount > 0.
+    static int locked_processes(const Snapshot &s) {
+        if (s.restricted_count > 0) return s.restricted_count;
+        int locked = 0;
+        for (const pc_process &p : s.processes)
+            if ((p.flags & PC_PROC_RESTRICTED) || !p.user[0] || p.disk_read_bps < 0) ++locked;
+        return locked;
+    }
+
     void context(int visible_index, float x, float y) {
         if (!host_) return;
         const Row r = row(visible_index);
         const pc_process *p = process_of(r);
         const bool prot = is_protected(r);
         std::vector<MenuItem> items;
-        items.push_back({MenuEnd, L"End Task", !prot, false, false, true});
+        // An app's End Task names how many processes it ends, as on macOS.
+        items.push_back({MenuEnd,
+                         r.is_group() && r.process_count > 1
+                             ? L"End " + std::to_wstring(r.process_count) + L" Processes"
+                             : std::wstring(L"End Task"),
+                         !prot, false, false, true});
         items.push_back({MenuForce, L"Force Quit", !prot, false, false, true});
-        items.push_back({MenuTree, L"End Process Tree", !prot && !r.is_group(), false, false, true});
+        // An app's End Process Tree ends each member's tree, as on macOS.
+        items.push_back({MenuTree, L"End Process Tree", !prot, false, false, true});
         items.push_back({0, L"", true, false, true});
         if (host_->store().has(PC_CAP_SUSPEND) && !r.is_group()) {
             const bool suspended = p && p->state == PC_STATE_STOPPED;
             items.push_back({suspended ? MenuResume : MenuSuspend, suspended ? L"Resume" : L"Suspend", !prot});
         }
         if (host_->store().has(PC_CAP_PRIORITY) && !r.is_group()) {
+            // As on macOS: the step the process is at is checked; a nice value between steps is listed
+            // as it is. Windows' classes always sit on a step. Raising priority needs full access.
             MenuItem priority{0, L"Priority", !prot};
-            for (size_t i = 0; i < std::size(kPriorities); ++i)
-                priority.children.push_back({static_cast<int>(MenuPriorityBase + i), kPriorities[i].label, true,
-                                             p && p->nice == kPriorities[i].nice});
+            const auto &steps = priority_steps();
+            const PriorityStep *current = p ? &priority_step(p->nice) : nullptr;
+            const bool between = p && os::nice_is_exact && current->nice != p->nice;
+            for (size_t i = 0; i < steps.size(); ++i) {
+                std::wstring title = steps[i].title;
+                if (steps[i].nice < 0 && !host_->elevated()) title += L" (needs full access)";
+                priority.children.push_back(
+                    {static_cast<int>(MenuPriorityBase + i), title, true, !between && current == &steps[i]});
+            }
+            if (between) {
+                priority.children.push_back({0, L"", true, false, true});
+                priority.children.push_back({0, L"Current: nice " + std::to_wstring(p->nice), false});
+            }
             items.push_back(priority);
+        }
+        if (host_->store().has(PC_CAP_SIGNALS) && !r.is_group() && !signal_choices().empty()) {
+            MenuItem signal{0, L"Send Signal", !prot};
+            const auto &signals = signal_choices();
+            for (size_t i = 0; i < signals.size(); ++i)
+                signal.children.push_back({static_cast<int>(MenuSignalBase + i),
+                                           std::wstring(signals[i].name) + L" — " + signals[i].meaning});
+            items.push_back(signal);
         }
         items.push_back({0, L"", true, false, true});
         items.push_back({MenuPin, app_of(r) == pinned_app_ ? L"Unpin" : L"Pin to Top", !app_of(r).empty()});
@@ -654,15 +686,39 @@ private:
                 if (p) host_->copy_to_clipboard(fmt::from_utf8(p->path));
                 break;
             case MenuCopyPid: host_->copy_to_clipboard(std::to_wstring(pid)); break;
-            default:
-                if (chosen >= MenuPriorityBase &&
-                    chosen < MenuPriorityBase + static_cast<int>(std::size(kPriorities))) {
-                    const pc_result result =
-                        host_->store().set_priority(pid, kPriorities[chosen - MenuPriorityBase].nice);
+            default: {
+                const std::wstring name = p ? process_display_name(*p) : L"PID " + std::to_wstring(pid);
+                const bool system = p && (p->flags & PC_PROC_SYSTEM) != 0;
+                const auto &steps = priority_steps();
+                if (chosen >= MenuPriorityBase && chosen < MenuPriorityBase + static_cast<int>(steps.size())) {
+                    const PriorityStep &step = steps[static_cast<size_t>(chosen - MenuPriorityBase)];
+                    // A system process's priority is the OS's business: confirmed first, as on macOS.
+                    if (system && !host_->confirm(L"Change the priority of “" + name + L"”?",
+                                                  std::wstring(L"This is a ") + os::name +
+                                                      L" system process. Changing its priority can make " + os::name +
+                                                      L" slower or less responsive.",
+                                                  std::wstring(L"Set to ") + step.title, false))
+                        break;
+                    const pc_result result = host_->store().set_priority(pid, step.nice);
                     if (result != PC_OK) host_->report(result, L"change the priority");
                     host_->store().refresh_now();
                 }
+                const auto &signals = signal_choices();
+                if (chosen >= MenuSignalBase && chosen < MenuSignalBase + static_cast<int>(signals.size())) {
+                    const SignalChoice &signal = signals[static_cast<size_t>(chosen - MenuSignalBase)];
+                    if ((signal.disruptive || system) &&
+                        !host_->confirm(
+                            std::wstring(L"Send ") + signal.name + L" to “" + name + L"”?",
+                            std::wstring(signal.meaning) + L"." +
+                                (system ? std::wstring(L" This is a ") + os::name + L" system process." : L""),
+                            std::wstring(L"Send ") + signal.name, signal.disruptive))
+                        break;
+                    const pc_result result = host_->store().send_signal(pid, signal.number);
+                    if (result != PC_OK) host_->report(result, L"send the signal");
+                    host_->store().refresh_now();
+                }
                 break;
+            }
         }
     }
 

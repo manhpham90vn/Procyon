@@ -24,6 +24,10 @@ std::wstring data_file(std::wstring_view name);
 // Creates the folders a file path needs before it is written.
 void create_parent_directories(std::wstring_view path);
 
+// Called after Procyon wrote `path` in its data or settings folder. The Linux root copy (pkexec)
+// writes into the desktop user's folders and hands what it wrote back to them; elsewhere a no-op.
+void file_written(std::wstring_view path);
+
 // The clipboard's text, empty when it holds none.
 std::wstring clipboard_text();
 

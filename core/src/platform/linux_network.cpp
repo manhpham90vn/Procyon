@@ -35,13 +35,6 @@ struct SocketBytes {
     uint64_t rx = 0, tx = 0;
 };
 
-bool loopback(int family, const __be32 *address) {
-    if (family == AF_INET) return (ntohl(address[0]) >> 24) == 127;
-    // ::1, or an IPv4-mapped loopback (::ffff:127.x.x.x).
-    if (address[0] == 0 && address[1] == 0 && address[2] == 0 && ntohl(address[3]) == 1) return true;
-    return address[0] == 0 && address[1] == 0 && ntohl(address[2]) == 0xFFFF && (ntohl(address[3]) >> 24) == 127;
-}
-
 // A socket as the kernel identifies it: enough to ask for that one socket again.
 struct SocketId {
     uint8_t family = 0;
@@ -84,7 +77,8 @@ Request make_request(uint8_t family, const inet_diag_sockid *id) {
 }
 
 // Reads replies until `expected` answers (data or error) arrived, or NLMSG_DONE for a dump.
-// Sockets talking only to loopback are skipped, like the machine's own totals skip `lo`.
+// Loopback sockets count, as on macOS and Windows: a local database client's traffic is the app's.
+// (The machine's totals still skip `lo`, which isn't a physical interface.)
 bool read_replies(int fd, size_t expected, bool dump, std::unordered_map<uint64_t, SocketBytes> &out,
                   std::unordered_map<uint64_t, SocketId> *ids) {
     alignas(nlmsghdr) char buffer[32768];
@@ -101,8 +95,6 @@ bool read_replies(int fd, size_t expected, bool dump, std::unordered_map<uint64_
                 continue;  // that socket closed since the last dump
             }
             const auto *diag = static_cast<const inet_diag_msg *>(NLMSG_DATA(h));
-            if (loopback(diag->idiag_family, diag->id.idiag_src) && loopback(diag->idiag_family, diag->id.idiag_dst))
-                continue;
             int length = static_cast<int>(h->nlmsg_len - NLMSG_LENGTH(sizeof(*diag)));
             for (auto *a = reinterpret_cast<const rtattr *>(diag + 1); RTA_OK(a, length); a = RTA_NEXT(a, length)) {
                 if (a->rta_type != INET_DIAG_INFO) continue;

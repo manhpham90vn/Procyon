@@ -187,6 +187,16 @@ struct DesktopEntry {
     bool session_phase = false;     // X-GNOME-Autostart-Phase: a session component
 };
 DesktopEntry parse_desktop_entry(const std::string &text);
+// One temperature input of /sys/class/hwmon: its driver's name, its label and the input file.
+struct HwmonInput {
+    std::string driver, label, input;
+};
+// The inputs that measure the CPU, best first (exposed for tests).
+std::vector<std::string> cpu_sensor_inputs(const std::vector<HwmonInput> &inputs);
+// Whether a systemd unit is part of the OS (pc_service.apple) (exposed for tests).
+bool systemd_os_unit(const std::string &id, const std::string &fragment, const std::string &program);
+// pc_battery.condition from sysfs `health` and the capacity health (-1 unknown) (exposed for tests).
+std::string battery_condition(const std::string &sysfs_health, double health);
 #endif
 #if defined(_WIN32)
 // The parsing half of power_assertions() on Windows: `report` is the output of `powercfg /requests`.

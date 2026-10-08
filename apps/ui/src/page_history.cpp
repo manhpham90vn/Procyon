@@ -556,7 +556,8 @@ private:
             Rect row{inner.x, y, inner.w, kAppRow};
             Rect line = row.inset(0, tokens::space::xs);
             const Rect icon = line.take_left(22 + tokens::space::sm + 2);
-            r.app_icon(app_icon_path(app.app_id), Rect{icon.x, icon.y + 1, 22, 22}, app.app_id.rfind("exe:", 0) == 0);
+            r.app_icon(app_icon_path(app.app_id), Rect{icon.x, icon.y + 1, 22, 22},
+                       app_is_system(host.store().snapshot(), app.app_id, 0));
             Rect head = line;
             head.h = 20;
             TextStyle headline;

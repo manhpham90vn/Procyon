@@ -1,6 +1,8 @@
 // Screen patterns shared by every page: header, panels, live chart, stat grids, banners, buttons.
 #include <algorithm>
 #include <cmath>
+#include <csignal>
+#include <cstdlib>
 
 #include "pages.hpp"
 
@@ -110,7 +112,7 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
     Renderer::SparklineOptions grid_only;
     grid_only.grid = true;
     grid_only.line_width = lw;
-    r.sparkline(chart, nullptr, 0, kHistoryWindow, max, kind, grid_only);
+    r.sparkline(chart, nullptr, 0, history_window(), max, kind, grid_only);
     for (size_t i = 0; i < series.size(); ++i) {
         const ChartSeries &s = series[i];
         if (!s.series) continue;  // legend-only entry (a peak)
@@ -121,7 +123,7 @@ void live_chart(Renderer &r, const Rect &bounds, const std::vector<ChartSeries> 
         options.line_width = lw;
         Color color = s.color ? *s.color : rgba(s.secondary ? style.end : style.start);
         options.color_override = &color;
-        r.sparkline(chart, s.series->data(), s.series->size(), kHistoryWindow, max, kind, options);
+        r.sparkline(chart, s.series->data(), s.series->size(), history_window(), max, kind, options);
     }
     TextStyle foot;
     foot.font = Font::Caption;
@@ -342,7 +344,8 @@ float top_apps_height(size_t rows) { return kPanelChrome + std::max<size_t>(rows
 std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring_view title, Renderer::Symbol symbol,
                                       MetricKind kind, int32_t column, bool tint, size_t max_rows,
                                       const std::function<std::wstring(const Row &)> &value,
-                                      const std::function<float(const Row &)> &fraction) {
+                                      const std::function<float(const Row &)> &fraction,
+                                      const std::function<double(const Row &)> &rank, std::wstring_view empty) {
     Renderer &r = host.renderer();
     const Theme &theme = r.theme();
     std::vector<TopAppRow> hits;
@@ -351,8 +354,13 @@ std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring
     query.mode = PC_VIEW_GROUPED;
     query.sort_column = column;
     query.descending = true;
-    query.limit = static_cast<int32_t>(max_rows);
-    const std::vector<Row> rows = host.store().build_view(query);
+    query.limit = rank ? 0 : static_cast<int32_t>(max_rows);
+    std::vector<Row> rows = host.store().build_view(query);
+    if (rank) {
+        std::erase_if(rows, [&rank](const Row &row) { return row.depth > 0 || !(rank(row) > 0); });
+        std::stable_sort(rows.begin(), rows.end(), [&rank](const Row &a, const Row &b) { return rank(a) > rank(b); });
+        if (rows.size() > max_rows) rows.resize(max_rows);
+    }
     const Snapshot &s = host.store().snapshot();
     const float mx = host.mouse_x(), my = host.mouse_y();
     float y = inner.y;
@@ -372,7 +380,7 @@ std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring
         Rect line = rr.inset(tokens::space::sm, tokens::space::xs + 1);
         // App icon (ProcessIcon at 22).
         const Rect icon = line.take_left(22 + tokens::space::sm + 2);
-        r.app_icon(app_icon_path(row, p, s), Rect{icon.x, icon.y + 1, 22, 22}, p && (p->flags & PC_PROC_SYSTEM) != 0);
+        r.app_icon(app_icon_path(row, p, s), Rect{icon.x, icon.y + 1, 22, 22}, app_is_system(s, app_id, pid));
         Rect top = line;
         top.h = 20;
         TextStyle headline;
@@ -403,10 +411,68 @@ std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring
         TextStyle style;
         style.font = Font::Body;
         style.halign = HAlign::Center;
-        r.text(host.store().has_snapshot() ? L"No app is busy right now." : L"Collecting…",
+        r.text(host.store().has_snapshot() ? std::wstring(empty) : std::wstring(L"Collecting…"),
                Rect{inner.x, inner.y, inner.w, kTopAppRowHeight}, style, theme.text_tertiary());
     }
     return hits;
+}
+
+bool page_available(const Store &store, PageId id) {
+    switch (id) {
+        case PageId::Gpu: return store.has(PC_CAP_GPU);
+        case PageId::Battery: return store.has(PC_CAP_BATTERY);
+        case PageId::Startup: return store.has(PC_CAP_STARTUP);
+        case PageId::Services: return store.has(PC_CAP_SERVICES);
+        case PageId::Inspect: return store.has(PC_CAP_CONNECTIONS) || store.has(PC_CAP_OPEN_FILES);
+        default: return true;
+    }
+}
+
+const std::vector<PriorityStep> &priority_steps() {
+    static const std::vector<PriorityStep> steps = {{L"High", -10},       {L"Above normal", -5}, {L"Normal", 0},
+                                                    {L"Below normal", 5}, {L"Low", 10},          {L"Lowest", 20}};
+    return steps;
+}
+
+const PriorityStep &priority_step(int32_t nice) {
+    const auto &steps = priority_steps();
+    const PriorityStep *best = &steps.front();
+    for (const PriorityStep &step : steps)
+        if (std::abs(step.nice - nice) < std::abs(best->nice - nice)) best = &step;
+    return *best;
+}
+
+const std::vector<SignalChoice> &signal_choices() {
+#if defined(_WIN32)
+    static const std::vector<SignalChoice> none;
+    return none;
+#else
+    static const std::vector<SignalChoice> signals = {
+        {L"SIGHUP", L"Hang up / reload configuration", SIGHUP, false},
+        {L"SIGINT", L"Interrupt (like Ctrl+C)", SIGINT, true},
+        {L"SIGQUIT", L"Quit and dump core", SIGQUIT, true},
+        {L"SIGKILL", L"Kill immediately", SIGKILL, true},
+        {L"SIGUSR1", L"User-defined 1", SIGUSR1, false},
+        {L"SIGUSR2", L"User-defined 2", SIGUSR2, false},
+        {L"SIGTERM", L"Ask to terminate", SIGTERM, true},
+        {L"SIGSTOP", L"Suspend", SIGSTOP, true},
+        {L"SIGCONT", L"Resume", SIGCONT, false},
+    };
+    return signals;
+#endif
+}
+
+bool app_is_system(const Snapshot &snapshot, const std::string &app_id, int32_t pid) {
+    if (const pc_process *p = pid > 0 ? snapshot.find(pid) : nullptr) return (p->flags & PC_PROC_SYSTEM) != 0;
+    for (const pc_process &p : snapshot.processes)
+        if (p.app_id == app_id) return (p.flags & PC_PROC_SYSTEM) != 0;
+    return false;
+}
+
+std::wstring battery_state(const pc_battery &battery) {
+    if (battery.charging) return L"Charging";
+    if (battery.fully_charged) return L"Fully charged";
+    return battery.on_ac_power ? L"On AC power" : L"On battery";
 }
 
 }  // namespace procyon::ui

@@ -1,5 +1,5 @@
 // The component vocabulary of design/components.md, drawn with Canvas primitives. Platform
-// independent: the Direct2D and (later) Cairo backends only implement Canvas.
+// independent: the Direct2D (Windows) and Cairo (Linux) backends only implement Canvas.
 #include <algorithm>
 #include <cmath>
 

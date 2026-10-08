@@ -291,6 +291,67 @@ bool read_stat(int32_t pid, ProcStat &out) {
     return read_file("/proc/" + std::to_string(pid) + "/stat", text) && parse_stat(text, out);
 }
 
+bool is_interpreter(const std::string &name) {
+    if (starts_with(name, "python")) return true;  // python3, python3.12
+    for (const char *i : {"sh", "bash", "dash", "zsh", "env", "perl", "ruby", "node", "java", "electron", "flatpak",
+                          "snap", "gjs", "wine", "mono", "dotnet"})
+        if (name == i) return true;
+    return false;
+}
+
+// uname's machine in the ABI's words (procyon.h: "arm64", "x86_64"), as macOS and Windows report it.
+std::string arch_name(const std::string &machine) {
+    if (machine == "aarch64" || machine == "arm64") return "arm64";
+    if (machine == "i386" || machine == "i486" || machine == "i586" || machine == "i686") return "x86";
+    if (starts_with(machine, "armv")) return "arm";
+    return machine;
+}
+
+namespace {
+passwd *session_entry(passwd &entry, char *buffer, size_t size) {
+    passwd *result = nullptr;
+    return ::getpwuid_r(session_uid(), &entry, buffer, size, &result) == 0 ? result : nullptr;
+}
+}  // namespace
+
+uint32_t session_uid() {
+    if (::geteuid() == 0)
+        if (const char *caller = std::getenv("PKEXEC_UID"); caller && *caller) {
+            char *end = nullptr;
+            const unsigned long uid = std::strtoul(caller, &end, 10);
+            if (end && *end == '\0' && uid > 0 && uid < 0xFFFFFFFFul) return static_cast<uint32_t>(uid);
+        }
+    return ::getuid();
+}
+
+bool acting_for_session_user() { return session_uid() != ::getuid(); }
+
+std::string session_user_name() {
+    passwd entry{};
+    char buffer[4096];
+    const passwd *pw = session_entry(entry, buffer, sizeof(buffer));
+    return pw && pw->pw_name ? pw->pw_name : "";
+}
+
+std::string session_home() {
+    if (!acting_for_session_user()) {
+        const char *home = std::getenv("HOME");
+        return home ? home : "";
+    }
+    passwd entry{};
+    char buffer[4096];
+    const passwd *pw = session_entry(entry, buffer, sizeof(buffer));
+    return pw && pw->pw_dir ? pw->pw_dir : "";
+}
+
+void give_to_session_user(const std::string &path) {
+    if (!acting_for_session_user()) return;
+    passwd entry{};
+    char buffer[4096];
+    if (const passwd *pw = session_entry(entry, buffer, sizeof(buffer)))
+        if (::lchown(path.c_str(), pw->pw_uid, pw->pw_gid) != 0) return;  // best effort: stays root's
+}
+
 int32_t state_of(char state) {
     switch (state) {
         case 'R': return PC_STATE_RUNNING;
@@ -416,9 +477,9 @@ uint32_t capabilities() {
     if (!gpus().empty()) caps |= PC_CAP_GPU;
     if (process_gpu_available()) caps |= PC_CAP_PROCESS_GPU;
     if (process_network_available()) caps |= PC_CAP_PROCESS_NETWORK;
-    double cpu = -1, disk = -1;
-    temperatures(cpu, disk);
-    if (cpu >= 0 || disk >= 0) caps |= PC_CAP_TEMPERATURE;
+    // As on macOS and Windows: a CPU sensor. The UI's temperature module, alert and History metric
+    // are the CPU's; the drive's reading comes along where the CPU's exists.
+    if (cpu_temperature() >= 0) caps |= PC_CAP_TEMPERATURE;
     pc_battery battery_info{};
     if (battery(battery_info) && battery_info.present) caps |= PC_CAP_BATTERY;
     if (!find_program("systemctl").empty() && exists("/run/systemd/system")) caps |= PC_CAP_SERVICES;
@@ -463,17 +524,18 @@ bool system_info(pc_system_info &out) {
     copy_string(out.os_name, sizeof(out.os_name), release.count("NAME") ? release["NAME"] : "Linux");
     copy_string(out.os_version, sizeof(out.os_version),
                 release.count("VERSION") ? release["VERSION"] : release["VERSION_ID"]);
-    copy_string(out.os_build, sizeof(out.os_build),
-                release.count("BUILD_ID") ? release["BUILD_ID"] : release["VERSION_CODENAME"]);
+    // The codename is already part of VERSION ("24.04 LTS (Noble Numbat)"): a build only when one exists.
+    copy_string(out.os_build, sizeof(out.os_build), release.count("BUILD_ID") ? release["BUILD_ID"] : "");
     utsname uts{};
     if (::uname(&uts) == 0) {
         copy_string(out.kernel, sizeof(out.kernel), std::string("Linux ") + uts.release);
         copy_string(out.hostname, sizeof(out.hostname), uts.nodename);
-        copy_string(out.arch, sizeof(out.arch), uts.machine);
+        copy_string(out.arch, sizeof(out.arch), arch_name(uts.machine));
     }
     const std::string vendor = trim(read_line("/sys/class/dmi/id/sys_vendor"));
     const std::string product = trim(read_line("/sys/class/dmi/id/product_name"));
     const std::string version = trim(read_line("/sys/class/dmi/id/product_version"));
+    const std::string family = trim(read_line("/sys/class/dmi/id/product_family"));
     // Boards that ship without a filled-in DMI table say so in many ways.
     auto placeholder = [](std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), ::tolower);
@@ -481,9 +543,12 @@ bool system_info(pc_system_info &out) {
                s == "none" || s == "o.e.m.";
     };
     copy_string(out.model_id, sizeof(out.model_id), placeholder(product) ? "" : product);
-    std::string model = placeholder(product) ? "" : product;
+    // The family ("ThinkPad X1 Carbon Gen 9", "XPS"), the field Windows shows, over the product name,
+    // which is often a SKU ("20XW004GUS").
+    std::string model = !placeholder(family) ? family : placeholder(product) ? "" : product;
+    if (placeholder(family) && !model.empty() && !placeholder(version) && version.find("ThinkPad") != std::string::npos)
+        model = version;
     if (!model.empty() && !placeholder(vendor) && !starts_with(model, vendor)) model = vendor + " " + model;
-    if (!model.empty() && !placeholder(version) && version.find("ThinkPad") != std::string::npos) model = version;
     copy_string(out.model_name, sizeof(out.model_name), model);
 
     std::string cpuinfo;
@@ -531,7 +596,12 @@ bool system_info(pc_system_info &out) {
         out.efficiency_cores = static_cast<int32_t>(e_cores.size());
     }
 
-    const int64_t khz = read_int("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", 0);
+    // The base (nominal) clock, as macOS and Windows report it; the maximum boost only where the
+    // driver publishes nothing else.
+    const std::string cpufreq = "/sys/devices/system/cpu/cpu0/cpufreq/";
+    int64_t khz = read_int(cpufreq + "base_frequency", 0);                 // intel_pstate
+    if (khz <= 0) khz = read_int(cpufreq + "amd_pstate_nominal_freq", 0);  // amd-pstate
+    if (khz <= 0) khz = read_int(cpufreq + "cpuinfo_max_freq", 0);
     out.cpu_frequency_hz = khz > 0 ? static_cast<uint64_t>(khz) * 1000 : 0;
     std::string meminfo;
     if (read_file("/proc/meminfo", meminfo)) out.memory_total = parse_key_values(meminfo)["MemTotal"] * 1024;
@@ -667,12 +737,12 @@ bool memory(Memory &out) {
     auto bytes = [&](const char *key) { return kb[key] * 1024; };
     out.total = bytes("MemTotal");
     const uint64_t available = kb.count("MemAvailable") ? bytes("MemAvailable") : bytes("MemFree") + bytes("Cached");
-    out.free = bytes("MemFree");
-    // Page cache the kernel can drop at once (tmpfs/shm pages can't be dropped: they are in use).
-    const uint64_t shmem = bytes("Shmem");
-    const uint64_t cache = bytes("Cached") + bytes("Buffers") + bytes("SReclaimable");
-    out.cached = cache > shmem ? cache - shmem : 0;
     out.used = out.total > available ? out.total - available : 0;
+    // The parts add up to the total, as on macOS and Windows: what isn't used is free, or page cache
+    // the kernel can drop at once (the reclaimable share of MemAvailable beyond MemFree).
+    const uint64_t unused = out.total - out.used;
+    out.free = std::min<uint64_t>(bytes("MemFree"), unused);
+    out.cached = unused - out.free;
     // Kernel memory that can't be paged out, like macOS's "wired".
     out.wired = bytes("SUnreclaim") + bytes("KernelStack") + bytes("PageTables") + bytes("Unevictable");
     // zswap's compressed pool sits in RAM (Zswap:), zram counts as a swap device instead.
@@ -861,12 +931,13 @@ const std::unordered_map<std::string, DesktopApp> &desktop_apps() {
     static const std::unordered_map<std::string, DesktopApp> apps = [] {
         std::unordered_map<std::string, DesktopApp> map;
         std::vector<std::string> dirs;
-        const char *home = std::getenv("HOME");
+        // The desktop user's own entries, also in the root copy (pkexec resets HOME).
+        const std::string home = session_home();
         const char *data_home = std::getenv("XDG_DATA_HOME");
-        if (data_home && *data_home)
+        if (data_home && *data_home == '/')
             dirs.push_back(std::string(data_home) + "/applications");
-        else if (home)
-            dirs.push_back(std::string(home) + "/.local/share/applications");
+        else if (!home.empty())
+            dirs.push_back(home + "/.local/share/applications");
         const char *data_dirs = std::getenv("XDG_DATA_DIRS");
         for (const auto &d : split(data_dirs && *data_dirs ? data_dirs : "/usr/local/share:/usr/share", ':'))
             if (!d.empty()) dirs.push_back(d + "/applications");
@@ -917,7 +988,7 @@ const std::unordered_map<std::string, DesktopApp> &desktop_apps() {
                     const std::string dir = std::string(resolved).substr(0, std::string(resolved).find_last_of('/'));
                     if (!generic_bin_dir(dir) && !map.count("dir:" + dir)) map["dir:" + dir] = {name};
                 }
-                for (const std::string &key : {program, wm_class}) {
+                for (const std::string &key : {is_interpreter(program) ? std::string() : program, wm_class}) {
                     std::string lower = key;
                     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
                     if (!lower.empty() && !map.count(lower)) map[lower] = {name};
@@ -949,15 +1020,19 @@ AppIdentity app_identity(const RawProcess &process) {
         std::transform(name.begin(), name.end(), name.begin(), ::tolower);
         found = apps.find(name);
     }
-    if (found != apps.end() && !process.path.empty() && process.uid >= 1000) return {process.path, found->second.name};
+    // Whoever runs it, as on macOS and Windows: an app started as root (Procyon after Unlock Full Access,
+    // a partition editor through pkexec) is still that app.
+    if (found != apps.end() && !process.path.empty()) return {process.path, found->second.name};
     return {"exe:" + process.name, process.name};
 }
 
 bool is_system_process(const RawProcess &process) {
     // root and the system accounts (below UID_MIN, 1000 on every major distribution), and nobody.
     if (process.uid < 1000 || process.uid == 65534) return true;
+    // The OS's own programs in the user's session, like /System, /usr/libexec and /usr/sbin on macOS.
     return starts_with(process.path, "/usr/libexec/") || starts_with(process.path, "/usr/lib/systemd/") ||
-           starts_with(process.path, "/lib/systemd/");
+           starts_with(process.path, "/lib/systemd/") || starts_with(process.path, "/usr/sbin/") ||
+           starts_with(process.path, "/sbin/");
 }
 
 int32_t self_pid() { return ::getpid(); }
@@ -1005,7 +1080,8 @@ pc_result for_each_thread(int32_t pid, Apply apply) {
 }  // namespace
 
 pc_result set_priority(int32_t pid, int32_t nice) {
-    if (nice < -20 || nice > 19) return PC_ERR_INVALID;
+    if (nice < -20 || nice > 20) return PC_ERR_INVALID;
+    nice = std::min(nice, 19);  // the ABI's range is -20..20 (as on macOS); Linux stops at 19
     return for_each_thread(pid, [&](int tid) {
         errno = 0;
         return ::setpriority(PRIO_PROCESS, static_cast<id_t>(tid), nice) == 0;
@@ -1051,9 +1127,9 @@ bool process_details(int32_t pid, Details &out) {
             if (end > start) out.environment.push_back(environ_text.substr(start, end - start));
             start = end + 1;
         }
-    } else if (exists("/proc/" + std::to_string(pid))) {
-        out.arguments_known = false;  // another user's process: its environment is private
     }
+    // Another user's environment is private, but its command line is public: like macOS and
+    // Windows, arguments_known speaks for the arguments alone, and the environment stays empty.
 
     const auto tids = list_dir(proc_path(pid, "task"));
     const double now = now_seconds();

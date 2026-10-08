@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "canvas_d2d.hpp"
@@ -42,6 +43,15 @@ constexpr float kSidebarOpacityDark = 0.62f;
 constexpr float kSidebarOpacityLight = 0.55f;
 const wchar_t *const kClassName = L"ProcyonMainWindow";
 const wchar_t *const kSettingsKey = L"Software\\Procyon";
+// One Procyon per sign-in session: the first holds this mutex, a later launch brings its window up.
+const wchar_t *const kInstanceMutex = L"Local\\Procyon.Instance";
+
+// Posted by a second launch to the running window (registered: an elevated window lets it through
+// User Interface Privilege Isolation with ChangeWindowMessageFilterEx).
+UINT activate_message() {
+    static const UINT message = RegisterWindowMessageW(L"Procyon.Activate");
+    return message;
+}
 
 // A sidebar entry: a page row (symbol, title, detail), a metric row (icon, title, value,
 // sparkline) or a section label.
@@ -85,11 +95,25 @@ std::optional<PageId> page_from_name(const std::wstring &name) {
 
 class MainWindow : public Host {
 public:
-    MainWindow(HINSTANCE instance, std::optional<PageId> initial, bool persist)
-        : instance_(instance), initial_page_(initial), persist_(persist) {}
+    // --screenshot: the window is never shown; after a few samples the page is drawn once into a PNG
+    // and Procyon exits (the counterpart of the Linux app's mode, for CI and the README).
+    struct Screenshot {
+        std::wstring path;
+        int theme = 1;  // light; --dark: 2
+    };
+
+    MainWindow(HINSTANCE instance, std::optional<PageId> initial, bool persist,
+               std::optional<Screenshot> screenshot = std::nullopt)
+        : instance_(instance), initial_page_(initial), persist_(persist), screenshot_(std::move(screenshot)) {}
+
+    int exit_code() const { return exit_code_; }
 
     bool create(int show_command) {
         load_settings();
+        if (screenshot_) {
+            settings_.theme = screenshot_->theme;
+            settings_.records_history = false;
+        }
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
         wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -105,6 +129,18 @@ public:
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kClassName, L"Procyon", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                                 CW_USEDEFAULT, 1280, 800, nullptr, nullptr, instance_, this);
         if (!hwnd_) return false;
+        if (screenshot_) {
+            // 1280×800 of client area at the monitor's scale, hidden. The frame is what WM_NCCALCSIZE
+            // left of it (the resize borders), measured rather than assumed.
+            RECT window{}, client{};
+            GetWindowRect(hwnd_, &window);
+            GetClientRect(hwnd_, &client);
+            const int frame_w = (window.right - window.left) - client.right;
+            const int frame_h = (window.bottom - window.top) - client.bottom;
+            SetWindowPos(hwnd_, nullptr, 0, 0, to_px(1280) + frame_w, to_px(800) + frame_h,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return true;
+        }
         restore_placement(show_command);
         return true;
     }
@@ -126,6 +162,11 @@ public:
     float mouse_y() override { return overlays_.empty() ? mouse_y_ : -1; }
 
     void navigate(PageId id) override {
+        // A screen this machine doesn't have (a shortcut, --page): stay, or start on Overview.
+        if (!page_available(store_, id)) {
+            if (current_) return;
+            id = PageId::Overview;
+        }
         for (auto &page : pages_) {
             if (page->id() != id) continue;
             current_ = page.get();
@@ -214,7 +255,9 @@ public:
         if (elevated()) return;
         wchar_t path[MAX_PATH];
         GetModuleFileNameW(nullptr, path, MAX_PATH);
-        const std::wstring params = std::wstring(L"--page ") + (current_ ? page_name(current_->id()) : L"overview");
+        // --relaunch: the new copy waits for this one to exit instead of handing over to it.
+        const std::wstring params =
+            std::wstring(L"--relaunch --page ") + (current_ ? page_name(current_->id()) : L"overview");
         SHELLEXECUTEINFOW info{};
         info.cbSize = sizeof(info);
         info.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -312,7 +355,9 @@ private:
         const MARGINS whole{-1, -1, -1, -1};
         DwmExtendFrameIntoClientArea(hwnd_, &whole);
         const DWORD backdrop = kDwmSystemBackdropMainWindow;
-        mica_ = SUCCEEDED(DwmSetWindowAttribute(hwnd_, kDwmSystemBackdropType, &backdrop, sizeof(backdrop)));
+        // A screenshot has no desktop behind it: an opaque sidebar.
+        mica_ = !screenshot_ &&
+                SUCCEEDED(DwmSetWindowAttribute(hwnd_, kDwmSystemBackdropType, &backdrop, sizeof(backdrop)));
         apply_theme();
         pages_.push_back(make_overview_page());
         pages_.push_back(make_processes_page());
@@ -333,7 +378,7 @@ private:
             return PostMessageW(hwnd_, WM_APP_SNAPSHOT, 0, reinterpret_cast<LPARAM>(snapshot)) != FALSE;
         });
         navigate(initial_page_.value_or(PageId::Overview));
-        add_tray();
+        if (!screenshot_) add_tray();
     }
 
     void build_nav() {
@@ -365,19 +410,19 @@ private:
         section(L"Performance");
         metric(PageId::Cpu, L"CPU", MetricKind::Cpu);
         metric(PageId::Memory, L"Memory", MetricKind::Memory);
-        if (store_.has(PC_CAP_GPU)) metric(PageId::Gpu, L"GPU", MetricKind::Gpu);
+        if (page_available(store_, PageId::Gpu)) metric(PageId::Gpu, L"GPU", MetricKind::Gpu);
         metric(PageId::Disk, L"Disk", MetricKind::Disk);
         metric(PageId::Network, L"Network", MetricKind::Network);
-        if (store_.has(PC_CAP_STARTUP) || store_.has(PC_CAP_SERVICES)) {
+        if (page_available(store_, PageId::Startup) || page_available(store_, PageId::Services)) {
             section(L"Manage");
-            if (store_.has(PC_CAP_STARTUP)) page(PageId::Startup, L"Startup", Renderer::Symbol::Power);
-            if (store_.has(PC_CAP_SERVICES)) page(PageId::Services, L"Services", Renderer::Symbol::Gears);
+            if (page_available(store_, PageId::Startup)) page(PageId::Startup, L"Startup", Renderer::Symbol::Power);
+            if (page_available(store_, PageId::Services)) page(PageId::Services, L"Services", Renderer::Symbol::Gears);
         }
         section(L"Analyze");
         page(PageId::History, L"History", Renderer::Symbol::Clock);
-        if (store_.has(PC_CAP_CONNECTIONS)) page(PageId::Inspect, L"Files & Ports", Renderer::Symbol::Ports);
+        if (page_available(store_, PageId::Inspect)) page(PageId::Inspect, L"Files & Ports", Renderer::Symbol::Ports);
         section(L"Machine");
-        if (store_.has(PC_CAP_BATTERY)) page(PageId::Battery, L"Battery", Renderer::Symbol::Gauge);
+        if (page_available(store_, PageId::Battery)) page(PageId::Battery, L"Battery", Renderer::Symbol::Gauge);
         page(PageId::System, L"System", Renderer::Symbol::Info);  // info.circle.fill on macOS
     }
 
@@ -440,6 +485,22 @@ private:
         RECT rc{};
         GetClientRect(hwnd_, &rc);
         return Rect{0, 0, to_dip(rc.right), to_dip(rc.bottom)};
+    }
+
+    void take_screenshot() {
+        canvas_.capture_next_frame(screenshot_->path);
+        paint();
+        if (!canvas_.captured()) {
+            exit_code_ = 1;
+            if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+                const std::wstring message = L"Procyon: couldn't write " + screenshot_->path + L"\n";
+                DWORD written = 0;
+                WriteConsoleW(GetStdHandle(STD_ERROR_HANDLE), message.c_str(), static_cast<DWORD>(message.size()),
+                              &written, nullptr);
+            }
+        }
+        quit_ = true;
+        DestroyWindow(hwnd_);
     }
 
     void paint() {
@@ -545,7 +606,8 @@ private:
 
     void caption_button_action(int button) {
         switch (button) {
-            case 0: ShowWindow(hwnd_, SW_MINIMIZE); break;
+            // Through WM_SYSCOMMAND, like Win+Down and the taskbar: minimizing to the tray applies too.
+            case 0: PostMessageW(hwnd_, WM_SYSCOMMAND, SC_MINIMIZE, 0); break;
             case 1: ShowWindow(hwnd_, IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE); break;
             case 2: PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
             default: break;
@@ -564,11 +626,7 @@ private:
             case PageId::History: return store_.records_history() ? L"The last 24 hours" : L"Off";
             case PageId::Inspect: return L"Who uses a port or a file";
             case PageId::Battery: {
-                if (auto b = store_.battery())
-                    return fmt::percent(b->level) + L" · " +
-                           (b->charging      ? L"Charging"
-                            : b->on_ac_power ? L"On AC power"
-                                             : L"On battery");
+                if (auto b = store_.battery()) return fmt::percent(b->level) + L" · " + battery_state(*b);
                 return L"";
             }
             case PageId::System: return fmt::from_utf8(info.os_name) + L" " + fmt::from_utf8(info.os_version);
@@ -724,14 +782,14 @@ private:
                 options.end_dot = false;
                 options.halo = false;
                 options.line_width = 1.25f;
-                r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, series->data(), series->size(), kHistoryWindow,
-                            max, item.metric, options);
+                r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, series->data(), series->size(),
+                            history_window(), max, item.metric, options);
                 if (secondary && secondary->size() > 1) {
                     options.area = false;
                     Color end = rgba(metric_style(item.metric).end);
                     options.color_override = &end;
                     r.sparkline(Rect{spark.x, spark.cy() - 11, spark.w, 22}, secondary->data(), secondary->size(),
-                                kHistoryWindow, max, item.metric, options);
+                                history_window(), max, item.metric, options);
                 }
             }
         }
@@ -790,7 +848,10 @@ private:
             case IDM_PAGE_INSPECT: navigate(PageId::Inspect); break;
             case IDM_PAGE_SYSTEM: navigate(PageId::System); break;
             case IDM_PAGE_BATTERY: navigate(PageId::Battery); break;
-            case IDM_PAGE_SETTINGS: navigate(PageId::Settings); break;
+            case IDM_PAGE_SETTINGS:
+                if (hidden_) show_from_tray();  // from the tray menu
+                navigate(PageId::Settings);
+                break;
             case IDM_PALETTE: open_palette(); break;
             case IDM_FIND:
                 if (current_ && current_->id() != PageId::Processes && current_->id() != PageId::Services &&
@@ -823,22 +884,37 @@ private:
     }
 
     void open_palette() {
+        // Ctrl+K again closes it, as ⌘K toggles the macOS palette.
+        bool was_open = false;
+        for (auto &overlay : overlays_)
+            if (overlay->is_palette() && !overlay->closed()) {
+                overlay->close();
+                was_open = true;
+            }
+        if (was_open) {
+            overlays_.erase(
+                std::remove_if(overlays_.begin(), overlays_.end(), [](const auto &o) { return o->closed(); }),
+                overlays_.end());
+            repaint();
+            return;
+        }
         std::vector<PaletteItem> items;
         auto screen = [&](PageId id, const wchar_t *title, const wchar_t *shortcut) {
+            if (!page_available(store_, id)) return;
             items.push_back({PaletteItem::Kind::Screen, title, L"", shortcut, [this, id] { navigate(id); }});
         };
         screen(PageId::Overview, L"Overview", L"Ctrl+1");
         screen(PageId::Processes, L"Processes", L"Ctrl+2");
         screen(PageId::Cpu, L"CPU", L"Ctrl+3");
         screen(PageId::Memory, L"Memory", L"Ctrl+4");
-        if (store_.has(PC_CAP_GPU)) screen(PageId::Gpu, L"GPU", L"Ctrl+5");
+        screen(PageId::Gpu, L"GPU", L"Ctrl+5");
         screen(PageId::Disk, L"Disk", L"Ctrl+6");
         screen(PageId::Network, L"Network", L"Ctrl+7");
         screen(PageId::Startup, L"Startup", L"Ctrl+8");
         screen(PageId::Services, L"Services", L"Ctrl+9");
         screen(PageId::History, L"History", L"");
         screen(PageId::Inspect, L"Files & Ports", L"");
-        if (store_.has(PC_CAP_BATTERY)) screen(PageId::Battery, L"Battery", L"");
+        screen(PageId::Battery, L"Battery", L"");
         screen(PageId::System, L"System", L"");
         screen(PageId::Settings, L"Settings", L"Ctrl+,");
         items.push_back({PaletteItem::Kind::Command, store_.paused() ? L"Resume updates" : L"Pause updates", L"",
@@ -855,7 +931,8 @@ private:
             items.push_back(
                 {PaletteItem::Kind::Command, L"Get Info: " + name, L"", L"Ctrl+I", [this, pid] { show_info(pid); }});
         }
-        items.push_back({PaletteItem::Kind::Command, L"Quit Procyon", L"", L"", [this] { on_command(IDM_QUIT); }});
+        items.push_back(
+            {PaletteItem::Kind::Command, L"Quit Procyon", L"", L"Ctrl+Q", [this] { on_command(IDM_QUIT); }});
         ViewQuery query;
         query.mode = PC_VIEW_GROUPED;
         query.sort_column = PC_COLUMN_CPU;
@@ -872,9 +949,10 @@ private:
                                                      : L"";
             const int32_t pid = row.is_group() ? row.group_pid : p ? p->pid : 0;
             if (name.empty() || pid <= 0) continue;
+            // Opens the app's actions, the macOS palette's second level.
             PaletteItem item{PaletteItem::Kind::App, name,
-                             L"CPU " + fmt::cpu(row.cpu_percent) + L" · " + fmt::bytes(row.memory_bytes), L"",
-                             [this, pid] { show_info(pid); }};
+                             L"CPU " + fmt::cpu(row.cpu_percent) + L" · " + fmt::bytes(row.memory_bytes), L"", nullptr};
+            item.children = app_palette_actions(*this, row, p, name, [this](int id) { on_command(id); });
             item.icon_path = app_icon_path(row, p, s);
             item.icon_system = p && (p->flags & PC_PROC_SYSTEM) != 0;
             items.push_back(std::move(item));
@@ -904,19 +982,20 @@ private:
     void update_tray() {
         if (!tray_added_) return;
         const Snapshot &s = store_.snapshot();
-        std::wstring tip = L"Procyon";
-        if (store_.paused()) {
-            tip += L" · paused";
-        } else {
-            // Every module switched on in Settings, like the menu bar modules on macOS.
+        std::wstring tip = store_.paused() ? L"Procyon · paused" : L"Procyon";
+        // Every module switched on in Settings, like the menu bar modules on macOS; paused, the last
+        // figures stay. Nothing before the first sample.
+        if (store_.has_snapshot()) {
             if (settings_.tray_modules & 1) tip += L" · CPU " + fmt::percent(s.cpu_usage);
-            if (settings_.tray_modules & 2) tip += L" · Memory " + fmt::bytes(static_cast<int64_t>(s.memory_used));
+            if (settings_.tray_modules & 2)
+                tip += L" · Memory " +
+                       fmt::percent(s.memory_total ? static_cast<double>(s.memory_used) / s.memory_total : 0);
             if (settings_.tray_modules & 4)
                 tip += L" · ↓ " + fmt::rate(s.net_rx_bps) + L" ↑ " + fmt::rate(s.net_tx_bps);
-            if ((settings_.tray_modules & 8) && !s.gpus.empty())
+            if ((settings_.tray_modules & 8) && !s.gpus.empty() && s.gpus[0].utilization >= 0)
                 tip += L" · GPU " + fmt::percent(s.gpus[0].utilization);
             if ((settings_.tray_modules & 16) && s.cpu_temperature >= 0)
-                tip += L" · " + fmt::temperature(s.cpu_temperature, settings_.fahrenheit);
+                tip += L" · CPU " + fmt::temperature(s.cpu_temperature, settings_.fahrenheit);
             if (settings_.tray_modules & 32)
                 if (auto b = store_.battery(); b && b->present) tip += L" · Battery " + fmt::percent(b->level);
         }
@@ -933,7 +1012,14 @@ private:
     // An alert as a Windows notification (a balloon of the tray icon, which Windows 10 and 11 show
     // as a toast and keep in the notification center), also while Procyon is in front.
     void notify(const AlertEvent &event) {
-        if (!tray_added_) return;
+        if (!tray_added_) add_tray();  // the shell may not have been ready at start
+        if (!tray_added_) {
+            // No notification area to show it in: at least make a sound; the alert is still listed
+            // under Settings → Alerts.
+            MessageBeep(MB_ICONWARNING);
+            repaint();
+            return;
+        }
         NOTIFYICONDATAW data = tray_;
         data.uFlags = NIF_INFO;
         data.dwInfoFlags = NIIF_WARNING | NIIF_RESPECT_QUIET_TIME;
@@ -969,6 +1055,7 @@ private:
         HMENU menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, IDM_OPEN, L"Open Procyon");
         AppendMenuW(menu, MF_STRING, IDM_PAUSE, store_.paused() ? L"Resume updates" : L"Pause updates");
+        AppendMenuW(menu, MF_STRING, IDM_PAGE_SETTINGS, L"Settings…");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, IDM_QUIT, L"Quit");
         SetMenuDefaultItem(menu, IDM_OPEN, FALSE);
@@ -987,14 +1074,17 @@ private:
         if (!persist_) return;  // --no-settings: defaults, nothing read
         HKEY key = nullptr;
         if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return;
+        // Only a DWORD of the expected size counts: anything else (a hand-edited string) is the default,
+        // as platform::read_setting and the Linux key file treat it.
         auto dword = [&](const wchar_t *name, DWORD fallback) {
-            DWORD value = fallback, size = sizeof(value);
-            if (RegQueryValueExW(key, name, nullptr, nullptr, reinterpret_cast<BYTE *>(&value), &size) != ERROR_SUCCESS)
+            DWORD value = fallback, size = sizeof(value), type = 0;
+            if (RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE *>(&value), &size) != ERROR_SUCCESS ||
+                type != REG_DWORD || size != sizeof(value))
                 return fallback;
             return value;
         };
         settings_.interval = std::clamp(dword(L"IntervalMs", 1000) / 1000.0, 0.5, 5.0);
-        settings_.theme = static_cast<int>(dword(L"Theme", 0));
+        settings_.theme = std::clamp(static_cast<int>(dword(L"Theme", 0)), 0, 2);
         settings_.fahrenheit = dword(L"Fahrenheit", 0) != 0;
         settings_.minimize_to_tray = dword(L"MinimizeToTray", 1) != 0;
         settings_.tray_modules = static_cast<int>(dword(L"TrayModules", 1 | 2));
@@ -1029,7 +1119,8 @@ private:
         WINDOWPLACEMENT placement{};
         placement.length = sizeof(placement);
         if (GetWindowPlacement(hwnd_, &placement)) {
-            if (placement.showCmd == SW_SHOWMINIMIZED) placement.showCmd = SW_SHOWNORMAL;
+            // Maximized or not, whatever the window's state now (hidden in the tray, minimized).
+            placement.showCmd = IsZoomed(hwnd_) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
             RegSetValueExW(key, L"Placement", 0, REG_BINARY, reinterpret_cast<const BYTE *>(&placement),
                            sizeof(placement));
         }
@@ -1038,7 +1129,8 @@ private:
 
     void restore_placement(int show_command) {
         if (has_placement_) {
-            placement_.showCmd = SW_SHOWNORMAL;
+            // Reopens maximized when it was closed maximized, never minimized.
+            if (placement_.showCmd != SW_SHOWMAXIMIZED) placement_.showCmd = SW_SHOWNORMAL;
             SetWindowPlacement(hwnd_, &placement_);
         }
         ShowWindow(hwnd_, has_placement_ ? SW_SHOW : show_command);
@@ -1066,8 +1158,22 @@ private:
     // ---- window procedure ----
 
     LRESULT proc(UINT message, WPARAM wparam, LPARAM lparam) {
+        // Explorer restarted: the notification area is new and empty, so add the icon again (without
+        // it a Procyon hidden in the tray could not be opened any more).
+        static const UINT taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+        if (message == activate_message() && message != 0) {
+            show_from_tray();
+            return 0;
+        }
+        if (taskbar_created && message == taskbar_created) {
+            add_tray();
+            update_tray();
+            return 0;
+        }
         switch (message) {
             case WM_CREATE:
+                // A second, unelevated launch may activate an elevated Procyon.
+                ChangeWindowMessageFilterEx(hwnd_, activate_message(), MSGFLT_ALLOW, nullptr);
                 on_create();
                 // Re-run WM_NCCALCSIZE now that the window exists, so the caption goes away.
                 SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
@@ -1176,6 +1282,10 @@ private:
                 if (nav_.size() < 6) build_nav();
                 if (current_) current_->tick(*this);
                 for (auto &overlay : overlays_) overlay->tick(*this);
+                if (screenshot_) {
+                    if (++screenshot_samples_ == 6) take_screenshot();
+                    return 0;
+                }
                 update_tray();
                 if (!hidden_) repaint();
                 return 0;
@@ -1185,7 +1295,8 @@ private:
                     case NIN_SELECT:
                     case NIN_KEYSELECT:
                     case WM_LBUTTONUP:
-                    case WM_LBUTTONDBLCLK: show_from_tray(); break;
+                    case WM_LBUTTONDBLCLK:
+                    case NIN_BALLOONUSERCLICK: show_from_tray(); break;  // also a click on an alert
                     case WM_CONTEXTMENU:
                     case WM_RBUTTONUP: tray_menu(); break;
                     default: break;
@@ -1317,7 +1428,7 @@ private:
                 store_.stop();
                 store_.flush_history();  // the minute in progress would otherwise go with the process
                 canvas_.shutdown();
-                PostQuitMessage(0);
+                PostQuitMessage(exit_code_);
                 return 0;
             default: break;
         }
@@ -1349,6 +1460,9 @@ private:
     bool tray_added_ = false;
     bool hidden_ = false;
     bool quit_ = false;
+    std::optional<Screenshot> screenshot_;
+    int screenshot_samples_ = 0;
+    int exit_code_ = 0;
     WINDOWPLACEMENT placement_{};
     bool has_placement_ = false;
 };
@@ -1369,8 +1483,75 @@ int run_app(HINSTANCE instance, const std::wstring &args, int show_command) {
         initial = page_from_name(name);
     }
 
+    // The value after `flag` ("--screenshot C:\\out.png"), quoted or not; empty when absent.
+    const auto value_of = [&args](const wchar_t *flag) -> std::wstring {
+        const size_t at = args.find(flag);
+        if (at == std::wstring::npos) return {};
+        size_t start = args.find_first_not_of(L' ', at + wcslen(flag));
+        if (start == std::wstring::npos) return {};
+        if (args[start] == L'"') {
+            const size_t end = args.find(L'"', start + 1);
+            return args.substr(start + 1, end == std::wstring::npos ? std::wstring::npos : end - start - 1);
+        }
+        const size_t end = args.find(L' ', start);
+        return args.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+    };
+
+    // --version: printed to the console Procyon was started from (a GUI program has none of its own).
+    if (args.find(L"--version") != std::wstring::npos) {
+        const std::string text = std::string("Procyon ") + PROCYON_VERSION_STRING + "\n";
+        HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (!out || out == INVALID_HANDLE_VALUE) {
+            if (AttachConsole(ATTACH_PARENT_PROCESS)) out = GetStdHandle(STD_OUTPUT_HANDLE);
+        }
+        DWORD written = 0;
+        if (out && out != INVALID_HANDLE_VALUE)
+            WriteFile(out, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+        CoUninitialize();
+        return 0;
+    }
+
+    std::optional<MainWindow::Screenshot> screenshot;
+    if (const std::wstring path = value_of(L"--screenshot"); !path.empty()) {
+        screenshot.emplace();
+        screenshot->path = path;
+        if (args.find(L"--dark") != std::wstring::npos) screenshot->theme = 2;
+    }
+
     // --no-settings: the defaults (1 s refresh, close to tray) and no registry writes, for measurements.
-    MainWindow window(instance, initial, args.find(L"--no-settings") == std::wstring::npos);
+    // A screenshot reads and writes no settings either.
+    const bool measuring = args.find(L"--no-settings") != std::wstring::npos || screenshot.has_value();
+
+    // A second launch (Start menu, taskbar) while Procyon runs, maybe hidden in the tray, brings the
+    // running window up instead of starting another sampler and tray icon, as on macOS and Linux.
+    // Measurements run beside a running Procyon. An elevated copy's mutex can't be opened from an
+    // unelevated launch (access denied): that also means one is running.
+    HANDLE instance_mutex = nullptr;
+    if (!measuring) {
+        instance_mutex = CreateMutexW(nullptr, TRUE, kInstanceMutex);
+        const DWORD error = GetLastError();
+        if (!instance_mutex || error == ERROR_ALREADY_EXISTS) {
+            bool owned = false;
+            // The copy Unlock Full Access starts: the unelevated one is on its way out.
+            if (instance_mutex && args.find(L"--relaunch") != std::wstring::npos) {
+                const DWORD wait = WaitForSingleObject(instance_mutex, 15000);
+                owned = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+            }
+            if (!owned) {
+                if (HWND running = FindWindowW(kClassName, nullptr)) {
+                    DWORD pid = 0;
+                    GetWindowThreadProcessId(running, &pid);
+                    AllowSetForegroundWindow(pid);
+                    PostMessageW(running, activate_message(), 0, 0);
+                }
+                if (instance_mutex) CloseHandle(instance_mutex);
+                CoUninitialize();
+                return 0;
+            }
+        }
+    }
+
+    MainWindow window(instance, initial, !measuring, screenshot);
     g_window = &window;
     if (!window.create(show_command)) return 1;
     HACCEL accelerators = LoadAcceleratorsW(instance, MAKEINTRESOURCEW(IDR_ACCELERATORS));
@@ -1378,17 +1559,22 @@ int run_app(HINSTANCE instance, const std::wstring &args, int show_command) {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         bool use_accelerators = true;
+        // A search field keeps Delete, Backspace and Return for itself, also with Ctrl (Ctrl+Backspace
+        // deletes a word there), as the macOS app turns End Task off while its search field has focus.
         if (msg.message == WM_KEYDOWN && window.text_input_active() &&
-            (msg.wParam == VK_DELETE || msg.wParam == VK_BACK || msg.wParam == VK_RETURN) &&
-            !(GetKeyState(VK_CONTROL) & 0x8000))
+            (msg.wParam == VK_DELETE || msg.wParam == VK_BACK || msg.wParam == VK_RETURN))
             use_accelerators = false;
         if (use_accelerators && accelerators && TranslateAcceleratorW(window.hwnd(), accelerators, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
     g_window = nullptr;
+    if (instance_mutex) {
+        ReleaseMutex(instance_mutex);
+        CloseHandle(instance_mutex);
+    }
     CoUninitialize();
-    return static_cast<int>(msg.wParam);
+    return static_cast<int>(msg.wParam);  // PostQuitMessage(exit_code_)
 }
 
 }  // namespace procyon::ui

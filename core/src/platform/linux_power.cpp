@@ -27,30 +27,21 @@ struct Sensors {
 const Sensors &sensors() {
     static const Sensors found = [] {
         Sensors s;
-        std::vector<std::string> fallback;  // ACPI thermal zones when no CPU driver is loaded
+        std::vector<HwmonInput> inputs;
         for (const auto &h : list_dir("/sys/class/hwmon")) {
             const std::string dir = "/sys/class/hwmon/" + h;
             const std::string name = read_line(dir + "/name");
             for (const auto &file : list_dir(dir)) {
-                if (!starts_with(file, "temp") || file.size() < 12 || file.compare(file.size() - 6, 6, "_input") != 0)
+                // "temp1_input": at least "temp", a digit and "_input".
+                if (!starts_with(file, "temp") || file.size() < 11 || file.compare(file.size() - 6, 6, "_input") != 0)
                     continue;
-                const std::string input = dir + "/" + file;
                 const std::string label = read_line(dir + "/" + file.substr(0, file.size() - 6) + "_label");
-                if (name == "coretemp") {
-                    // "Package id 0" covers the whole die; per-core sensors only when it is missing.
-                    if (starts_with(label, "Package")) s.cpu.insert(s.cpu.begin(), input);
-                } else if (name == "k10temp" || name == "zenpower") {
-                    if (label == "Tctl" || label == "Tdie") s.cpu.push_back(input);
-                } else if (name == "cpu_thermal" || name == "soc_thermal") {
-                    s.cpu.push_back(input);
-                } else if (name == "acpitz") {
-                    fallback.push_back(input);
-                } else if (name == "nvme" || name == "drivetemp") {
-                    if (label.empty() || label == "Composite") s.disk.push_back(input);
-                }
+                inputs.push_back({name, label, dir + "/" + file});
+                if ((name == "nvme" || name == "drivetemp") && (label.empty() || label == "Composite"))
+                    s.disk.push_back(dir + "/" + file);
             }
         }
-        if (s.cpu.empty()) s.cpu = fallback;
+        s.cpu = cpu_sensor_inputs(inputs);
         return s;
     }();
     return found;
@@ -150,7 +141,9 @@ bool battery(pc_battery &out) {
     out.level = capacity >= 0                ? std::min<int64_t>(capacity, 100) / 100.0
                 : full_wh > 0 && now_wh >= 0 ? now_wh / full_wh
                                              : 0;
-    if (full_wh > 0 && design_wh > 0) out.health = std::min(full_wh / design_wh, 1.5);
+    // Maximum capacity relative to new, capped at 100% like macOS and Windows (a fresh battery may
+    // report a little over its design capacity).
+    if (full_wh > 0 && design_wh > 0) out.health = std::min(full_wh / design_wh, 1.0);
     if (watts > 0) {
         const bool discharging = status == "Discharging";
         out.power_watts = discharging ? -watts : watts;
@@ -162,9 +155,47 @@ bool battery(pc_battery &out) {
     if (cycles > 0) out.cycle_count = static_cast<int32_t>(cycles);  // 0 means "not reported"
     const int64_t temp = read_int(dir + "/temp", -1);                // tenths of a degree, rarely present
     if (temp > 0 && temp < 1000) out.temperature = temp / 10.0;
-    const std::string health = read_line(dir + "/health");
-    if (!health.empty() && health != "Unknown") copy_string(out.condition, sizeof(out.condition), health);
+    copy_string(out.condition, sizeof(out.condition), battery_condition(read_line(dir + "/health"), out.health));
     return true;
+}
+
+// The CPU die sensors among the hwmon inputs, best first: coretemp's package sensor (its per-core
+// sensors only where the package one is missing), k10temp/zenpower's Tdie (Tctl only without it:
+// on Zen and Zen+ Tctl carries a 10-20 °C control offset), ARM SoC zones; ACPI zones as the last resort.
+std::vector<std::string> cpu_sensor_inputs(const std::vector<HwmonInput> &inputs) {
+    std::vector<std::string> package, cores, tdie, tctl, soc, acpi;
+    for (const HwmonInput &i : inputs) {
+        if (i.driver == "coretemp") {
+            if (starts_with(i.label, "Package"))
+                package.push_back(i.input);
+            else if (starts_with(i.label, "Core"))
+                cores.push_back(i.input);
+        } else if (i.driver == "k10temp" || i.driver == "zenpower") {
+            if (i.label == "Tdie") tdie.push_back(i.input);
+            if (i.label == "Tctl") tctl.push_back(i.input);
+        } else if (i.driver == "cpu_thermal" || i.driver == "soc_thermal") {
+            soc.push_back(i.input);
+        } else if (i.driver == "acpitz") {
+            acpi.push_back(i.input);
+        }
+    }
+    std::vector<std::string> result = package.empty() ? cores : package;
+    const std::vector<std::string> &amd = tdie.empty() ? tctl : tdie;
+    result.insert(result.end(), amd.begin(), amd.end());
+    result.insert(result.end(), soc.begin(), soc.end());
+    return result.empty() ? acpi : result;
+}
+
+// The battery's condition in macOS's words: sysfs "Good" is "Normal", a failing battery
+// "Service Recommended", other states (Overheat, Cold, …) as the kernel says them. Where the
+// kernel doesn't know, the health decides, as on Windows (below 80% of design: service).
+std::string battery_condition(const std::string &sysfs_health, double health) {
+    if (sysfs_health == "Good") return "Normal";
+    if (sysfs_health == "Dead" || sysfs_health == "Unspecified failure" || sysfs_health == "Calibration required")
+        return "Service Recommended";
+    if (!sysfs_health.empty() && sysfs_health != "Unknown") return sysfs_health;
+    if (health < 0) return {};
+    return health >= 0.8 ? "Normal" : "Service Recommended";
 }
 
 // busctl --json=short call … ListInhibitors: {"type":"a(ssssuu)","data":[[["what","who","why",
@@ -219,7 +250,9 @@ std::vector<PowerAssertion> parse_inhibitors(const std::string &json) {
         PowerAssertion a;
         for (const auto &kind : split(what, ':')) {
             if (kind == "sleep") a.kind |= PC_ASSERT_SYSTEM_SLEEP;
-            if (kind == "idle") a.kind |= PC_ASSERT_DISPLAY_SLEEP;
+            // Keeping the display on keeps the machine awake too (and blocks idle suspend): both,
+            // as macOS and Windows report a display assertion.
+            if (kind == "idle") a.kind |= PC_ASSERT_DISPLAY_SLEEP | PC_ASSERT_SYSTEM_SLEEP;
         }
         if (a.kind == 0) continue;  // shutdown, lid switch and power-key handling
         a.pid = static_cast<int32_t>(std::strtol(fields[5].c_str(), nullptr, 10));
@@ -341,7 +374,7 @@ std::vector<PowerAssertion> session_inhibitors() {
         PowerAssertion a;
         // 4: suspend, 8: idle (the screen stays on). Logout and user-switch locks keep nothing awake.
         if (bits & 4) a.kind |= PC_ASSERT_SYSTEM_SLEEP;
-        if (bits & 8) a.kind |= PC_ASSERT_DISPLAY_SLEEP;
+        if (bits & 8) a.kind |= PC_ASSERT_DISPLAY_SLEEP | PC_ASSERT_SYSTEM_SLEEP;
         if (a.kind == 0) continue;
         const auto app = session_call(path, interface, "GetAppId");
         const auto reason = session_call(path, interface, "GetReason");

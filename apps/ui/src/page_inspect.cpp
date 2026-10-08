@@ -33,6 +33,9 @@ std::wstring lower(std::wstring s) {
     return s;
 }
 
+// A path as the file system compares it: folded on Windows, as spelt on Linux.
+std::wstring path_key(const std::wstring &path) { return os::paths_ignore_case ? lower(path) : path; }
+
 // Case-insensitive ordering, like _wcsicmp.
 int wcscasecmp_(const wchar_t *a, const wchar_t *b) {
     for (;; ++a, ++b) {
@@ -116,8 +119,8 @@ public:
             if (!target_.empty()) {
                 float x = browse_button_.right() + tokens::space::md;
                 std::wstring name = target_;
-                while (!name.empty() && name.back() == L'\\') name.pop_back();
-                if (const size_t slash = name.find_last_of(L'\\');
+                while (name.size() > 1 && name.back() == os::path_separator) name.pop_back();
+                if (const size_t slash = name.find_last_of(os::path_separator);
                     slash != std::wstring::npos && slash + 1 < name.size())
                     name = name.substr(slash + 1);
                 x += r.badge(x, toolbar.cy() - 8.5f, name, Renderer::Tone::Accent) + tokens::space::xs;
@@ -239,6 +242,7 @@ private:
         int32_t pid;
         std::wstring process;
         std::wstring a, b, c, d;  // tab-specific columns
+        std::wstring copy;        // Copy Address on the Ports and Connections tabs
         int32_t state = 0;
         int sort_key = 0;
         bool local_only = false;
@@ -279,7 +283,8 @@ private:
         if (!host_) return L"";
         const pc_process *p = host_->store().snapshot().find(pid);
         if (p) return process_display_name(*p);
-        return pid == 4 ? L"System" : pid == 0 ? L"System Idle Process" : L"PID " + std::to_wstring(pid);
+        if (const wchar_t *name = os::unlisted_process_name(pid)) return name;
+        return L"PID " + std::to_wstring(pid);
     }
 
     void reload() {
@@ -293,7 +298,9 @@ private:
         const std::vector<pc_connection> connections = host_->store().connections(-1, complete);
         complete_ = complete;
         for (const pc_connection &c : connections) {
-            const bool listen = c.protocol == PC_PROTOCOL_UDP || c.state == PC_TCP_LISTEN;
+            // As on macOS: TCP listening, or UDP bound without a peer. A connected UDP socket (a QUIC
+            // or DNS client) is a connection.
+            const bool listen = c.state == PC_TCP_LISTEN || (c.protocol == PC_PROTOCOL_UDP && !c.remote_address[0]);
             if (tab_ == TabPorts && !listen) continue;
             if (tab_ == TabConnections && listen) continue;
             RowData row;
@@ -306,13 +313,16 @@ private:
             if (tab_ == TabPorts) {
                 row.b = std::to_wstring(c.local_port);
                 row.c = local == L"*" ? L"All addresses" : local;
+                // What Copy Address gives: an address a program accepts, the wildcard spelt out.
+                row.copy = fmt::endpoint(local == L"*" ? (c.family == 6 ? L"::" : L"0.0.0.0") : local, c.local_port);
                 row.d = row.local_only ? L"This PC" : L"Network";
                 row.state = row.local_only ? 0 : 1;
                 row.sort_key = c.local_port;
             } else {
-                row.b = local + L":" + std::to_wstring(c.local_port);
-                row.c = c.remote_address[0] ? fmt::from_utf8(c.remote_address) + L":" + std::to_wstring(c.remote_port)
+                row.b = fmt::endpoint(local, c.local_port);
+                row.c = c.remote_address[0] ? fmt::endpoint(fmt::from_utf8(c.remote_address), c.remote_port)
                                             : std::wstring(fmt::unavailable);
+                row.copy = row.c;
                 row.d = state_name(c.state);
                 row.state = c.state;
                 row.sort_key = c.local_port;
@@ -346,15 +356,16 @@ private:
     void sort() {
         rows_.clear();
         const std::wstring needle = lower(search_.text);
-        std::wstring prefix = lower(target_);
-        while (!prefix.empty() && prefix.back() == L'\\') prefix.pop_back();
+        std::wstring prefix = path_key(target_);
+        // "C:\" or "/" stand for everything under them: the separator itself ends the prefix.
+        while (!prefix.empty() && prefix.back() == os::path_separator) prefix.pop_back();
         int exposed = 0;
         for (const RowData &row : all_) {
             if (tab_ != TabFiles && hide_loopback_ && row.local_only) continue;
             if (tab_ == TabFiles && !prefix.empty()) {
-                const std::wstring path = lower(row.b);
+                const std::wstring path = path_key(row.b);
                 if (path.rfind(prefix, 0) != 0) continue;
-                if (path.size() > prefix.size() && path[prefix.size()] != L'\\') continue;
+                if (path.size() > prefix.size() && path[prefix.size()] != os::path_separator) continue;
             }
             if (!needle.empty() && lower(row.process).find(needle) == std::wstring::npos &&
                 lower(row.b).find(needle) == std::wstring::npos && lower(row.c).find(needle) == std::wstring::npos &&
@@ -443,9 +454,7 @@ private:
         if (tab_ == TabFiles) items.push_back({MenuOpen, std::wstring(L"Show in ") + os::file_manager});
         switch (host_->popup_menu(items, x, y)) {
             case MenuInfo: host_->show_info(d.pid); break;
-            case MenuCopy:
-                host_->copy_to_clipboard(tab_ == TabFiles ? d.b : tab_ == TabPorts ? d.c + L":" + d.b : d.c);
-                break;
+            case MenuCopy: host_->copy_to_clipboard(tab_ == TabFiles ? d.b : d.copy); break;
             case MenuOpen: host_->open_in_explorer(d.b); break;
             default: break;
         }

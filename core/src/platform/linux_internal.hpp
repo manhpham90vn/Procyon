@@ -36,6 +36,24 @@ void copy_string(char *dst, size_t capacity, const std::string &src);
 // Runs `argv` (no shell, LC_ALL=C) and returns its exit status, -1 when it couldn't start or was
 // killed after `timeout_ms`. Standard output goes to `out`, standard error to `err` when given.
 int run(const std::vector<std::string> &argv, std::string &out, std::string *err = nullptr, int timeout_ms = 10000);
+// uname's machine as procyon.h spells architectures ("aarch64" -> "arm64", "i686" -> "x86").
+std::string arch_name(const std::string &machine);
+
+// Programs that run many different apps' code (python3, sh, node, java): their name alone doesn't
+// tell which app or startup entry a process is.
+bool is_interpreter(const std::string &name);
+
+// The desktop user Procyon works for. A copy started as root through pkexec (Unlock Full Access)
+// still serves the user who asked: pkexec names them in PKEXEC_UID. Otherwise the real user.
+uint32_t session_uid();
+// Whether this is such a root copy acting for another (session) user.
+bool acting_for_session_user();
+std::string session_user_name();
+// The session user's home folder ("" when unknown).
+std::string session_home();
+// Hands a file or folder a root copy created in the session user's home back to that user, so
+// the unprivileged copy can change it later. The link itself, never what it points to. No-op otherwise.
+void give_to_session_user(const std::string &path);
 // Path of an executable found in PATH (or the standard system directories), "" when missing.
 std::string find_program(const std::string &name);
 

@@ -73,6 +73,7 @@ public:
 
     void paint(Host &host, const Rect &bounds) override {
         app_rows_.clear();
+        unlock_button_ = {};
         switch (id_) {
             case PageId::Cpu: paint_cpu(host, bounds); break;
             case PageId::Memory: paint_memory(host, bounds); break;
@@ -87,6 +88,10 @@ public:
     void wheel(Host &, const MouseEvent &e) override { scroll_.wheel(e.wheel); }
     void mouse_down(Host &host, const MouseEvent &e, bool right) override {
         if (right) return;
+        if (!unlock_button_.empty() && unlock_button_.contains(e.x, e.y)) {
+            host.relaunch_elevated();
+            return;
+        }
         for (const TopAppRow &row : app_rows_)
             if (row.rect.contains(e.x, e.y)) host.show_in_processes(row.app_id, row.pid);
     }
@@ -97,7 +102,7 @@ private:
     static bool fixed_temperature(const Series &series) {
         if (series.size() < 20) return false;
         const float *values = series.data();
-        const size_t start = series.size() > kHistoryWindow ? series.size() - kHistoryWindow : 0;
+        const size_t start = series.size() > history_window() ? series.size() - history_window() : 0;
         for (size_t i = start + 1; i < series.size(); ++i)
             if (values[i] != values[start]) return false;
         return true;
@@ -112,9 +117,12 @@ private:
 
     void top_apps(Host &host, Stack &stack, const wchar_t *title, Renderer::Symbol symbol, MetricKind kind,
                   int32_t column, const std::function<std::wstring(const Row &)> &value,
-                  const std::function<float(const Row &)> &fraction) {
+                  const std::function<float(const Row &)> &fraction,
+                  const std::function<double(const Row &)> &rank = {},
+                  std::wstring_view empty = L"No app is busy right now.") {
         const Rect card = stack.next(top_apps_height(8));
-        for (const TopAppRow &row : top_apps_panel(host, card, title, symbol, kind, column, true, 8, value, fraction))
+        for (const TopAppRow &row :
+             top_apps_panel(host, card, title, symbol, kind, column, true, 8, value, fraction, rank, empty))
             app_rows_.push_back(row);
     }
 
@@ -155,10 +163,11 @@ private:
                     {&h.cpu_system, L"System", fmt::percent(s.cpu_system), true}},
                    1, MetricKind::Cpu, percent_axis);
 
-        // Windows has no user-mode way to the die sensor: the hottest ACPI zone stands in. A zone that
-        // has never moved over the last minute is the board's fixed reading, and says so.
-        const bool fixed_zone = fixed_temperature(h.cpu_temperature);
-        const wchar_t *zone_label = fixed_zone ? L"Board zone (fixed reading)" : L"Hottest ACPI zone";
+        // Where only a firmware zone stands in for the die sensor (Windows), a zone that has never moved
+        // over the last minute is the board's fixed reading, and says so. A die sensor of an idle machine
+        // may sit still too: it is never called fixed.
+        const bool fixed_zone = os::cpu_sensor_is_firmware_zone && fixed_temperature(h.cpu_temperature);
+        const wchar_t *zone_label = fixed_zone ? L"Board zone (fixed reading)" : os::cpu_sensor_label;
         if (store.has(PC_CAP_TEMPERATURE) && s.cpu_temperature >= 0) {
             inner = panel(r, stack.next(kPanelChrome + 160), L"Temperature", Renderer::Symbol::Thermo);
             Color warning = theme.warning();
@@ -184,9 +193,15 @@ private:
         };
         if (info.cpu_frequency_hz)
             stats.push_back({L"Base speed", fmt::number(info.cpu_frequency_hz / 1e9, 2) + L" GHz", L""});
+        // Where the OS keeps one (Linux; not Windows, whose figures stay 0), as the macOS CPU screen shows.
+        if (s.load_average[0] > 0 || s.load_average[1] > 0 || s.load_average[2] > 0)
+            stats.push_back({L"Load average",
+                             fmt::number(s.load_average[0], 2) + L" " + fmt::number(s.load_average[1], 2) + L" " +
+                                 fmt::number(s.load_average[2], 2),
+                             L"1, 5 and 15 minutes"});
         if (store.has(PC_CAP_TEMPERATURE) && s.cpu_temperature >= 0)
             stats.push_back({L"Temperature", fmt::temperature(s.cpu_temperature, host.settings().fahrenheit),
-                             fixed_zone ? L"Board's ACPI zone, not the CPU die" : L"Hottest ACPI zone"});
+                             fixed_zone ? L"Board's ACPI zone, not the CPU die" : os::cpu_sensor_detail});
         const float content_w = stack.area.w - tokens::space::lg * 2;
         inner = panel(r, stack.next(kPanelChrome + stat_grid_height(content_w, stats.size())), L"Details",
                       Renderer::Symbol::Bullets);
@@ -266,7 +281,7 @@ private:
                     Color color = rgba(s.core_usage[static_cast<size_t>(i)] > 0.85 ? style.end : style.start);
                     options.color_override = &color;
                     r.sparkline(spark, h.cores[static_cast<size_t>(i)].data(), h.cores[static_cast<size_t>(i)].size(),
-                                kHistoryWindow, 1, MetricKind::Cpu, options);
+                                history_window(), 1, MetricKind::Cpu, options);
                 }
                 r.usage_bar(Rect{tile.x + tokens::space::sm, tile.bottom() - 2, tile.w - tokens::space::sm * 2, 2},
                             static_cast<float>(s.core_usage[static_cast<size_t>(i)]), MetricKind::Cpu);
@@ -325,9 +340,9 @@ private:
         };
         const std::vector<Part> parts = {
             {L"App", s.memory_app, rgba(style.start)},
-            {L"Kernel", s.memory_wired, rgba(style.end)},
+            {os::memory_wired, s.memory_wired, rgba(style.end)},
             {L"Compressed", s.memory_compressed, rgba(tokens::metric::cpu.start)},
-            {L"Standby", s.memory_cached, with_alpha(theme.text_tertiary(), 0.6f)},
+            {os::memory_cached, s.memory_cached, with_alpha(theme.text_tertiary(), 0.6f)},
             {L"Free", s.memory_free, theme.track()},
         };
         const float content_w = stack.area.w - tokens::space::lg * 2;
@@ -358,7 +373,7 @@ private:
                    value, theme.text());
         }
 
-        // Details and the page file, side by side.
+        // Details and the page file (swap), side by side.
         std::vector<Stat> stats = {
             {L"Pressure", pressure, L"",
              s.memory_pressure == PC_PRESSURE_CRITICAL  ? theme.danger()
@@ -367,9 +382,9 @@ private:
             {L"Used", fmt::bytes(static_cast<int64_t>(s.memory_used)),
              fmt::percent(s.memory_total ? static_cast<double>(s.memory_used) / s.memory_total : 0)},
             {L"App memory", fmt::bytes(static_cast<int64_t>(s.memory_app)), L""},
-            {L"Kernel (non-paged)", fmt::bytes(static_cast<int64_t>(s.memory_wired)), L""},
+            {os::memory_wired_detail, fmt::bytes(static_cast<int64_t>(s.memory_wired)), L""},
             {L"Compressed", fmt::bytes(static_cast<int64_t>(s.memory_compressed)), L""},
-            {L"Standby (cached)", fmt::bytes(static_cast<int64_t>(s.memory_cached)), L""},
+            {os::memory_cached_detail, fmt::bytes(static_cast<int64_t>(s.memory_cached)), L""},
         };
         const bool wide = stack.area.w >= 720;
         const float swap_w = wide ? std::min(360.0f, stack.area.w * 0.35f) : stack.area.w;
@@ -381,7 +396,7 @@ private:
         inner = panel(r, Rect{row.x, row.y, details_w, row_h}, L"Details", Renderer::Symbol::Bullets);
         stat_grid(r, inner, stats, 140, 3);
         const Rect swap_card = wide ? Rect{row.right() - swap_w, row.y, swap_w, row_h} : stack.next(kPanelChrome + 120);
-        inner = panel(r, swap_card, L"Page file", Renderer::Symbol::Drive);
+        inner = panel(r, swap_card, os::swap_name, Renderer::Symbol::Drive);
         const auto swap = fmt::split_unit(fmt::bytes(static_cast<int64_t>(s.swap_used)));
         const float vw = value_text(r, inner.take_top(32), swap.first, swap.second, Font::Metric, theme.text());
         TextStyle of_label;
@@ -398,7 +413,7 @@ private:
             options.halo = false;
             Color end = rgba(style.end);
             options.color_override = &end;
-            r.sparkline(inner, h.swap_used.data(), h.swap_used.size(), kHistoryWindow,
+            r.sparkline(inner, h.swap_used.data(), h.swap_used.size(), history_window(),
                         nice_max(std::max(1.0f, h.swap_used.max_recent())), MetricKind::Memory, options);
         }
 
@@ -507,7 +522,9 @@ private:
                 return row.disk_read_bps < 0
                            ? 0.0f
                            : static_cast<float>((row.disk_read_bps + std::max(0.0, row.disk_write_bps)) / peak);
-            });
+            },
+            [](const Row &row) { return std::max(0.0, row.disk_read_bps) + std::max(0.0, row.disk_write_bps); },
+            L"No app is reading or writing right now.");
         finish(r, bounds, stack.y);
     }
 
@@ -557,14 +574,21 @@ private:
                     return row.net_rx_bps < 0
                                ? 0.0f
                                : static_cast<float>((row.net_rx_bps + std::max(0.0, row.net_tx_bps)) / peak);
-                });
+                },
+                [](const Row &row) { return std::max(0.0, row.net_rx_bps) + std::max(0.0, row.net_tx_bps); },
+                L"No app is using the network right now.");
             if (os::process_network_note)
                 info_banner(r, stack.next(44), os::process_network_note, L"", Renderer::Tone::Neutral);
+        } else if (os::process_network_needs_elevation && !host.elevated()) {
+            const Banner b = action_banner(
+                r, stack.next(kActionBannerHeight), L"Per-app network needs full access",
+                std::wstring(L"Counting each app's traffic needs ") + os::admin + L" access. " + os::elevation,
+                L"Unlock Full Access", Renderer::Tone::Accent, unlock_button_.contains(host.mouse_x(), host.mouse_y()));
+            unlock_button_ = b.button;
         } else {
             info_banner(r, stack.next(44),
-                        std::wstring(L"Procyon can't read per-app network usage on ") + os::name +
-                            L" yet, so it hides it instead of showing "
-                            L"estimates.",
+                        std::wstring(L"Procyon can't read per-app network usage on this machine, so it hides it "
+                                     L"instead of showing estimates."),
                         L"", Renderer::Tone::Neutral);
         }
         finish(r, bounds, stack.y);
@@ -658,6 +682,8 @@ private:
         finish(r, bounds, stack.y);
     }
 
+    // Laid out like the macOS BatteryView: Charge and Health side by side, then the apps keeping the
+    // machine awake, always shown.
     void paint_battery(Host &host, const Rect &bounds) {
         Renderer &r = host.renderer();
         const Theme &theme = r.theme();
@@ -666,79 +692,166 @@ private:
         Rect area;
         Stack stack = begin(r, bounds, area);
         Rect trailing;
-        stack.area = page_header(r, area, L"Battery",
-                                 b ? (b->charging      ? L"Charging"
-                                      : b->on_ac_power ? L"On AC power"
-                                                       : L"On battery")
-                                   : L"No battery",
-                                 MetricKind::Battery, &trailing);
+        stack.area =
+            page_header(r, area, L"Battery", b ? battery_state(*b) : L"No battery", MetricKind::Battery, &trailing);
         stack.y = stack.area.y;
         if (!b) {
-            empty_state(r, stack.next(200), L"No battery", L"This PC runs on mains power.");
+            empty_state(r, stack.next(200), L"No battery", L"This PC runs on external power.");
             finish(r, bounds, stack.y);
             return;
         }
         value_text(r, Rect{trailing.x, trailing.y + 6, trailing.w, 40}, fmt::number(b->level * 100, 0), L"%",
                    Font::Display, theme.text(), HAlign::Right);
-        std::vector<Stat> stats = {
-            {L"Charge", fmt::percent(b->level),
-             b->charging      ? L"Charging"
-             : b->on_ac_power ? L"On AC power"
-                              : L"On battery",
-             rgba(tokens::metric::battery.start)},
-            {L"Time remaining",
-             b->on_ac_power ? (b->minutes_to_full > 0 ? fmt::duration(b->minutes_to_full * 60.0) + L" to full"
-                               : b->fully_charged     ? L"Fully charged"
-                                                      : std::wstring(fmt::unavailable))
-             : b->minutes_to_empty > 0 ? fmt::duration(b->minutes_to_empty * 60.0)
-                                       : std::wstring(fmt::unavailable),
-             L""},
-            {L"Power", b->power_watts != 0 ? fmt::watts(std::fabs(b->power_watts)) : std::wstring(fmt::unavailable),
-             b->power_watts < 0   ? L"discharging"
-             : b->power_watts > 0 ? L"charging"
-                                  : L""},
-            {L"Health", b->health >= 0 ? fmt::percent(b->health) : std::wstring(fmt::unavailable),
-             fmt::from_utf8(b->condition)},
-            {L"Cycles", b->cycle_count >= 0 ? fmt::count(b->cycle_count) : std::wstring(fmt::unavailable), L""},
-            {L"Capacity",
-             b->max_capacity_mah > 0 ? fmt::count(b->max_capacity_mah) + L" mAh" : std::wstring(fmt::unavailable),
-             b->design_capacity_mah > 0 ? L"design " + fmt::count(b->design_capacity_mah) + L" mAh" : L""},
-            {L"Temperature", fmt::temperature(b->temperature, host.settings().fahrenheit), L""},
-        };
-        const float content_w = stack.area.w - tokens::space::lg * 2 - 110;
-        Rect inner = panel(r, stack.next(kPanelChrome + std::max(110.0f, stat_grid_height(content_w, stats.size()))),
-                           L"Details", Renderer::Symbol::Bullets, MetricKind::Battery);
-        const Rect gauge = inner.take_left(110);
-        r.ring_gauge(gauge.x + 43, gauge.y + 43, 38, static_cast<float>(b->level), MetricKind::Battery, 9);
+
+        // Charge: the state (with the adapter under it), the time left, the power drawn or charged at.
+        std::vector<Stat> charge = {{L"State", battery_state(*b), fmt::from_utf8(b->adapter), std::nullopt}};
+        if (b->charging)
+            charge.push_back({L"Until full",
+                              b->minutes_to_full > 0 ? fmt::duration(b->minutes_to_full * 60.0) : L"Calculating…", L"",
+                              std::nullopt});
+        else if (!b->on_ac_power)
+            charge.push_back({L"Remaining",
+                              b->minutes_to_empty > 0 ? fmt::duration(b->minutes_to_empty * 60.0) : L"Calculating…",
+                              L"", std::nullopt});
+        if (b->power_watts != 0)
+            charge.push_back({b->power_watts < 0 ? L"Drawing" : L"Charging at", fmt::watts(std::fabs(b->power_watts)),
+                              L"", std::nullopt});
+        // Health: maximum capacity (amber below 80%), condition, cycles, full charge, temperature.
+        std::vector<Stat> health;
+        if (b->health >= 0)
+            health.push_back({L"Maximum capacity", fmt::percent(b->health), L"",
+                              b->health >= 0.8 ? theme.success() : theme.warning()});
+        if (b->condition[0]) health.push_back({L"Condition", fmt::from_utf8(b->condition), L"", std::nullopt});
+        if (b->cycle_count > 0) health.push_back({L"Cycle count", fmt::count(b->cycle_count), L"", std::nullopt});
+        if (b->max_capacity_mah > 0)
+            health.push_back(
+                {L"Full charge", fmt::count(b->max_capacity_mah) + L" mAh",
+                 b->design_capacity_mah > 0 ? L"Design " + fmt::count(b->design_capacity_mah) + L" mAh" : L"",
+                 std::nullopt});
+        if (b->temperature >= 0)
+            health.push_back(
+                {L"Temperature", fmt::temperature(b->temperature, host.settings().fahrenheit), L"", std::nullopt});
+
+        const bool wide = stack.area.w >= 760;
+        const float gap = tokens::space::lg;
+        const float charge_w = wide ? (stack.area.w - gap) * 0.55f : stack.area.w;
+        const float health_w = wide ? stack.area.w - gap - charge_w : stack.area.w;
+        const float charge_h = kPanelChrome + std::max(110.0f, stat_grid_height(charge_w - tokens::space::lg * 2 - 120,
+                                                                                charge.size(), 140, 2));
+        const float health_h = kPanelChrome + stat_grid_height(health_w - tokens::space::lg * 2, health.size(), 140, 2);
+        Rect charge_card, health_card;
+        if (wide) {
+            const Rect row = stack.next(std::max(charge_h, health_h));
+            charge_card = Rect{row.x, row.y, charge_w, row.h};
+            health_card = Rect{row.x + charge_w + gap, row.y, health_w, row.h};
+        } else {
+            charge_card = stack.next(charge_h);
+            health_card = stack.next(health_h);
+        }
+        Rect inner = panel(r, charge_card, L"Charge", Renderer::Symbol::Gauge, MetricKind::Battery);
+        const Rect gauge = inner.take_left(120);
+        r.ring_gauge(gauge.x + 48, gauge.y + 48, 42, static_cast<float>(b->level), MetricKind::Battery, 10);
         TextStyle v;
         v.font = Font::Stat;
         v.halign = HAlign::Center;
-        r.text(fmt::percent(b->level), Rect{gauge.x, gauge.y + 31, 86, 24}, v, theme.text());
-        stat_grid(r, inner, stats);
-        if (!assertions_.empty()) {
-            inner = panel(r, stack.next(kPanelChrome + assertions_.size() * 24), L"Preventing sleep",
-                          Renderer::Symbol::Clock);
-            for (const pc_power_assertion &pa : assertions_) {
-                Rect row = inner.take_top(24);
-                TextStyle name;
-                name.font = Font::Body;
-                // A driver holds no process: its device description stands in for the name.
-                const std::wstring who = pa.process_name[0] ? fmt::from_utf8(pa.process_name)
-                                         : pa.pid > 0       ? L"PID " + std::to_wstring(pa.pid)
-                                                            : L"Driver";
-                const float nw = r.text(who, row, name, theme.text());
-                TextStyle kind;
-                kind.font = Font::Caption;
-                r.text((pa.kind & PC_ASSERT_DISPLAY_SLEEP) ? L"display" : L"sleep",
-                       Rect{row.x + nw + tokens::space::sm, row.y, 60, row.h}, kind, theme.text_tertiary());
-                TextStyle reason;
-                reason.font = Font::Caption;
-                reason.halign = HAlign::Right;
-                r.text(fmt::from_utf8(pa.reason), Rect{row.x + nw + 70, row.y, row.w - nw - 70, row.h}, reason,
-                       theme.text_secondary());
-            }
-        }
+        r.text(fmt::percent(b->level), Rect{gauge.x, gauge.y + 36, 96, 24}, v, theme.text());
+        stat_grid(r, inner, charge, 140, 2);
+        inner = panel(r, health_card, L"Health", Renderer::Symbol::Bullets);
+        if (health.empty())
+            empty_state(r, inner, L"", L"This battery reports nothing about its health.");
+        else
+            stat_grid(r, inner, health, 140, 2);
+
+        paint_sleep(host, stack);
         finish(r, bounds, stack.y);
+    }
+
+    // One row per app: what a daemon holds for an app (audio for a player) counts as the app's.
+    void paint_sleep(Host &host, Stack &stack) {
+        Renderer &r = host.renderer();
+        const Theme &theme = r.theme();
+        const Snapshot &s = host.store().snapshot();
+        struct Group {
+            int32_t pid;
+            std::vector<const pc_power_assertion *> items;
+        };
+        std::vector<Group> groups;
+        for (const pc_power_assertion &pa : assertions_) {
+            const int32_t pid = pa.on_behalf_of > 0 ? pa.on_behalf_of : pa.pid;
+            auto it = std::find_if(groups.begin(), groups.end(), [pid](const Group &g) { return g.pid == pid; });
+            if (it == groups.end()) it = groups.insert(groups.end(), Group{pid, {}});
+            it->items.push_back(&pa);
+        }
+        auto name_of = [&s](const Group &g) {
+            if (const pc_process *p = g.pid > 0 ? s.find(g.pid) : nullptr) return process_display_name(*p);
+            for (const pc_power_assertion *pa : g.items)
+                if (pa->pid == g.pid && pa->process_name[0]) return fmt::from_utf8(pa->process_name);
+            // A driver holds no process: its device description stands in for the name.
+            if (g.pid <= 0 && g.items.front()->process_name[0]) return fmt::from_utf8(g.items.front()->process_name);
+            return g.pid > 0 ? L"PID " + std::to_wstring(g.pid) : std::wstring(L"Driver");
+        };
+        std::sort(groups.begin(), groups.end(),
+                  [&](const Group &a, const Group &b) { return name_of(a) < name_of(b); });
+
+        constexpr float kRow = 48;
+        Rect inner = panel(r, stack.next(kPanelChrome + std::max<float>(60, groups.size() * kRow)),
+                           L"Apps Preventing Sleep", Renderer::Symbol::Clock);
+        if (groups.empty()) {
+            TextStyle t;
+            t.font = Font::Body;
+            t.halign = HAlign::Center;
+            r.text(L"Nothing is keeping this PC awake.", inner, t, theme.text_tertiary());
+            return;
+        }
+        for (const Group &g : groups) {
+            Rect row = inner.take_top(kRow).inset(0, tokens::space::xs);
+            const pc_process *p = g.pid > 0 ? s.find(g.pid) : nullptr;
+            const Rect icon = row.take_left(22 + tokens::space::sm + 2);
+            r.app_icon(p ? app_icon_path(p->app_id) : std::wstring(), Rect{icon.x, icon.y + 1, 22, 22},
+                       !p || (p->flags & PC_PROC_SYSTEM) != 0);
+            bool display = false;
+            std::vector<std::wstring> via, reasons;
+            for (const pc_power_assertion *pa : g.items) {
+                display |= (pa->kind & PC_ASSERT_DISPLAY_SLEEP) != 0;
+                if (pa->on_behalf_of > 0 && pa->process_name[0]) {
+                    const std::wstring holder = fmt::from_utf8(pa->process_name);
+                    if (std::find(via.begin(), via.end(), holder) == via.end()) via.push_back(holder);
+                }
+                const std::wstring reason = fmt::from_utf8(pa->reason);
+                if (!reason.empty() && std::find(reasons.begin(), reasons.end(), reason) == reasons.end() &&
+                    reasons.size() < 3)
+                    reasons.push_back(reason);
+            }
+            TextStyle pid_style;
+            pid_style.font = Font::Caption;
+            pid_style.tabular = true;
+            pid_style.halign = HAlign::Right;
+            pid_style.valign = VAlign::Top;
+            if (g.pid > 0)
+                r.text(L"PID " + std::to_wstring(g.pid), row.take_right(80), pid_style, theme.text_tertiary());
+            TextStyle head;
+            head.font = Font::Headline;
+            head.valign = VAlign::Top;
+            float x = row.x + r.text(name_of(g), Rect{row.x, row.y, row.w * 0.5f, 18}, head, theme.text()) +
+                      tokens::space::sm;
+            x += r.badge(x, row.y, display ? L"Keeps display on" : L"Prevents sleep",
+                         display ? Renderer::Tone::Warning : Renderer::Tone::Accent) +
+                 tokens::space::sm;
+            if (!via.empty()) {
+                std::wstring text = L"via ";
+                for (size_t i = 0; i < via.size(); ++i) text += (i ? L", " : L"") + via[i];
+                TextStyle c;
+                c.font = Font::Caption;
+                c.valign = VAlign::Top;
+                r.text(text, Rect{x, row.y + 1, row.right() - x, 16}, c, theme.text_tertiary());
+            }
+            std::wstring why;
+            for (size_t i = 0; i < reasons.size(); ++i) why += (i ? L" · " : L"") + reasons[i];
+            TextStyle label;
+            label.font = Font::Label;
+            label.valign = VAlign::Top;
+            r.text(why, Rect{row.x, row.y + 21, row.w, 16}, label, theme.text_secondary());
+        }
     }
 
     PageId id_;
@@ -746,6 +859,7 @@ private:
     std::vector<pc_volume> volumes_;
     std::vector<pc_power_assertion> assertions_;
     std::vector<TopAppRow> app_rows_;
+    Rect unlock_button_;
 };
 
 }  // namespace

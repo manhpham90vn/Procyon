@@ -33,8 +33,8 @@ run: app ## Build and open the app
 bench: ## Measure the app against the spec's performance targets (python: make tools fetches one)
 	powershell -NoProfile -ExecutionPolicy Bypass -Command ". scripts\dev-env-windows.ps1; & (Find-Python) scripts\bench-windows.py; exit $$LASTEXITCODE"
 
-screenshots: ## Retake the README screenshots (macOS only for now)
-	@echo screenshots is macOS only for now (scripts/screenshots.swift)
+screenshots: app ## Render the main screens, light and dark, into dist\windows\screenshots
+	$(PS) scripts\screenshots-windows.ps1
 
 format: ## Format C/C++ sources in place (and regenerate tokens when python is available)
 	$(PS) scripts\format-windows.ps1
@@ -85,8 +85,8 @@ app: ## Release dist/linux/procyon (GTK 4, fonts embedded)
 run: app ## Build and open the app
 	dist/linux/procyon
 
-bench: ## (macOS and Windows) measure the app against the spec's targets
-	@echo "bench is not ported to Linux yet; procyon-cli prints the core's own overhead: build/linux/procyon-cli 10 1000"
+bench: ## Measure the app against the spec's performance targets (needs a display; xvfb-run on CI)
+	scripts/bench-linux.py
 
 screenshots: app ## Render the main screens, light and dark, into dist/linux/screenshots
 	@mkdir -p dist/linux/screenshots

@@ -28,6 +28,38 @@ enum class PageId {
     Settings,
 };
 
+// Whether this machine has the screen at all (the sidebar lists it, its shortcut and palette entry
+// open it), as the macOS app hides a screen whose capability is missing.
+bool page_available(const Store &store, PageId id);
+
+// The battery's state in a few words, as the macOS app says it: Charging, Fully charged, On AC power,
+// On battery (Battery screen header, sidebar).
+std::wstring battery_state(const pc_battery &battery);
+
+// Whether an app (or process) gets the system tile (cog) where it has no icon: its main process's
+// PC_PROC_SYSTEM flag, as macOS decides it; `pid` first, else any running process of the app.
+// One rule for Processes, top apps and History.
+bool app_is_system(const Snapshot &snapshot, const std::string &app_id, int32_t pid);
+
+// Scheduling priority in the steps the menus offer, as a nice value: the macOS app's table (High -10,
+// Above normal -5, Normal 0, Below normal 5, Low 10, Lowest 20). Windows maps each to its class.
+struct PriorityStep {
+    const wchar_t *title;
+    int32_t nice;
+};
+const std::vector<PriorityStep> &priority_steps();
+// The step a nice value falls into (the nearest).
+const PriorityStep &priority_step(int32_t nice);
+
+// POSIX signals offered by Send Signal (PC_CAP_SIGNALS), with this OS's numbers; empty on Windows.
+struct SignalChoice {
+    const wchar_t *name;
+    const wchar_t *meaning;
+    int32_t number;
+    bool disruptive;  // ends or freezes the process: confirmed first
+};
+const std::vector<SignalChoice> &signal_choices();
+
 struct MenuItem {
     int id = 0;
     std::wstring label;
@@ -213,7 +245,12 @@ struct TopAppRow {
 std::vector<TopAppRow> top_apps_panel(Host &host, const Rect &card, std::wstring_view title, Renderer::Symbol symbol,
                                       MetricKind kind, int32_t column, bool tint, size_t max_rows,
                                       const std::function<std::wstring(const Row &)> &value,
-                                      const std::function<float(const Row &)> &fraction);
+                                      const std::function<float(const Row &)> &fraction,
+                                      // With `rank`, apps are ordered by it rather than by `column`, and
+                                      // the ones at or below 0 are left out (as the macOS app ranks disk
+                                      // and network by read + write and drops idle apps).
+                                      const std::function<double(const Row &)> &rank = {},
+                                      std::wstring_view empty = L"No app is busy right now.");
 constexpr float kTopAppRowHeight = 44;  // headline + bar, with the row padding
 float top_apps_height(size_t rows);
 
