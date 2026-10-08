@@ -383,6 +383,12 @@ public:
         for (const char *name : {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP",
                                  "XDG_CONFIG_HOME", "XDG_DATA_HOME"})
             if (const char *value = g_getenv(name)) args.push_back(std::string(name) + "=" + value);
+        // The session bus, for the tray icon and notifications. Spelled out: GLib takes $XDG_RUNTIME_DIR/bus
+        // only when the socket is its own user's, which for root it isn't.
+        if (const char *bus = g_getenv("DBUS_SESSION_BUS_ADDRESS"))
+            args.push_back(std::string("DBUS_SESSION_BUS_ADDRESS=") + bus);
+        else if (const char *runtime = g_getenv("XDG_RUNTIME_DIR"))
+            args.push_back(std::string("DBUS_SESSION_BUS_ADDRESS=unix:path=") + runtime + "/bus");
         // The desktop's light or dark preference as this copy reads it. The root copy can't: dconf finds
         // the user's database through HOME, which pkexec sets to root's, so it would read no dark
         // preference and turn a "System" appearance light.
@@ -1312,9 +1318,10 @@ private:
 
     // With "keep running" on, closing the window keeps Procyon sampling (for alerts and History): in
     // the tray where the desktop hosts one, else in the background until it is opened again from the
-    // app grid.
+    // app grid. The root copy runs beside the session's instance, so the app grid can't reach it: without
+    // a tray icon (it often has no session bus) it would keep running with no way back, so it quits.
     gboolean on_close_request() {
-        if (settings_.minimize_to_tray && !quit_) {
+        if (settings_.minimize_to_tray && !quit_ && (platform::tray_available() || !elevated())) {
             hide_window();
             return TRUE;
         }
