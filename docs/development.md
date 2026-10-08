@@ -167,15 +167,23 @@ Tools: Xcode 27 provides `swift format`; `brew install clang-format llvm shellch
 
 ### CI/CD (GitHub Actions)
 
-- **`ci.yml`** runs on every push to `main` and every PR: lint, then unit tests, a CMake core build with a
-  `procyon-cli` smoke run, and the .app uploaded as an artifact. A `windows-latest` job runs
-  `scripts\lint-windows.ps1` (after `scripts\tools-windows.ps1` fetched clang-format; the runner's Python checks
-  the generated token header), then `scripts\build-windows.cmd` (core tests included), smoke-runs
-  `procyon-cli.exe`, uploads `Procyon.exe`, and runs `scripts\bench-windows.py` against the spec's targets
-  (`dist\bench-windows.json` is uploaded).
-- A `ubuntu-24.04` job (the oldest supported base, so the binary's glibc and GTK requirements stay low) runs
-  `SKIP_TIDY=1 scripts/lint.sh`, `scripts/build-linux.sh release` (core tests included), smoke-runs `procyon-cli`,
-  renders the Overview offscreen under `xvfb-run` with `--screenshot`, and uploads the binary and the PNG.
+- **`ci.yml`** runs on every push to `main` and every PR. Every OS has the same two kinds of job, all started at
+  once: **`<OS> · Lint, build & test`** (the quick answer, 2–5 minutes) and, on macOS and Windows,
+  **`<OS> · Performance (K/3)`**, the spec's targets measured by `scripts/bench-macos.py` / `bench-windows.py`
+  with the screens split across three runners (`--shard K/3`, each builds the release app itself, so none waits
+  for another; shard 1 also measures startup, installer size and accuracy). Measuring every screen on one runner
+  took 7–11 minutes and was most of the run; split, the run takes about as long as one shard plus a build.
+  - macOS (`xcode-27`): `scripts/lint.sh` (tokens, swift-format, clang-format, clang-tidy, shellcheck),
+    `swift test`, `make core` with a `procyon-cli` smoke run, the .app uploaded as an artifact; the performance
+    shards upload `dist/bench-K.json`.
+  - Windows (`windows-latest`): `scripts\lint-windows.ps1` (after `scripts\tools-windows.ps1` fetched
+    clang-format 19.1.0; the runner's Python checks the generated token header), `scripts\build-windows.cmd`
+    (core tests included), a `procyon-cli.exe` smoke run, `Procyon.exe` uploaded; the performance shards upload
+    `dist\bench-windows-K.json`.
+  - Linux (`ubuntu-24.04`, the oldest supported base, so the binary's glibc and GTK requirements stay low):
+    `SKIP_TIDY=1 scripts/lint.sh` with clang-format 19.1.0 from pipx, `scripts/build-linux.sh release` (core tests
+    included), a `procyon-cli` smoke run, the Overview rendered offscreen under `xvfb-run` with `--screenshot`, the
+    binary and the PNG uploaded. No performance job yet (no `bench-linux.py`).
 - **`release.yml`** runs on tags `v*`, or manually: tests, universal (arm64 + x86_64) build, DMG + zip +
   SHA-256, GitHub release (versions with `-` are marked prerelease). With the secrets `MACOS_CERTIFICATE_P12`,
   `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`, it signs with Developer ID

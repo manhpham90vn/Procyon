@@ -5,6 +5,7 @@
     scripts/bench-macos.py --report-only    always exit 0
     scripts/bench-macos.py --attempts 3     measure a missed CPU or startup target again (CI)
     scripts/bench-macos.py --pages overview processes --duration 30
+    scripts/bench-macos.py --shard 2/3       one third of the screens (CI runs the three thirds in parallel)
 
 Measures the release app bundle (dist/Procyon.app) and the C++ core CLI (build/core/procyon-cli):
 startup time, CPU and memory at a 1 s refresh on every screen and with only the menu bar widget
@@ -60,11 +61,11 @@ def run(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, cwd=ROOT, **kwargs).stdout
 
 
-def ensure_built():
+def ensure_built(cli=True):
     if not APP.is_dir():
         print("==> building dist/Procyon.app", flush=True)
         subprocess.run(["scripts/build-macos-app.sh", "release"], check=True, cwd=ROOT)
-    if not CLI.is_file():
+    if cli and not CLI.is_file():
         print("==> building the core CLI", flush=True)
         subprocess.run(["make", "core"], check=True, cwd=ROOT)
 
@@ -179,24 +180,41 @@ def main():
     parser.add_argument("--attempts", type=int, default=1, help="measure a screen up to this often while its CPU misses")
     parser.add_argument("--report-only", action="store_true", help="exit 0 even when a target is missed")
     parser.add_argument(
+        "--shard",
+        default="1/1",
+        help="K/N: measure one Nth of the screens (CI splits them across N runners); "
+        "startup, size and accuracy are measured by shard 1 only",
+    )
+    parser.add_argument(
         "--known-misses", nargs="+", default=[], metavar="PAGE",
         help="screens whose missed targets are reported but don't fail the run",
     )
     parser.add_argument("--output", type=Path, default=ROOT / "dist/bench.json")
     args = parser.parse_args()
+    try:
+        shard, shards = (int(n) for n in args.shard.split("/"))
+        assert 1 <= shard <= shards
+    except (ValueError, AssertionError):
+        parser.error("--shard takes K/N with 1 <= K <= N")
+    # Every Nth screen; shard 1, which also measures startup, size and accuracy, takes a shorter share.
+    pages = args.pages[shard % shards :: shards]
+    whole = shard == 1  # the machine-wide measurements run once per run, on shard 1
+    title = f" {shard}/{shards}" if shards > 1 else ""
 
-    ensure_built()
+    ensure_built(cli=whole)  # the CLI is for the accuracy checks
     with tempfile.TemporaryDirectory() as tmp:
         prober = Path(tmp, "bench-probe")
         print("==> compiling the probe", flush=True)
         run("swiftc", "-O", "scripts/bench-probe.swift", "-o", str(prober))
 
-        print("==> sizes", flush=True)
-        sizes = {"app_bytes": bundle_size(), "dmg_bytes": dmg_size(tmp)}
+        sizes = {}
+        if whole:
+            print("==> sizes", flush=True)
+            sizes = {"app_bytes": bundle_size(), "dmg_bytes": dmg_size(tmp)}
 
         # Every attempt of a screen; the reported one is its lowest CPU.
         attempts = {}
-        for page in args.pages:
+        for page in pages:
             print(f"==> {page}: {args.warmup:g} s warm-up, {args.duration:g} s sampling", flush=True)
             attempts[page] = [probe(prober, page, args.warmup, args.duration)]
             while len(attempts[page]) < args.attempts and best(attempts[page])["cpu_percent_of_core"] / 4 >= limits(page)[0]:
@@ -204,7 +222,7 @@ def main():
                 attempts[page].append(probe(prober, page, args.warmup, args.duration))
         # Batches of launches; each screen's first window counts towards the first batch.
         launches = [[{"startup_seconds": a[0]["startup_seconds"], "calibration_ns": a[0]["calibration_ns"]} for a in attempts.values()]]
-        while True:
+        while whole:
             for i in range(args.launches):
                 print(f"==> launch {i + 1}/{args.launches}", flush=True)
                 launches[-1].append(probe(prober, "overview", 0, 0))
@@ -213,8 +231,10 @@ def main():
             print("==> startup missed, measuring again", flush=True)
             launches.append([])
 
-        print("==> accuracy against vm_stat, iostat, sysctl and ps", flush=True)
-        acc = accuracy(10)
+        acc = {}
+        if whole:
+            print("==> accuracy against vm_stat, iostat, sysctl and ps", flush=True)
+            acc = accuracy(10)
 
     # The fastest calibration of the run stands for the runner at its quietest.
     calibrations = [a["calibration_ns"] for tries in attempts.values() for a in tries]
@@ -242,7 +262,9 @@ def main():
 
     # (target, value, limit, shown value, shown limit, every attempt noisy); value None = couldn't measure.
     note, noisy = runner([b["runner_slowdown"] for b in batches])
-    checks = [("Startup, median to first window", startup, STARTUP_SECONDS, f"{startup:.2f} s{note}" if startup else "no window", f"< {STARTUP_SECONDS:g} s", noisy)]
+    checks = []
+    if whole:
+        checks.append(("Startup, median to first window", startup, STARTUP_SECONDS, f"{startup:.2f} s{note}" if startup else "no window", f"< {STARTUP_SECONDS:g} s", noisy))
     known_misses = set()
     for s in screens:
         if s["page"] in args.known_misses:
@@ -269,14 +291,15 @@ def main():
                 False,
             )
         )
-    checks.append(("Installer (DMG)", sizes["dmg_bytes"] / MB, INSTALLER_MB, f"{sizes['dmg_bytes'] / MB:.1f} MB (app {sizes['app_bytes'] / MB:.1f} MB)", f"< {INSTALLER_MB} MB", False))
-    cpu = acc["cpu"]
-    checks.append(("Accuracy: CPU vs iostat", cpu["diff_points"], ACCURACY_PERCENT, f"{cpu['procyon']:.1f}% vs {cpu['os']}% ({cpu['diff_points']:.1f} points)", f"< {ACCURACY_PERCENT} points", False))
-    for key, label in (("memory_used", "memory used vs vm_stat"), ("swap_used", "swap used vs sysctl")):
-        a = acc[key]
-        checks.append((f"Accuracy: {label}", a["diff_percent"], ACCURACY_PERCENT, f"{a['procyon'] / MB:,.0f} vs {a['os'] / MB:,.0f} MB ({a['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%", False))
-    p = acc["process_count"]
-    checks.append(("Accuracy: process count vs ps", p["diff_percent"], ACCURACY_PERCENT, f"{p['procyon']} vs {p['os']} ({p['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%", False))
+    if whole:
+        checks.append(("Installer (DMG)", sizes["dmg_bytes"] / MB, INSTALLER_MB, f"{sizes['dmg_bytes'] / MB:.1f} MB (app {sizes['app_bytes'] / MB:.1f} MB)", f"< {INSTALLER_MB} MB", False))
+        cpu = acc["cpu"]
+        checks.append(("Accuracy: CPU vs iostat", cpu["diff_points"], ACCURACY_PERCENT, f"{cpu['procyon']:.1f}% vs {cpu['os']}% ({cpu['diff_points']:.1f} points)", f"< {ACCURACY_PERCENT} points", False))
+        for key, label in (("memory_used", "memory used vs vm_stat"), ("swap_used", "swap used vs sysctl")):
+            a = acc[key]
+            checks.append((f"Accuracy: {label}", a["diff_percent"], ACCURACY_PERCENT, f"{a['procyon'] / MB:,.0f} vs {a['os'] / MB:,.0f} MB ({a['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%", False))
+        p = acc["process_count"]
+        checks.append(("Accuracy: process count vs ps", p["diff_percent"], ACCURACY_PERCENT, f"{p['procyon']} vs {p['os']} ({p['diff_percent']:.1f}%)", f"< {ACCURACY_PERCENT}%", False))
 
     def status(name, value, bound, noisy):
         if value is not None and value < bound:
@@ -306,7 +329,7 @@ def main():
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         marks = {"PASS": "✅", "KNOWN": "⚠️ known", "NOISY": "⚠️ noisy", "FAIL": "❌"}
         with open(summary, "a") as out:
-            out.write("### Performance targets\n\n| | Target | Measured | Spec |\n| --- | --- | --- | --- |\n")
+            out.write(f"### Performance targets{title}\n\n| | Target | Measured | Spec |\n| --- | --- | --- | --- |\n")
             for name, shown, limit, result in rows:
                 out.write(f"| {marks[result]} | {name} | {shown} | {limit} |\n")
             out.write(

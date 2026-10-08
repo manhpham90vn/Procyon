@@ -1,5 +1,12 @@
 name: CI
 
+# Two kinds of job per OS, all started at once:
+#   <OS> · Lint, build & test   lint, build, tests and a smoke run: the quick answer (2–5 minutes)
+#   <OS> · Performance (K/N)    the spec's performance targets, the screens split across the matrix's
+#                               runners (scripts/bench-*.py --shard K/N); each builds the release app itself, so
+#                               none waits for another. Shard 1 also measures startup, size and accuracy.
+# Linux has no performance job yet (no bench-linux.py).
+
 on:
   push:
     branches: [main]
@@ -19,22 +26,8 @@ env:
   XCODE_VERSION: "27.0"
 
 jobs:
-  lint:
-    name: macOS · Lint
-    runs-on: xcode-27
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: ${{ env.XCODE_VERSION }}
-      - name: Install linters
-        run: brew install clang-format llvm shellcheck
-      - name: Lint
-        run: scripts/lint.sh
-
-  build:
-    name: macOS · Build & test
+  macos:
+    name: macOS · Lint, build & test
     runs-on: xcode-27
     timeout-minutes: 30
     steps:
@@ -47,6 +40,10 @@ jobs:
           path: .build
           key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
+      - name: Install linters
+        run: brew install clang-format llvm shellcheck
+      - name: Lint
+        run: scripts/lint.sh
       - name: Unit tests
         run: swift test
       - name: Core (CMake) + smoke run
@@ -60,31 +57,52 @@ jobs:
           name: Procyon-app-${{ github.sha }}
           path: dist/Procyon.app
           retention-days: 7
+
+  macos-performance:
+    name: macOS · Performance (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: xcode-27
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false  # every shard reports its screens, whatever another one found
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+      - uses: actions/cache@v6
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
       - name: Performance targets
-        # Fails the build when a non-functional target in docs/procyon-spec.md is missed.
+        # Fails the build when a non-functional target in docs/procyon-spec.md is missed. The script
+        # builds dist/Procyon.app (and, on shard 1, the core CLI for the accuracy checks).
         # A missed CPU or startup target is measured up to 3 times: runner noise only ever adds CPU.
         # A miss whose every attempt ran on a slow runner (timed by a fixed calibration workload)
-        # is a warning, not a failure. Covers every screen plus the menu bar only state; the menu bar
-        # still misses its targets (< 0.5% CPU, < 30 MB), so it is reported without failing the build
-        # until that is fixed.
-        run: scripts/bench-macos.py --attempts 3 --known-misses menubar
+        # is a warning, not a failure. The menu bar only state still misses its targets (< 0.5% CPU,
+        # < 30 MB), so it is reported without failing the build until that is fixed.
+        run: >-
+          scripts/bench-macos.py --attempts 3 --known-misses menubar
+          --shard ${{ matrix.shard }}/${{ strategy.job-total }} --output dist/bench-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-${{ github.sha }}
-          path: dist/bench.json
+          name: bench-macos-${{ matrix.shard }}-${{ github.sha }}
+          path: dist/bench-${{ matrix.shard }}.json
           if-no-files-found: ignore
           retention-days: 30
 
   windows:
     name: Windows · Lint, build & test
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Lint (generated files, clang-format, python)
-        # The same clang-format the macOS job uses, fetched by scripts\tools-windows.ps1; the
-        # runner's Python checks that Tokens.generated.h matches design/tokens.json.
+        # clang-format 19.1.0 fetched by scripts\tools-windows.ps1; the runner's Python checks that
+        # Tokens.generated.h matches design/tokens.json.
         shell: pwsh
         run: |
           scripts\tools-windows.ps1
@@ -101,15 +119,31 @@ jobs:
           name: Procyon-windows-${{ github.sha }}
           path: dist\windows\Procyon.exe
           retention-days: 7
+
+  windows-performance:
+    name: Windows · Performance (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the app, the CLI and the probe
+        shell: cmd
+        run: call scripts\build-windows.cmd release --no-tests
       - name: Performance targets
-        # The Windows counterpart of the macOS step: every screen plus the tray only state, measured
-        # by build\windows\apps\windows\procyon-bench-probe.exe. Fails the build on a missed target.
-        run: python scripts\bench-windows.py --attempts 3
+        # The Windows counterpart of the macOS job: its screens plus the tray only state, measured by
+        # build\windows\apps\windows\procyon-bench-probe.exe. Fails the build on a missed target.
+        run: >-
+          python scripts\bench-windows.py --attempts 3
+          --shard ${{ matrix.shard }}/${{ strategy.job-total }} --output dist\bench-windows-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-windows-${{ github.sha }}
-          path: dist\bench-windows.json
+          name: bench-windows-${{ matrix.shard }}-${{ github.sha }}
+          path: dist\bench-windows-${{ matrix.shard }}.json
           if-no-files-found: ignore
           retention-days: 30
 
