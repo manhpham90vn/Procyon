@@ -167,7 +167,8 @@ first frame, which times startup), samples CPU time from `/proc/<pid>/stat` and 
 second, and measures `background` with `--background`. The CLI's numbers are compared with `/proc/stat`,
 `/proc/meminfo` and the process list. Output: `dist/bench-linux.json`. The same options as the Windows script, plus
 `--renderer`: on Xvfb, which has no GPU, GTK's GL renderer runs on Mesa's llvmpipe, whose buffers count as the app's
-private memory (110-180 MB against about 35 MB of Procyon's own), so CI measures with `--renderer cairo`.
+private memory (110-180 MB against about 35 MB of Procyon's own), so CI measures with `--renderer cairo`, which also
+turns off the OpenGL context GDK would still open there (`GDK_DEBUG=gl-disable`, `GDK_DISABLE=gl`).
 
 ## Development
 

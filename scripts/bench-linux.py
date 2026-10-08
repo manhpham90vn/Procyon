@@ -16,8 +16,8 @@ Actions, a summary table. Needs a display: on CI, run it under xvfb-run.
 
 On a display without a GPU (Xvfb on a CI runner) GTK draws through Mesa's software OpenGL (llvmpipe),
 whose buffers and JIT land in the app's private memory: 110-180 MB where the same screen holds about
-35 MB on a desktop, whose GL buffers live in GPU memory. --renderer cairo (GSK_RENDERER) measures
-Procyon's own footprint there; CI passes it.
+35 MB on a desktop, whose GL buffers live in GPU memory. --renderer cairo (GSK_RENDERER, with GDK's
+OpenGL context off too) measures Procyon's own footprint there; CI passes it.
 
 Shared CI runners are noisy: a fixed piece of work is timed alongside each measurement; its slowdown
 against the fastest one of the run says how slow the runner was. A missed CPU or startup target whose
@@ -127,6 +127,12 @@ def probe(page, warmup, duration):
     env = dict(os.environ, PROCYON_BENCH="1")
     if RENDERER:
         env["GSK_RENDERER"] = RENDERER
+        if RENDERER == "cairo":
+            # GDK still opens an OpenGL context on llvmpipe (libLLVM, 7 MB of private memory on the
+            # runner, growing as it compiles) though nothing draws with it: off too. GTK 4.14 spells
+            # it GDK_DEBUG=gl-disable, later versions GDK_DISABLE=gl.
+            env["GDK_DEBUG"] = "gl-disable"
+            env["GDK_DISABLE"] = "gl"
     calibration = calibrate()
     started = time.monotonic()
     process = subprocess.Popen(args, env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
