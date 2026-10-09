@@ -4,15 +4,19 @@
 // own window buttons (GtkWindowControls) sit at its right end.
 #include "window.hpp"
 
+#include <glib-unix.h>
 #include <gtk/gtk.h>
 #include <malloc.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "canvas_cairo.hpp"
@@ -190,6 +194,7 @@ public:
         });
         navigate(initial_page_.value_or(PageId::Overview));
         if (!screenshot_) make_tray();
+        if (!screenshot_) listen_for_handover();
         // A "System" appearance follows the desktop at once, also while paused and idle.
         if (!screenshot_) platform::watch_color_scheme([this] { repaint(); });
         if (screenshot_) {
@@ -223,9 +228,13 @@ public:
     bool failed() const { return failed_; }
 
     // A second launch while Procyon runs in the background brings the window back. While the root
-    // copy runs in this one's place, that copy's window is the one to use: this one stays hidden.
+    // copy runs in this one's place, that copy's window is the one to use: this one stays hidden and
+    // asks the root copy to show its window instead.
     void present() {
-        if (handed_over_) return;
+        if (handed_over_) {
+            if (handover_pipe_ >= 0 && ::write(handover_pipe_, "present\n", 8) < 0) close_handover_pipe();
+            return;
+        }
         if (hidden_) show_again();
         gtk_window_present(GTK_WINDOW(window_));
     }
@@ -237,6 +246,9 @@ public:
         if (!handed_over_) save_settings();
         store_.stop();
         if (!handed_over_) store_.flush_history();  // the minute in progress would otherwise go with the process
+        close_handover_pipe();
+        if (handover_watch_) g_source_remove(handover_watch_);
+        handover_watch_ = 0;
         if (held_) g_application_release(G_APPLICATION(app_));
         held_ = false;
         tray_.reset();
@@ -393,6 +405,8 @@ public:
         // the user's database through HOME, which pkexec sets to root's, so it would read no dark
         // preference and turn a "System" appearance light.
         args.push_back(std::string("PROCYON_DESKTOP_DARK=") + (platform::system_prefers_dark() ? "1" : "0"));
+        // The root copy reads its stdin for requests from this one (see listen_for_handover).
+        args.emplace_back("PROCYON_HANDOVER=1");
         args.emplace_back(exe);
         args.emplace_back("--page");
         args.emplace_back(current_ ? page_name(current_->id()) : "overview");
@@ -403,9 +417,12 @@ public:
         store_.flush_history();
         GPid child = 0;
         GError *error = nullptr;
-        if (!g_spawn_async(nullptr, argv.data(), nullptr,
-                           static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD), nullptr, nullptr,
-                           &child, &error)) {
+        // The root copy's stdin is a pipe from this copy: the session's single instance, the one a second
+        // launch reaches, passes "show the window" on through it (pkexec keeps stdin, closes other fds).
+        int pipe = -1;
+        if (!g_spawn_async_with_pipes(nullptr, argv.data(), nullptr,
+                                      static_cast<GSpawnFlags>(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD),
+                                      nullptr, nullptr, &child, &pipe, nullptr, nullptr, &error)) {
             alert(L"Couldn't run Procyon as root", fmt::from_utf8(error ? error->message : ""));
             if (error) g_error_free(error);
             return;
@@ -413,6 +430,9 @@ public:
         // Hand over to the root copy: one tray icon, one sampler, one writer of the settings and the
         // history. This copy waits hidden, without updates, until the root copy ends.
         handed_over_ = true;
+        handover_pipe_ = pipe;
+        g_unix_set_fd_nonblocking(handover_pipe_, TRUE, nullptr);
+        ::signal(SIGPIPE, SIG_IGN);  // a write after the root copy ended fails with EPIPE instead
         paused_before_handover_ = store_.paused();
         store_.set_paused(true);
         store_.set_records_history(false);
@@ -1318,10 +1338,12 @@ private:
 
     // With "keep running" on, closing the window keeps Procyon sampling (for alerts and History): in
     // the tray where the desktop hosts one, else in the background until it is opened again from the
-    // app grid. The root copy runs beside the session's instance, so the app grid can't reach it: without
-    // a tray icon (it often has no session bus) it would keep running with no way back, so it quits.
+    // app grid. The root copy runs beside the session's instance, so the app grid reaches it only through
+    // the copy that started it: without that link and without a tray icon it would keep running with no
+    // way back, so it quits.
     gboolean on_close_request() {
-        if (settings_.minimize_to_tray && !quit_ && (platform::tray_available() || !elevated())) {
+        const bool reachable = platform::tray_available() || !elevated() || handover_watch_ != 0;
+        if (settings_.minimize_to_tray && !quit_ && reachable) {
             hide_window();
             return TRUE;
         }
@@ -1357,9 +1379,48 @@ private:
         shutdown();
     }
 
+    void close_handover_pipe() {
+        if (handover_pipe_ < 0) return;
+        ::close(handover_pipe_);
+        handover_pipe_ = -1;
+    }
+
+    // The root copy: requests from the copy that started it arrive on stdin, one line each. "present"
+    // comes from a second launch, which reaches that copy (the session's single instance), not this one.
+    void listen_for_handover() {
+        const char *handover = g_getenv("PROCYON_HANDOVER");
+        if (!handover || std::string_view(handover) != "1") return;
+        g_unix_set_fd_nonblocking(STDIN_FILENO, TRUE, nullptr);
+        handover_watch_ = g_unix_fd_add(
+            STDIN_FILENO, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR),
+            [](gint fd, GIOCondition, gpointer self) -> gboolean {
+                auto *w = static_cast<MainWindow *>(self);
+                char buffer[256];
+                bool asked = false;
+                for (;;) {
+                    const ssize_t n = ::read(fd, buffer, sizeof(buffer));
+                    if (n > 0) {
+                        asked = asked || std::string_view(buffer, static_cast<size_t>(n)).find("present") !=
+                                             std::string_view::npos;
+                        continue;
+                    }
+                    if (n < 0 && errno == EINTR) continue;
+                    if (n < 0 && errno == EAGAIN) break;
+                    // The other end closed: the copy that started this one is gone.
+                    w->handover_watch_ = 0;
+                    if (asked) w->present();
+                    return G_SOURCE_REMOVE;
+                }
+                if (asked) w->present();
+                return G_SOURCE_CONTINUE;
+            },
+            this);
+    }
+
     // The root copy didn't take over (authorization dismissed, or it failed to start): this copy
     // resumes as it was.
     void take_back() {
+        close_handover_pipe();
         handed_over_ = false;
         store_.set_records_history(settings_.records_history);
         store_.set_paused(paused_before_handover_);
@@ -1438,6 +1499,8 @@ private:
     bool handed_over_ = false;  // a root copy runs in this one's place
     bool paused_before_handover_ = false;
     gint64 handover_started_ = 0;
+    int handover_pipe_ = -1;    // the root copy's stdin, while it runs in this one's place
+    guint handover_watch_ = 0;  // in the root copy: the watch on stdin for that pipe
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     GtkWidget *window_ = nullptr;
     GtkWidget *area_ = nullptr;
