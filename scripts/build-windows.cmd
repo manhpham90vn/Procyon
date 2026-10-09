@@ -31,6 +31,9 @@ if not exist "%VSWHERE%" goto :novs
 set "VSPATH="
 for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
 if not defined VSPATH goto :novs
+rem VsDevCmd runs a bare `vswhere.exe` from the Installer folder, which fails when
+rem NoDefaultCurrentDirectoryInExePath is set; putting the folder on PATH covers that case.
+for %%i in ("%VSWHERE%") do set "PATH=%%~dpi;%PATH%"
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
 rem Visual Studio's own CMake and Ninja, when the component is installed.
