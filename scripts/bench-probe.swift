@@ -25,8 +25,8 @@ struct Result: Encodable {
     var calibrationNs: UInt64
 
     enum CodingKeys: CodingKey {
-        case page, startupSeconds, referenceStartupSeconds, cpuPercentOfCore, cpuPercentOfMachine, memoryAverageBytes, memoryP90Bytes,
-            memoryPeakBytes, calibrationNs
+        case page, startupSeconds, referenceStartupSeconds, cpuPercentOfCore, cpuPercentOfMachine,
+            memoryAverageBytes, memoryP90Bytes, memoryPeakBytes, calibrationNs
     }
 
     // Written out by hand so that a missing startup (no window within the deadline) is `null`, as the
