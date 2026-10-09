@@ -1,0 +1,39 @@
+{
+  "$schema": "https://manhdev.click/manhdev.schema.json",
+  "tagline": "A lightweight, open-source task manager for macOS and Windows.",
+  "description": "See what every process is doing to your CPU, memory, disk, network, GPU and battery, with 24 hours of history and plain-language explanations of what is actually running.",
+  "overview": [
+    "Procyon is a task manager that explains what is happening instead of only listing processes. Live charts track CPU, memory, disk, network, GPU and battery, and 24 hours of history with spike analysis lets you find the moment your machine slowed down and the process that caused it.",
+    "Open a process to see its files and ports, with plain-language explanations for roughly 110 built-in macOS processes. Startup items, services, energy and battery health are managed from the same window, a menu bar widget keeps the key numbers in view, and a ⌘K command palette plus custom alerts keep everything one keystroke away. The app is open source and ships for macOS 14 and later and for 64-bit Windows 10 and 11."
+  ],
+  "features": [
+    { "title": "Live charts", "body": "CPU, memory, disk, network and GPU, updated in real time." },
+    { "title": "24-hour history", "body": "Spike analysis so you can find what slowed you down." },
+    { "title": "Startup & services", "body": "Manage login items, energy and battery health in one place." },
+    { "title": "Files & Ports", "body": "Inspect what a process has open, with explanations for ~110 macOS processes." },
+    { "title": "Menu bar widget", "body": "Custom alerts and a ⌘K command palette." }
+  ],
+  "requirements": "macOS 14 Sonoma or later (Apple Silicon and Intel) · Windows 10 1809+ / Windows 11 64-bit",
+  "screenshot": {
+    "src": "docs/screenshots/overview-light.png",
+    "dark": "docs/screenshots/overview-dark.png",
+    "alt": "Procyon overview screen with live CPU, memory, disk and network charts",
+    "width": 1600,
+    "height": 1000,
+    "chrome": false
+  },
+  "gallery": [
+    { "src": "docs/screenshots/processes-light.png", "dark": "docs/screenshots/processes-dark.png", "alt": "Procyon Processes screen", "width": 1600, "height": 1000, "chrome": false, "caption": "Processes: flat, grouped by app or as a tree. Search, sort, end, suspend." },
+    { "src": "docs/screenshots/cpu-light.png", "dark": "docs/screenshots/cpu-dark.png", "alt": "Procyon CPU screen", "width": 1600, "height": 1000, "chrome": false, "caption": "CPU: total and per core, with temperatures." },
+    { "src": "docs/screenshots/energy-light.png", "dark": "docs/screenshots/energy-dark.png", "alt": "Procyon Energy screen", "width": 1600, "height": 1000, "chrome": false, "caption": "Energy: power use per app, battery health and what keeps the Mac awake." },
+    { "src": "docs/screenshots/history-light.png", "dark": "docs/screenshots/history-dark.png", "alt": "Procyon History screen", "width": 1600, "height": 1000, "chrome": false, "caption": "History: 24 hours of every metric. Click a spike to see which apps caused it." }
+  ],
+  "downloads": [
+    { "platform": "macos", "label": "macOS", "sub": "Disk image · .dmg", "asset": "^Procyon-[\\d.]+\\.dmg$", "file": "Procyon-{version}.dmg" },
+    { "platform": "windows", "label": "Windows", "sub": "Portable · .zip", "asset": "^Procyon-[\\d.]+-windows-x64\\.zip$", "file": "Procyon-{version}-windows-x64.zip" }
+  ],
+  "packageManagers": [
+    { "platform": "macos", "label": "macOS · Homebrew", "command": "brew install --cask manhpham90vn/tap/procyon" }
+  ],
+  "version": "v0.2.0"
+}
