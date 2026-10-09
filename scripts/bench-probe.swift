@@ -19,6 +19,25 @@ struct Result: Encodable {
     var memoryPeakBytes: UInt64
     /// Median CPU time of the fixed calibration work while measuring; lower is a faster machine.
     var calibrationNs: UInt64
+
+    enum CodingKeys: CodingKey {
+        case page, startupSeconds, cpuPercentOfCore, cpuPercentOfMachine, memoryAverageBytes, memoryP90Bytes,
+            memoryPeakBytes, calibrationNs
+    }
+
+    // Written out by hand so that a missing startup (no window within the deadline) is `null`, as the
+    // Windows and Linux probes print it; the synthesized encoder would drop the key instead.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(page, forKey: .page)
+        try container.encode(startupSeconds, forKey: .startupSeconds)
+        try container.encode(cpuPercentOfCore, forKey: .cpuPercentOfCore)
+        try container.encode(cpuPercentOfMachine, forKey: .cpuPercentOfMachine)
+        try container.encode(memoryAverageBytes, forKey: .memoryAverageBytes)
+        try container.encode(memoryP90Bytes, forKey: .memoryP90Bytes)
+        try container.encode(memoryPeakBytes, forKey: .memoryPeakBytes)
+        try container.encode(calibrationNs, forKey: .calibrationNs)
+    }
 }
 
 let arguments = CommandLine.arguments

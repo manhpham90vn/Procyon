@@ -113,7 +113,7 @@ def best(tries):
 
 
 def median_startup(launches):
-    measured = [launch["startup_seconds"] for launch in launches if launch["startup_seconds"] is not None]
+    measured = [launch.get("startup_seconds") for launch in launches if launch.get("startup_seconds") is not None]
     return statistics.median(measured) if measured else None
 
 
@@ -231,7 +231,8 @@ def main():
                 print(f"==> {page}: CPU missed, measuring again", flush=True)
                 attempts[page].append(probe(prober, page, args.warmup, args.duration))
         # Batches of launches; each screen's first window counts towards the first batch.
-        launches = [[{"startup_seconds": a[0]["startup_seconds"], "calibration_ns": a[0]["calibration_ns"]} for a in attempts.values()]]
+        # A probe whose window never showed has no startup; it counts as a missed launch, not a crash.
+        launches = [[{"startup_seconds": a[0].get("startup_seconds"), "calibration_ns": a[0]["calibration_ns"]} for a in attempts.values()]]
         while whole:
             for i in range(args.launches):
                 print(f"==> launch {i + 1}/{args.launches}", flush=True)
@@ -260,7 +261,7 @@ def main():
     screens = [best(tries) for tries in attempts.values()]
     batches = [
         {"median_seconds": median_startup(batch), "runner_slowdown": slowdown(statistics.median(launch["calibration_ns"] for launch in batch)),
-         "startup_seconds": [launch["startup_seconds"] for launch in batch]}
+         "startup_seconds": [launch.get("startup_seconds") for launch in batch]}
         for batch in launches
     ]
     startup_batch = min(batches, key=lambda b: b["median_seconds"] if b["median_seconds"] is not None else float("inf"))
