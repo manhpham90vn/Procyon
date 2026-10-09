@@ -14,7 +14,14 @@ running, DMG size, and how far the numbers are from the OS's own tools. Writes d
 Shared CI runners are noisy: when the host is busy, the same work costs more CPU time, so Procyon's
 CPU and startup go up with no change in the code. The probe times a fixed piece of work alongside each
 measurement; its slowdown against the fastest one of the run says how slow the runner was. A missed
-CPU or startup target whose every attempt ran on a slow runner is reported as NOISY and does not fail.
+CPU target whose every attempt ran on a slow runner is reported as NOISY and does not fail.
+
+Launching is slow for other reasons than CPU (disk, the window server, other VMs on the host): on a
+busy runner Procyon's first window takes 1.3 s where a quiet one shows it in 0.5 s while the CPU
+calibration barely moves. So just before every launch of Procyon the probe launches an empty SwiftUI
+app (scripts/bench-reference.swift) and times its window: the cost of launching anything on that
+machine right then. A missed startup target whose every batch of launches saw the reference app take
+much longer than it does on a quiet runner is NOISY too.
 """
 
 import argparse
@@ -55,6 +62,12 @@ ACCURACY_PERCENT = 5  # vs the OS's own tools; percentage points for CPU
 # An attempt ran on a slow runner when the calibration work took this much longer than the run's best.
 # A quiet machine stays within about 7%.
 NOISY_SLOWDOWN = 1.15
+# The reference app's first window on a quiet GitHub macOS runner (about 0.23 s on an M-series Mac).
+# dist/bench.json records every reference launch (`startup[].reference_seconds`) to re-check this.
+REFERENCE_STARTUP_SECONDS = 0.25
+# A batch of launches ran on a slow runner when the reference app took this much longer than that.
+# Single launches swing by a quarter either way; the batch median by less.
+NOISY_LAUNCH_SLOWDOWN = 1.3
 
 
 def run(*args, **kwargs):
@@ -103,8 +116,29 @@ def describe(page):
     return "menu bar only" if page == "menubar" else f"{page} open"
 
 
-def probe(binary, page, warmup, duration):
-    return json.loads(run(str(binary), str(APP), page, str(warmup), str(duration)))
+def build_reference(tmp):
+    """The empty SwiftUI app the probe launches before Procyon, as an app bundle."""
+    bundle = Path(tmp, "BenchReference.app")
+    binary = bundle / "Contents/MacOS/BenchReference"
+    binary.parent.mkdir(parents=True)
+    run("swiftc", "-O", "-parse-as-library", "scripts/bench-reference.swift", "-o", str(binary))
+    (bundle / "Contents/Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        "<key>CFBundleExecutable</key><string>BenchReference</string>\n"
+        "<key>CFBundleIdentifier</key><string>dev.procyon.bench-reference</string>\n"
+        "<key>CFBundleName</key><string>Bench reference</string>\n"
+        "<key>CFBundlePackageType</key><string>APPL</string>\n"
+        "<key>CFBundleShortVersionString</key><string>1.0</string>\n"
+        "<key>LSMinimumSystemVersion</key><string>14.0</string>\n"
+        "</dict></plist>\n"
+    )
+    return bundle
+
+
+def probe(binary, page, warmup, duration, reference):
+    return json.loads(run(str(binary), str(APP), page, str(warmup), str(duration), str(reference)))
 
 
 def best(tries):
@@ -112,9 +146,17 @@ def best(tries):
     return min(tries, key=lambda r: r["cpu_percent_of_core"])
 
 
-def median_startup(launches):
-    measured = [launch.get("startup_seconds") for launch in launches if launch.get("startup_seconds") is not None]
+def median_startup(launches, key="startup_seconds"):
+    """Median of the launches that showed a window; None when none did."""
+    measured = [launch.get(key) for launch in launches if launch.get(key) is not None]
     return statistics.median(measured) if measured else None
+
+
+def launch_slowdown(launches):
+    """How much slower than a quiet runner the machine was at launching apps during these launches."""
+    reference = median_startup(launches, "reference_startup_seconds")
+    # No reference window within the probe's deadline: slower than anything worth measuring.
+    return reference / REFERENCE_STARTUP_SECONDS if reference is not None else float("inf")
 
 
 def vm_stat_used():
@@ -214,8 +256,9 @@ def main():
     ensure_built(cli=whole)  # the CLI is for the accuracy checks
     with tempfile.TemporaryDirectory() as tmp:
         prober = Path(tmp, "bench-probe")
-        print("==> compiling the probe", flush=True)
+        print("==> compiling the probe and the reference app", flush=True)
         run("swiftc", "-O", "scripts/bench-probe.swift", "-o", str(prober))
+        reference = build_reference(tmp)
 
         sizes = {}
         if whole:
@@ -226,17 +269,20 @@ def main():
         attempts = {}
         for page in pages:
             print(f"==> {page}: {args.warmup:g} s warm-up, {args.duration:g} s sampling", flush=True)
-            attempts[page] = [probe(prober, page, args.warmup, args.duration)]
+            attempts[page] = [probe(prober, page, args.warmup, args.duration, reference)]
             while len(attempts[page]) < args.attempts and best(attempts[page])["cpu_percent_of_core"] / 4 >= limits(page)[0]:
                 print(f"==> {page}: CPU missed, measuring again", flush=True)
-                attempts[page].append(probe(prober, page, args.warmup, args.duration))
+                attempts[page].append(probe(prober, page, args.warmup, args.duration, reference))
         # Batches of launches; each screen's first window counts towards the first batch.
         # A probe whose window never showed has no startup; it counts as a missed launch, not a crash.
-        launches = [[{"startup_seconds": a[0].get("startup_seconds"), "calibration_ns": a[0]["calibration_ns"]} for a in attempts.values()]]
+        launches = [[
+            {key: a[0].get(key) for key in ("startup_seconds", "reference_startup_seconds", "calibration_ns")}
+            for a in attempts.values()
+        ]]
         while whole:
             for i in range(args.launches):
                 print(f"==> launch {i + 1}/{args.launches}", flush=True)
-                launches[-1].append(probe(prober, "overview", 0, 0))
+                launches[-1].append(probe(prober, "overview", 0, 0, reference))
             if len(launches) >= args.attempts or (median_startup(launches[-1]) or STARTUP_SECONDS) < STARTUP_SECONDS:
                 break
             print("==> startup missed, measuring again", flush=True)
@@ -261,7 +307,9 @@ def main():
     screens = [best(tries) for tries in attempts.values()]
     batches = [
         {"median_seconds": median_startup(batch), "runner_slowdown": slowdown(statistics.median(launch["calibration_ns"] for launch in batch)),
-         "startup_seconds": [launch.get("startup_seconds") for launch in batch]}
+         "launch_slowdown": launch_slowdown(batch),
+         "startup_seconds": [launch.get("startup_seconds") for launch in batch],
+         "reference_seconds": [launch.get("reference_startup_seconds") for launch in batch]}
         for batch in launches
     ]
     startup_batch = min(batches, key=lambda b: b["median_seconds"] if b["median_seconds"] is not None else float("inf"))
@@ -272,9 +320,12 @@ def main():
         return f", runner {min(slowdowns):.2f}× slower" if min(slowdowns) >= 1.05 else "", min(slowdowns) > NOISY_SLOWDOWN
 
     # (target, value, limit, shown value, shown limit, every attempt noisy); value None = couldn't measure.
-    note, noisy = runner([b["runner_slowdown"] for b in batches])
     checks = []
     if whole:
+        # Startup is judged against the reference app's launches, not the CPU calibration.
+        slowest_batch = min(b["launch_slowdown"] for b in batches)
+        note = f", runner {slowest_batch:.2f}× slower at launching" if slowest_batch >= 1.1 else ""
+        noisy = slowest_batch > NOISY_LAUNCH_SLOWDOWN
         checks.append(("Startup, median to first window", startup, STARTUP_SECONDS, f"{startup:.2f} s{note}" if startup else "no window", f"< {STARTUP_SECONDS:g} s", noisy))
     known_misses = set()
     for s in screens:
@@ -345,7 +396,9 @@ def main():
                 out.write(f"| {marks[result]} | {name} | {shown} | {limit} |\n")
             out.write(
                 "\nShared CI runners are noisy: treat CPU and startup as trends, not exact numbers. "
-                f"⚠️ noisy: missed, but every attempt ran on a runner over {NOISY_SLOWDOWN:g}× slower than its best.\n"
+                f"⚠️ noisy: missed, but every attempt ran on a runner over {NOISY_SLOWDOWN:g}× slower than its best "
+                f"(startup: every batch of launches saw an empty SwiftUI app take over {NOISY_LAUNCH_SLOWDOWN:g}× "
+                f"its {REFERENCE_STARTUP_SECONDS:g} s on a quiet runner).\n"
             )
 
     failed = [r for r in rows if r[3] == "FAIL"]

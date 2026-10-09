@@ -1,17 +1,21 @@
 // Launches Procyon on one screen, times its first window, then samples its CPU time and memory
 // footprint (the "Memory" column of Activity Monitor). Prints one JSON object.
 //   swiftc -O scripts/bench-probe.swift -o bench-probe
-//   bench-probe <Procyon.app> <page> <warmup seconds> <duration seconds>
+//   bench-probe <Procyon.app> <page> <warmup seconds> <duration seconds> [reference app]
 // The page `menubar` opens the window, closes it and samples Procyon running in the menu bar only.
 // Alongside, it times a fixed piece of work once a second (`calibration_ns`): on a shared CI runner
 // the same work takes more CPU time when the host is busy or slower, which inflates Procyon's CPU too.
-// Used by scripts/bench-macos.py.
+// Given a reference app (scripts/bench-reference.swift, an empty SwiftUI window), it launches that
+// first and times its window too (`reference_startup_seconds`): how slow the machine is at launching
+// any app, which the CPU calibration does not see. Used by scripts/bench-macos.py.
 import AppKit
 import Darwin
 
 struct Result: Encodable {
     var page: String
     var startupSeconds: Double?
+    /// First window of the reference app, launched just before Procyon; nil without a reference app.
+    var referenceStartupSeconds: Double?
     var cpuPercentOfCore: Double
     var cpuPercentOfMachine: Double
     var memoryAverageBytes: UInt64
@@ -21,7 +25,7 @@ struct Result: Encodable {
     var calibrationNs: UInt64
 
     enum CodingKeys: CodingKey {
-        case page, startupSeconds, cpuPercentOfCore, cpuPercentOfMachine, memoryAverageBytes, memoryP90Bytes,
+        case page, startupSeconds, referenceStartupSeconds, cpuPercentOfCore, cpuPercentOfMachine, memoryAverageBytes, memoryP90Bytes,
             memoryPeakBytes, calibrationNs
     }
 
@@ -31,6 +35,7 @@ struct Result: Encodable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(page, forKey: .page)
         try container.encode(startupSeconds, forKey: .startupSeconds)
+        try container.encode(referenceStartupSeconds, forKey: .referenceStartupSeconds)
         try container.encode(cpuPercentOfCore, forKey: .cpuPercentOfCore)
         try container.encode(cpuPercentOfMachine, forKey: .cpuPercentOfMachine)
         try container.encode(memoryAverageBytes, forKey: .memoryAverageBytes)
@@ -41,11 +46,12 @@ struct Result: Encodable {
 }
 
 let arguments = CommandLine.arguments
-guard arguments.count == 5, let warmup = Double(arguments[3]), let duration = Double(arguments[4]) else {
-    FileHandle.standardError.write(Data("usage: bench-probe <Procyon.app> <page> <warmup s> <duration s>\n".utf8))
+guard arguments.count == 5 || arguments.count == 6, let warmup = Double(arguments[3]), let duration = Double(arguments[4]) else {
+    FileHandle.standardError.write(Data("usage: bench-probe <Procyon.app> <page> <warmup s> <duration s> [reference app]\n".utf8))
     exit(2)
 }
 let page = arguments[2]
+let reference = arguments.count == 6 ? arguments[5] : nil
 let menuBarOnly = page == "menubar"
 
 var timebase = mach_timebase_info_data_t()
@@ -91,43 +97,63 @@ func hasWindow(_ pid: pid_t) -> Bool {
     }
 }
 
-let configuration = NSWorkspace.OpenConfiguration()
-configuration.createsNewApplicationInstance = true
-configuration.activates = true
-configuration.addsToRecentItems = false
-// Argument-domain defaults: the spec's 1 s refresh, no admin helper, no restored window state.
-configuration.arguments = [
-    "-initialPage", menuBarOnly ? "overview" : page, "-refreshInterval", "1", "-fullAccessEnabled", "NO",
-    "-ApplePersistenceIgnoreState", "YES",
-]
-if menuBarOnly { configuration.arguments += ["-launchInMenuBar", "YES", "-menuBarEnabled", "YES"] }
+/// Opens a new instance of the app at `path` and times its first window (nil if none within 20 s).
+func launch(_ path: String, arguments: [String]) -> (app: NSRunningApplication, startup: Double?) {
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.createsNewApplicationInstance = true
+    configuration.activates = true
+    configuration.addsToRecentItems = false
+    configuration.arguments = arguments
+    let launched = now()
+    nonisolated(unsafe) var opened: NSRunningApplication?
+    nonisolated(unsafe) var openError: Error?
+    let done = DispatchSemaphore(value: 0)
+    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: configuration) {
+        opened = $0
+        openError = $1
+        done.signal()
+    }
+    done.wait()
+    guard let app = opened else {
+        FileHandle.standardError.write(Data("bench-probe: can't open \(path): \(String(describing: openError))\n".utf8))
+        exit(1)
+    }
+    var startup: Double?
+    while now() - launched < 20 {
+        if hasWindow(app.processIdentifier) {
+            startup = now() - launched
+            break
+        }
+        usleep(5_000)
+    }
+    return (app, startup)
+}
+
+func quit(_ app: NSRunningApplication, force: Bool) {
+    if force { app.forceTerminate() } else { app.terminate() }
+    for _ in 0..<30 where !app.isTerminated { Thread.sleep(forTimeInterval: 0.1) }
+    if !app.isTerminated { app.forceTerminate() }
+}
 
 // Calibrate before launching: a zero duration (startup only) has no sampling loop.
 var calibrations = (0..<5).map { _ in calibrate() }
-let launched = now()
-nonisolated(unsafe) var opened: NSRunningApplication?
-nonisolated(unsafe) var openError: Error?
-let done = DispatchSemaphore(value: 0)
-NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: arguments[1]), configuration: configuration) {
-    opened = $0
-    openError = $1
-    done.signal()
-}
-done.wait()
-guard let app = opened else {
-    FileHandle.standardError.write(Data("bench-probe: can't open the app: \(String(describing: openError))\n".utf8))
-    exit(1)
-}
-let pid = app.processIdentifier
 
-var startup: Double?
-while now() - launched < 20 {
-    if hasWindow(pid) {
-        startup = now() - launched
-        break
-    }
-    usleep(5_000)
+// The reference app first, under the same conditions Procyon is about to launch in.
+var referenceStartup: Double?
+if let reference {
+    let (app, startup) = launch(reference, arguments: ["-ApplePersistenceIgnoreState", "YES"])
+    referenceStartup = startup
+    quit(app, force: true)
 }
+
+// Argument-domain defaults: the spec's 1 s refresh, no admin helper, no restored window state.
+var procyonArguments = [
+    "-initialPage", menuBarOnly ? "overview" : page, "-refreshInterval", "1", "-fullAccessEnabled", "NO",
+    "-ApplePersistenceIgnoreState", "YES",
+]
+if menuBarOnly { procyonArguments += ["-launchInMenuBar", "YES", "-menuBarEnabled", "YES"] }
+let (app, startup) = launch(arguments[1], arguments: procyonArguments)
+let pid = app.processIdentifier
 if menuBarOnly {
     let shown = now()
     while hasWindow(pid), now() - shown < 10 { usleep(50_000) }
@@ -157,14 +183,12 @@ while now() - start < duration {
 let elapsed = now() - start
 
 // In the menu bar only, a plain quit request is cancelled (Procyon stays in the menu bar).
-if menuBarOnly { app.forceTerminate() } else { app.terminate() }
-for _ in 0..<30 where !app.isTerminated { Thread.sleep(forTimeInterval: 0.1) }
-if !app.isTerminated { app.forceTerminate() }
+quit(app, force: menuBarOnly)
 
 // A zero duration only times the launch.
 let cpu = footprints.isEmpty ? 0 : (last.cpu - first.cpu) / elapsed * 100
 let result = Result(
-    page: page, startupSeconds: startup, cpuPercentOfCore: cpu,
+    page: page, startupSeconds: startup, referenceStartupSeconds: referenceStartup, cpuPercentOfCore: cpu,
     cpuPercentOfMachine: cpu / Double(ProcessInfo.processInfo.activeProcessorCount),
     memoryAverageBytes: footprints.isEmpty ? 0 : footprints.reduce(0, +) / UInt64(footprints.count),
     memoryP90Bytes: footprints.isEmpty ? 0 : footprints.sorted()[(footprints.count - 1) * 9 / 10],

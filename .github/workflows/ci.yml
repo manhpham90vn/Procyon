@@ -80,8 +80,9 @@ jobs:
         # Fails the build when a non-functional target in docs/procyon-spec.md is missed. The script
         # builds dist/Procyon.app (and, on shard 1, the core CLI for the accuracy checks).
         # A missed CPU or startup target is measured up to 3 times: runner noise only ever adds CPU.
-        # A miss whose every attempt ran on a slow runner (timed by a fixed calibration workload)
-        # is a warning, not a failure. The menu bar only state still misses its targets (< 0.5% CPU,
+        # A miss whose every attempt ran on a slow runner (timed by a fixed calibration workload, and
+        # for startup by launching an empty SwiftUI app just before Procyon) is a warning, not a
+        # failure. The menu bar only state still misses its targets (< 0.5% CPU,
         # < 30 MB), so it is reported without failing the build until that is fixed.
         run: >-
           scripts/bench-macos.py --attempts 3 --known-misses menubar
