@@ -1,10 +1,10 @@
 {
   "$schema": "https://manhdev.click/manhdev.schema.json",
-  "tagline": "A lightweight, open-source task manager for macOS and Windows.",
+  "tagline": "A lightweight, open-source task manager for macOS, Windows and Linux.",
   "description": "See what every process is doing to your CPU, memory, disk, network, GPU and battery, with 24 hours of history and plain-language explanations of what is actually running.",
   "overview": [
     "Procyon is a task manager that explains what is happening instead of only listing processes. Live charts track CPU, memory, disk, network, GPU and battery, and 24 hours of history with spike analysis lets you find the moment your machine slowed down and the process that caused it.",
-    "Open a process to see its files and ports, with plain-language explanations for roughly 110 built-in macOS processes. Startup items, services, energy and battery health are managed from the same window, a menu bar widget keeps the key numbers in view, and a ⌘K command palette plus custom alerts keep everything one keystroke away. The app is open source and ships for macOS 14 and later and for 64-bit Windows 10 and 11."
+    "Open a process to see its files and ports, with plain-language explanations for roughly 110 built-in macOS processes. Startup items, services, energy and battery health are managed from the same window, a menu bar widget keeps the key numbers in view, and a ⌘K command palette plus custom alerts keep everything one keystroke away. The app is open source and ships for macOS 14 and later, 64-bit Windows 10 and 11, and Linux with GTK 4 (Ubuntu, Debian, Fedora)."
   ],
   "features": [
     { "title": "Live charts", "body": "CPU, memory, disk, network and GPU, updated in real time." },
@@ -13,7 +13,7 @@
     { "title": "Files & Ports", "body": "Inspect what a process has open, with explanations for ~110 macOS processes." },
     { "title": "Menu bar widget", "body": "Custom alerts and a ⌘K command palette." }
   ],
-  "requirements": "macOS 14 Sonoma or later (Apple Silicon and Intel) · Windows 10 1809+ / Windows 11 64-bit",
+  "requirements": "macOS 14 Sonoma or later (Apple Silicon and Intel) · Windows 10 1809+ / Windows 11 64-bit · Linux x86-64 with GTK 4.12+ (Ubuntu 24.04, Fedora 39, Debian 13 or newer)",
   "screenshot": {
     "src": "docs/screenshots/overview-light.png",
     "dark": "docs/screenshots/overview-dark.png",
@@ -30,10 +30,12 @@
   ],
   "downloads": [
     { "platform": "macos", "label": "macOS", "sub": "Disk image · .dmg", "asset": "^Procyon-[\\d.]+\\.dmg$", "file": "Procyon-{version}.dmg" },
-    { "platform": "windows", "label": "Windows", "sub": "Portable · .zip", "asset": "^Procyon-[\\d.]+-windows-x64\\.zip$", "file": "Procyon-{version}-windows-x64.zip" }
+    { "platform": "windows", "label": "Windows", "sub": "Portable · .zip", "asset": "^Procyon-[\\d.]+-windows-x64\\.zip$", "file": "Procyon-{version}-windows-x64.zip" },
+    { "platform": "linux", "label": "Linux", "sub": "Ubuntu / Debian · .deb", "asset": "^procyon_[\\d.]+_amd64\\.deb$", "file": "procyon_{version}_amd64.deb" },
+    { "platform": "linux", "label": "Linux", "sub": "Other distros · .tar.gz", "asset": "^Procyon-[\\d.]+-linux-x86_64\\.tar\\.gz$", "file": "Procyon-{version}-linux-x86_64.tar.gz" }
   ],
   "packageManagers": [
     { "platform": "macos", "label": "macOS · Homebrew", "command": "brew install --cask manhpham90vn/tap/procyon" }
   ],
-  "version": "v0.2.0"
+  "version": "v1.0.2"
 }
