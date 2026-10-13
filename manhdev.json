@@ -40,32 +40,32 @@
   "version": "v1.0.2",
   "translations": {
     "vi": {
-      "screenshot": { "alt": "Màn hình tổng quan của Procyon với biểu đồ CPU, bộ nhớ, ổ đĩa và mạng theo thời gian thực" },
-      "gallery": [
-        { "alt": "Màn hình Processes của Procyon", "caption": "Tiến trình: dạng phẳng, gom theo ứng dụng hoặc dạng cây. Tìm, sắp xếp, kết thúc, tạm dừng." },
-        { "alt": "Màn hình CPU của Procyon", "caption": "CPU: tổng và từng nhân, kèm nhiệt độ." },
-        { "alt": "Màn hình Energy của Procyon", "caption": "Năng lượng: điện năng từng ứng dụng dùng, tình trạng pin và thứ đang giữ máy Mac thức." },
-        { "alt": "Màn hình History của Procyon", "caption": "Lịch sử: 24 giờ của mọi chỉ số. Bấm vào một đỉnh đột biến để xem ứng dụng nào gây ra." }
-      ],
-      "tagline": "Trình quản lý tác vụ mã nguồn mở, gọn nhẹ cho macOS, Windows và Linux.",
-      "description": "Xem từng tiến trình đang tác động thế nào đến CPU, bộ nhớ, ổ đĩa, mạng, GPU và pin, kèm lịch sử 24 giờ và giải thích dễ hiểu về những gì thực sự đang chạy trên máy bạn.",
+      "tagline": "Task manager nhẹ, open source cho macOS, Windows và Linux.",
+      "description": "Xem từng process đang dùng bao nhiêu CPU, RAM, disk, network, GPU và pin, kèm lịch sử 24 giờ và giải thích dễ hiểu về những gì đang thực sự chạy trên máy.",
       "overview": [
-        "Procyon là trình quản lý tác vụ giải thích những gì đang diễn ra, chứ không chỉ liệt kê các tiến trình. Biểu đồ trực tiếp theo dõi CPU, bộ nhớ, ổ đĩa, mạng, GPU và pin, còn lịch sử 24 giờ cùng tính năng phân tích đột biến giúp bạn tìm ra đúng thời điểm máy bị chậm và tiến trình gây ra điều đó.",
-        "Mở một tiến trình để xem các tệp và cổng nó đang dùng, kèm giải thích dễ hiểu cho khoảng 110 tiến trình có sẵn của macOS. Mục khởi động, dịch vụ, năng lượng và tình trạng pin đều được quản lý ngay trong cùng một cửa sổ; widget trên thanh menu luôn hiển thị các chỉ số quan trọng, còn bảng lệnh ⌘K và cảnh báo tùy chỉnh giúp mọi thứ chỉ cách bạn một phím bấm. Ứng dụng là mã nguồn mở, hỗ trợ macOS 14 trở lên, Windows 10 và 11 bản 64-bit, và Linux có GTK 4 (Ubuntu, Debian, Fedora)."
+        "Procyon là task manager giải thích cho bạn chuyện gì đang xảy ra, chứ không chỉ liệt kê process. Biểu đồ realtime theo dõi CPU, RAM, disk, network, GPU và pin; lịch sử 24 giờ cùng tính năng phân tích spike giúp bạn tìm đúng thời điểm máy bị chậm và process gây ra nó.",
+        "Mở một process để xem các file và port nó đang mở, kèm giải thích dễ hiểu cho khoảng 110 process có sẵn của macOS. Startup item, service, mức tiêu thụ năng lượng và tình trạng pin đều quản lý trong cùng một cửa sổ; widget trên menu bar luôn hiện các chỉ số chính, còn command palette ⌘K và alert tuỳ chỉnh giúp mọi thứ chỉ cách một phím bấm. App open source, chạy trên macOS 14 trở lên, Windows 10 và 11 64-bit, và Linux có GTK 4 (Ubuntu, Debian, Fedora)."
       ],
       "features": [
-        { "title": "Biểu đồ trực tiếp", "body": "CPU, bộ nhớ, ổ đĩa, mạng và GPU, cập nhật theo thời gian thực." },
-        { "title": "Lịch sử 24 giờ", "body": "Phân tích đột biến để bạn tìm ra thứ đã làm máy chậm đi." },
-        { "title": "Khởi động & dịch vụ", "body": "Quản lý mục đăng nhập, năng lượng và tình trạng pin ở cùng một nơi." },
-        { "title": "Tệp & cổng", "body": "Xem một tiến trình đang mở những gì, kèm giải thích cho khoảng 110 tiến trình macOS." },
-        { "title": "Widget thanh menu", "body": "Cảnh báo tùy chỉnh và bảng lệnh ⌘K." }
+        { "title": "Biểu đồ realtime", "body": "CPU, RAM, disk, network và GPU, cập nhật liên tục." },
+        { "title": "Lịch sử 24 giờ", "body": "Phân tích spike để tìm ra thứ làm máy chậm." },
+        { "title": "Startup & service", "body": "Quản lý login item, năng lượng và tình trạng pin ở một chỗ." },
+        { "title": "File & port", "body": "Xem process đang mở những gì, có giải thích cho khoảng 110 process của macOS." },
+        { "title": "Widget trên menu bar", "body": "Alert tuỳ chỉnh và command palette ⌘K." }
       ],
-      "requirements": "macOS 14 Sonoma trở lên (Apple Silicon và Intel) · Windows 10 1809+ / Windows 11 64-bit · Linux x86-64 có GTK 4.12+ (Ubuntu 24.04, Fedora 39, Debian 13 hoặc mới hơn)",
+      "requirements": "macOS 14 Sonoma trở lên (Apple Silicon và Intel) · Windows 10 1809+ / Windows 11 64-bit · Linux x86-64 có GTK 4.12+ (Ubuntu 24.04, Fedora 39, Debian 13 trở lên)",
       "downloads": [
-        { "sub": "Ảnh đĩa · .dmg" },
-        { "sub": "Bản portable · .zip" },
         {},
-        { "sub": "Các bản phân phối khác · .tar.gz" }
+        {},
+        {},
+        { "sub": "Distro khác · .tar.gz" }
+      ],
+      "screenshot": { "alt": "Màn hình tổng quan của Procyon với biểu đồ CPU, RAM, disk và network realtime" },
+      "gallery": [
+        { "alt": "Màn hình Processes của Procyon", "caption": "Processes: dạng danh sách, nhóm theo app hoặc dạng cây. Tìm, sắp xếp, kill, suspend." },
+        { "alt": "Màn hình CPU của Procyon", "caption": "CPU: tổng và từng core, kèm nhiệt độ." },
+        { "alt": "Màn hình Energy của Procyon", "caption": "Energy: điện năng từng app tiêu thụ, tình trạng pin và thứ đang giữ Mac không sleep." },
+        { "alt": "Màn hình History của Procyon", "caption": "History: 24 giờ của mọi chỉ số. Bấm vào một spike để xem app nào gây ra." }
       ]
     }
   }
